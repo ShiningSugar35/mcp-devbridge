@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# PyInstaller / Inno Setup 产物
+/dist/
+/build/
+/release/
+packaging/*.toc
+packaging/*.pkg
+
+# 运行时二进制（从官方下载后放入 .tools/）
+/tools/
+.tools/
+
+# 引擎依赖与构建产物（third_party/codexpro 内 npm ci 重建）
+third_party/codexpro/node_modules/
+third_party/codexpro/dist/
+
+# 测试与日志
+.test-workspace/
+*.log
+pytest*.txt
+pyi_build*.log
+collect.txt
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 本地临时
+tmp/
