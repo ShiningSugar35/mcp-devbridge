@@ -1,0 +1,41 @@
+name: Release build (PyInstaller onedir)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (default: read from pyproject.toml)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: 3.12
+
+      - name: Install dependencies
+        run: uv pip install -e ".[dev,package]"
+
+      - name: Build onedir (PyInstaller)
+        run: python -m PyInstaller packaging/local-dev-mcp-bridge.spec --noconfirm --clean
+
+      - name: Smoke check artifact
+        run: |
+          if (-not (Test-Path "dist/MCPDevBridge/MCPDevBridge.exe")) { throw "artifact missing" }
+          Get-ChildItem dist/MCPDevBridge | Select-Object Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCPDevBridge-onedir
+          path: dist/MCPDevBridge
+          retention-days: 14

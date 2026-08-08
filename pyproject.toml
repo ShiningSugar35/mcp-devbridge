@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "local-dev-mcp-bridge"
+name = "mcp-devbridge"
 version = "0.1.0"
-description = "LocalDev MCP Bridge - local MCP development bridge with a stable Cloudflare Named Tunnel endpoint"
+description = "MCP DevBridge - desktop bridge that connects ChatGPT / Gemini MCP clients to local dev workspaces via a fixed Cloudflare Named Tunnel endpoint"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "LocalDev MCP Bridge" }]
+authors = [{ name = "MCP DevBridge" }]
 dependencies = [
     "mcp==2.0.0",
     "uvicorn>=0.35.0",

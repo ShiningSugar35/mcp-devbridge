@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from . import constants
 
 PermissionMode = Literal["read_only", "workspace", "system"]
 TunnelMode = Literal["named", "quick", "none"]
 AuthMode = Literal["bearer", "anonymous"]
 
-# Phase 5: Git 桌面参数（ProjectConfig 扩展，均可空；工具层暂只作配置存储）
 GIT_FIELD_LABELS: dict[str, str] = {
     "git_user_name": "Git 用户名",
     "git_user_email": "Git 邮箱",
@@ -45,6 +46,19 @@ TunnelMode = Literal["named", "quick", "none"]
 AuthMode = Literal["bearer", "anonymous"]
 
 
+def validate_port(value: int) -> int:
+    """Reject out-of-range ports (1-65535); used by all port fields."""
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 65535:
+        raise ValueError(f"端口必须是 1-65535 之间的整数（当前值：{value!r}）。")
+    return value
+
+
+def gateway_service_url(port: int) -> str:
+    """The Service URL Cloudflare must point at for the given gateway port."""
+    validate_port(port)
+    return f"http://localhost:{port}"
+
+
 class ProjectConfig(BaseModel):
     """Per-project persisted settings."""
 
@@ -59,13 +73,21 @@ class ProjectConfig(BaseModel):
     tunnel_mode: TunnelMode = "named"
     connection: str = "local"  # ConnectionMethod.value, 桌面连接方式（持久化）
     public_hostname: str = ""  # Cloudflare/ngrok 固定域名
-    local_port: int = 8765
     ignore_patterns: list[str] = Field(default_factory=list)
     git_user_name: str = ""  # Phase 5 Git 桌面参数（可空）
     git_user_email: str = ""
     default_push_remote: str = ""
     default_push_branch: str = ""
     last_used_at: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_port(cls, data: Any) -> Any:
+        # v0.1: ProjectConfig.local_port 语义含糊且从未生效，v0.2 移除；
+        # 端口改为全局（AppConfig），旧值不再使用，直接丢弃以保持兼容。
+        if isinstance(data, dict):
+            data.pop("local_port", None)
+        return data
 
 
 class AppConfig(BaseModel):
@@ -81,6 +103,16 @@ class AppConfig(BaseModel):
     exit_stop_managed: bool = False
     first_system_risk_accepted: bool = False
     first_run_version: int = 0
+    # 端口配置（集中维护默认值，见 constants.DEFAULT_*_PORT）：
+    gateway_port: int = constants.DEFAULT_GATEWAY_PORT
+    codexpro_port: int = constants.DEFAULT_CODEXPRO_PORT
+    windows_mcp_port: int = constants.DEFAULT_WINDOWS_MCP_PORT
+    legacy_backend_port: int = constants.DEFAULT_LEGACY_BACKEND_PORT
+
+    @field_validator("gateway_port", "codexpro_port", "windows_mcp_port", "legacy_backend_port")
+    @classmethod
+    def _check_port(cls, v: int) -> int:
+        return validate_port(v)
 
 
 class RuntimeConfig(BaseModel):
@@ -88,7 +120,7 @@ class RuntimeConfig(BaseModel):
 
     workspace: str
     permission_mode: PermissionMode = "workspace"
-    local_port: int = 2865
+    legacy_backend_port: int = constants.DEFAULT_LEGACY_BACKEND_PORT
     auth_mode: AuthMode = "bearer"
     allow_local_anonymous: bool = True
     require_public_bearer: bool = True
@@ -102,6 +134,29 @@ class RuntimeConfig(BaseModel):
     shell: str = "auto"
     ignore_patterns: list[str] = Field(default_factory=list)
     public_hostname: str = ""  # Named Tunnel 公网域名（Phase 4 transport_security 白名单）
+
+    @field_validator("legacy_backend_port")
+    @classmethod
+    def _check_backend_port(cls, v: int) -> int:
+        return validate_port(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_local_port(cls, data: Any) -> Any:
+        # v0.1 曾用 local_port（默认 2865）表达后端端口；v0.2 统一为
+        # legacy_backend_port（默认 8765）。旧配置迁移，用户自定义值保留。
+        if isinstance(data, dict) and "local_port" in data and "legacy_backend_port" not in data:
+            data["legacy_backend_port"] = data.pop("local_port")
+        return data
+
+    @property
+    def local_port(self) -> int:
+        """Deprecated alias kept for v0.1 callers; prefer legacy_backend_port."""
+        return self.legacy_backend_port
+
+    @local_port.setter
+    def local_port(self, value: int) -> None:
+        self.legacy_backend_port = value
 
     @field_validator("workspace")
     @classmethod

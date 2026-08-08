@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -42,10 +45,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, __version__
+from . import APP_NAME, __version__, constants
 from .app_state import ServiceCoordinator, StartOptions
 from .audit import AuditQuery, available_tool_names, query_logs
-from .backend_manager import current_access_token, regenerate_access_token
+from .backend_manager import current_access_token, port_in_use, regenerate_access_token
 from .config_store import (
     load_app_config,
     load_projects,
@@ -53,8 +56,8 @@ from .config_store import (
     suggest_commands,
     upsert_project,
 )
-from .engines import CODEXPRO_LOCAL_PORT, EngineState
-from .models import ProjectConfig, git_field_error
+from .engines import EngineState
+from .models import ProjectConfig, gateway_service_url, git_field_error
 from .oauth_provider import get_or_create_gemini_client
 from .secrets import SecretsStore, generate_token
 from .selftest import SelftestResult, run_selftest
@@ -275,12 +278,15 @@ class MainWindow(QMainWindow):
         self.start_btn = QPushButton("启动服务")
         self.stop_btn = QPushButton("停止服务")
         self.restart_btn = QPushButton("重启服务")
+        self.advanced_btn = QPushButton("高级设置…")
         self.start_btn.clicked.connect(self._start_service)
         self.stop_btn.clicked.connect(self._stop_service)
         self.restart_btn.clicked.connect(self._restart_service)
+        self.advanced_btn.clicked.connect(self._open_advanced_settings)
         ctrl_row.addWidget(self.start_btn)
         ctrl_row.addWidget(self.stop_btn)
         ctrl_row.addWidget(self.restart_btn)
+        ctrl_row.addWidget(self.advanced_btn)
         ctrl_row.addStretch(1)
         self.ctrl_layout.addWidget(ctrl_box)
 
@@ -290,7 +296,7 @@ class MainWindow(QMainWindow):
         self.ctrl_layout.addWidget(self.status_label)
 
         # --- token / URL
-        tok_box = QGroupBox("访问令牌与 MCP 地址")
+        tok_box = QGroupBox("访问令牌与 MCP 地址（Cloudflare 公网入口）")
         tok_layout = QVBoxLayout(tok_box)
         self.token_label = QLabel("令牌：未生成")
         self.token_label.setWordWrap(True)
@@ -312,6 +318,42 @@ class MainWindow(QMainWindow):
         tok_layout.addWidget(self.token_label)
         tok_layout.addWidget(self.url_label)
         tok_layout.addLayout(tok_row)
+
+        # --- gateway port (Cloudflare 公网入口端口)
+        port_row = QHBoxLayout()
+        port_row.addWidget(QLabel("公网入口端口（Gateway）:"))
+        self.gateway_port_spin = QSpinBox()
+        self.gateway_port_spin.setRange(1, 65535)
+        self.gateway_port_spin.setValue(self._app_config.gateway_port)
+        self.gateway_port_spin.setFixedWidth(90)
+        self.gateway_port_spin.valueChanged.connect(self._on_gateway_port_changed)
+        port_row.addWidget(self.gateway_port_spin)
+        port_check_btn = QPushButton("检测端口")
+        port_check_btn.clicked.connect(self._check_gateway_port)
+        port_row.addWidget(port_check_btn)
+        port_default_btn = QPushButton("恢复默认")
+        port_default_btn.clicked.connect(self._restore_default_gateway_port)
+        port_row.addWidget(port_default_btn)
+        port_row.addStretch(1)
+        tok_layout.addLayout(port_row)
+
+        self.service_url_label = QLabel(self._service_url_text())
+        self.service_url_label.setWordWrap(True)
+        self.service_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.service_url_label.setStyleSheet("color: gray;")
+        service_row = QHBoxLayout()
+        service_row.addWidget(self.service_url_label, 1)
+        self.service_url_copy_btn = QPushButton("复制 Service URL")
+        self.service_url_copy_btn.clicked.connect(lambda: self._copy_text(self._service_url_text()))
+        service_row.addWidget(self.service_url_copy_btn)
+        tok_layout.addLayout(service_row)
+
+        self.port_warn_label = QLabel("")
+        self.port_warn_label.setWordWrap(True)
+        self.port_warn_label.setStyleSheet("color: #c62828; font-weight: bold;")
+        self.port_warn_label.setVisible(False)
+        tok_layout.addWidget(self.port_warn_label)
+
         self.ctrl_layout.addWidget(tok_box)
 
         # --- self test
@@ -545,6 +587,9 @@ class MainWindow(QMainWindow):
             connection=self._selected_connection(),
             public_hostname=self.hostname_edit.text().strip(),
             tunnel_token=self._tunnel_token_value(),
+            gateway_port=self._app_config.gateway_port,
+            codexpro_port=self._app_config.codexpro_port,
+            windows_mcp_port=self._app_config.windows_mcp_port,
         )
 
     def _tunnel_token_value(self) -> str | None:
@@ -653,6 +698,10 @@ class MainWindow(QMainWindow):
             return
         self._save_project_settings()
         options = self._current_options()
+        conflict = self._ports_conflict(options)
+        if conflict:
+            QMessageBox.warning(self, "端口被占用", conflict)
+            return
         if not options.codex_token:
             QMessageBox.warning(self, "缺少令牌", "请先点击“重新生成令牌”创建访问令牌。")
             return
@@ -700,6 +749,10 @@ class MainWindow(QMainWindow):
             return
         self._save_project_settings()
         options = self._current_options()
+        conflict = self._ports_conflict(options)
+        if conflict:
+            QMessageBox.warning(self, "端口被占用", conflict)
+            return
         self._set_busy(True)
         self.status_label.setText("状态：正在重启…")
         self._append_log("正在重启服务…")
@@ -723,6 +776,99 @@ class MainWindow(QMainWindow):
         for btn in (self.start_btn, self.stop_btn, self.restart_btn):
             btn.setEnabled(not busy)
 
+    # ---------------------------------------------------- port settings
+    def _service_url_text(self) -> str:
+        return f"Cloudflare Service URL: {gateway_service_url(self.gateway_port_spin.value())}"
+
+    def _on_gateway_port_changed(self, _value: int) -> None:
+        self._app_config.gateway_port = self.gateway_port_spin.value()
+        save_app_config(self._app_config)
+        self._update_gateway_port_ui()
+
+    def _update_gateway_port_ui(self) -> None:
+        self.service_url_label.setText(self._service_url_text())
+        port = self.gateway_port_spin.value()
+        if port != constants.DEFAULT_GATEWAY_PORT:
+            self.port_warn_label.setText(
+                f"端口修改后，请同步将 Cloudflare Tunnel 的 Service URL 修改为 "
+                f"{gateway_service_url(port)}，否则公网连接会失败。"
+            )
+            self.port_warn_label.setVisible(True)
+        else:
+            self.port_warn_label.setVisible(False)
+
+    def _check_gateway_port(self) -> None:
+        port = self.gateway_port_spin.value()
+        if port_in_use(port):
+            QMessageBox.warning(
+                self,
+                "端口被占用",
+                f"端口 {port} 已被占用，启动开放公网连接会失败。\n"
+                "请关闭占用该端口的程序，或改用其他端口。",
+            )
+        else:
+            QMessageBox.information(self, "端口检测", f"端口 {port} 当前空闲，可以正常使用。")
+
+    def _restore_default_gateway_port(self) -> None:
+        self.gateway_port_spin.setValue(constants.DEFAULT_GATEWAY_PORT)
+        QMessageBox.information(
+            self,
+            "已恢复默认",
+            f"公网入口端口已恢复为默认值 {constants.DEFAULT_GATEWAY_PORT}。",
+        )
+
+    def _open_advanced_settings(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("高级设置 · 内部组件端口")
+        form = QFormLayout(dialog)
+        hint = QLabel(
+            "内部组件端口仅监听 127.0.0.1，默认无需修改。\n"
+            "修改后永久保存；正在运行时无法修改，请先停止服务。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray;")
+        form.addRow(hint)
+
+        gateway_spin = QSpinBox()
+        gateway_spin.setRange(1, 65535)
+        gateway_spin.setValue(self._app_config.gateway_port)
+        form.addRow("Gateway（公网入口，CF Service URL 端口）:", gateway_spin)
+        codex_spin = QSpinBox()
+        codex_spin.setRange(1, 65535)
+        codex_spin.setValue(self._app_config.codexpro_port)
+        form.addRow("CodexPro 引擎:", codex_spin)
+        windows_spin = QSpinBox()
+        windows_spin.setRange(1, 65535)
+        windows_spin.setValue(self._app_config.windows_mcp_port)
+        form.addRow("Windows-MCP 桥接:", windows_spin)
+        legacy_spin = QSpinBox()
+        legacy_spin.setRange(1, 65535)
+        legacy_spin.setValue(self._app_config.legacy_backend_port)
+        form.addRow("Legacy backend:", legacy_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._app_config.gateway_port = gateway_spin.value()
+        self._app_config.codexpro_port = codex_spin.value()
+        self._app_config.windows_mcp_port = windows_spin.value()
+        self._app_config.legacy_backend_port = legacy_spin.value()
+        save_app_config(self._app_config)
+        self.gateway_port_spin.setValue(self._app_config.gateway_port)
+        self._append_log("内部组件端口已保存，重启服务后生效。")
+
+    def _ports_conflict(self, options: StartOptions) -> str | None:
+        if port_in_use(options.codexpro_port):
+            return f"CodexPro 引擎端口 {options.codexpro_port} 已被占用。请先停止占用该端口的程序。"
+        if options.windows_enabled and port_in_use(options.windows_mcp_port):
+            return f"Windows 控制桥端口 {options.windows_mcp_port} 已被占用。请先停止占用该端口的程序。"
+        if options.connection != ConnectionMethod.LOCAL and port_in_use(options.gateway_port):
+            return f"Gateway 端口 {options.gateway_port} 已被占用，公网连接无法建立。请先停止占用该端口的程序。"
+        return None
+
     # -------------------------------------------------- coordinator events
     def _emit_coord_event(self, state: EngineState, message: str | None) -> None:
         self._signals.coord_event.emit(state, message)
@@ -733,7 +879,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- status / URL
     def _local_url(self) -> str:
-        return f"http://127.0.0.1:{CODEXPRO_LOCAL_PORT}/mcp"
+        return f"http://127.0.0.1:{self._app_config.codexpro_port}/mcp"
 
     def _display_url(self) -> str:
         return self.coord.public_url or self._local_url()
@@ -758,6 +904,10 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(running)
         self.restart_btn.setEnabled(not running)
         self.test_btn.setEnabled(running)
+        # 服务运行期间锁定端口输入（修改需先停止服务）
+        editable = not running
+        self.gateway_port_spin.setEnabled(editable)
+        self.advanced_btn.setEnabled(editable)
         self._refresh_url_ui()
 
     # ------------------------------------------------------ token helpers

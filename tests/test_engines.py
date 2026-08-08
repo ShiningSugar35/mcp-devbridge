@@ -10,6 +10,7 @@ import pytest
 from local_dev_mcp_bridge.engines import (
     CODEXPRO_LOCAL_PORT,
     WINDOWS_BRIDGE_PORT,
+    WINDOWS_MCP_PINNED_VERSION,
     CodexProManager,
     EngineState,
     ProcessLog,
@@ -89,6 +90,11 @@ class TestEnvAndCmd:
     def test_windows_token_included_when_passed(self) -> None:
         env = build_codex_env("C:/repo", permission_mode="workspace", token="x" * 32, windows_token="y" * 32)
         assert env["CODEXPRO_WINDOWS_BRIDGE_TOKEN"] == "y" * 32
+
+    def test_windows_profile_maps_permission_modes(self) -> None:
+        assert build_codex_env("C:/r", permission_mode="read_only", token="x" * 32)["CODEXPRO_WINDOWS_PROFILE"] == "desktop_ui"
+        assert build_codex_env("C:/r", permission_mode="workspace", token="x" * 32)["CODEXPRO_WINDOWS_PROFILE"] == "desktop_ui"
+        assert build_codex_env("C:/r", permission_mode="system", token="x" * 32)["CODEXPRO_WINDOWS_PROFILE"] == "system_full"
 
     def test_token_cap_length_can_be_shorter_than_secret_minimum(self) -> None:
         # this test documents that dummy tokens work for compile-only checks
@@ -174,6 +180,19 @@ class TestManagerErrors:
         with pytest.raises(SpawnError):
             manager.start("short")
         assert spawned == []
+
+    def test_windows_bridge_cmd_pins_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = WindowsBridgeManager(uvx_exe="uvx")
+        spawned: list[list[str]] = []
+        monkeypatch.setattr(manager, "_spawn", lambda cmd, env, secrets, log_file: spawned.append(cmd))
+        manager.start("t" * 32)
+        assert spawned
+        cmd = spawned[0]
+        assert cmd[0] == "uvx"
+        assert cmd[1] == "--from"
+        assert cmd[2] == f"windows-mcp=={WINDOWS_MCP_PINNED_VERSION}"
+        assert cmd[3] == "windows-mcp"
+        assert "serve" in cmd
 
     def test_manager_state_initialized_idle(self) -> None:
         manager = WindowsBridgeManager(uvx_exe="uvx")

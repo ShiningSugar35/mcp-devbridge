@@ -36,7 +36,7 @@
 
 ```bash
 # 进入项目
-cd D:\Environment\mcp\local-dev-mcp-bridge
+cd D:\Environment\mcp\mcp-devBridge
 # 创建 venv（Windows）并安装开发依赖
 python -m venv .venv
 .venv\Scripts\activate
@@ -52,12 +52,14 @@ PYTHONIOENCODING=utf-8 .venv\Scripts\python.exe -m pytest tests/ -q
 
 已锁定：Python 3.12.10、mcp==2.0.0、pydantic 2.13.4、starlette 1.4.1、uvicorn 0.52.1、PySide6 6.11.1、pytest 9.1.1、pywin32 312。
 ```
+Windows-MCP 版本锁定在 `engines.py` 的 `WINDOWS_MCP_PINNED_VERSION`（当前 `0.8.2`，
+`uvx --from windows-mcp==0.8.2 windows-mcp serve`）；升级必须先实测兼容再人工改常量。
 （其余依赖见 `pyproject.toml`）
 
 ## 五、目录结构
 
 ```
-local-dev-mcp-bridge/
+mcp-devBridge/
 ├── pyproject.toml            # 包定义、脚本入口、ruff/pyright/pytest 配置
 ├── README.md                 # 一句话 + 文档索引
 ├── AGENTS.md                 # ← 本文件
@@ -87,7 +89,7 @@ local-dev-mcp-bridge/
 │       ├── app_state.py        # 服务协调状态机 ServiceCoordinator（顺序、URL 固定性、故障清理；无 Qt）
 │       ├── backend_manager.py  # 后端子进程管理 /health 轮询（已归档，桌面改走 ServiceCoordinator）
 │       └── desktop_main.py     # Phase 3 桌面 UI（PySide6 单窗口，已接线 ServiceCoordinator）
-├── tests/                      # pytest 测试（当前 136 项全绿）
+├── tests/                      # pytest 测试（当前 212 项全绿）
 │   ├── conftest.py
 │   ├── test_fs.py · test_commands.py · test_git.py · test_config.py
 │   ├── test_mcp_integration.py · test_selftest.py
@@ -128,7 +130,7 @@ Phase 8 MCP OAuth（Gemini）      (代码完成：oauth_provider + gateway，te
 
 | 项 | 说明 |
 |---|---|
-| **默认端口不一致** | `constants.DEFAULT_LOCAL_PORT=8765`，但 `RuntimeConfig.local_port` 默认 `2865`；`ProjectConfig.local_port` 默认 `8765`。需统一（后端测试用 8877 为临时值）。 |
+| **端口默认值（已统一）** | 端口配置集中维护在 `constants.py` 的 `DEFAULT_GATEWAY_PORT=8786 / DEFAULT_CODEXPRO_PORT=8787 / DEFAULT_WINDOWS_MCP_PORT=28731 / DEFAULT_LEGACY_BACKEND_PORT=8765`（旧 `local_port`/`2865` 已废弃，`RuntimeConfig.local_port` 为兼容属性）。桌面「访问令牌与 MCP 地址」区可改 Gateway 端口（含检测/恢复默认/复制 Service URL），「高级设置…」改内部端口；服务运行期间锁定。旧配置自动迁移。 |
 | **DNS rebinding 防护** | 已落地（2026-08-08）：`server_factory.build_transport_security(rc.public_hostname)` 方案 B（防护保持开启，allowed_hosts 追加公网域名）；`RuntimeConfig.public_hostname` 经 config/`standalone --public-hostname` 注入；测试 12 项。剩余：真机公网验证（需 Cloudflare 账号）。 |
 | **standalone_server / desktop_main** | `standalone_server.py` 已存在但为 CLI；`desktop_main.py` 已实现并接线 `ServiceCoordinator`（引擎/隧道协调，见 app_state.py；backend_manager.py 已归档）。 |
 | **MCP 2.0.0 兼容注意** | `streamable_http_app` 返回的是 Starlette app；追加路由用 `app.add_route`，**不要**用 `Mount` 包裹（lifespan 失效）；中间件必须用纯 ASGI（`BaseHTTPMiddleware` 会缓冲 SSE 导致 500）。 |
@@ -137,7 +139,28 @@ Phase 8 MCP OAuth（Gemini）      (代码完成：oauth_provider + gateway，te
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
-- 2026-08-06 · 创建 AGENTS.md、项目架构.md、开发计划.md、进度验收.md。
+- 2026-08-09 · **端口配置统一（改动部署）**：端口默认值集中 `constants.DEFAULT_*_PORT`
+  （Gateway 8786 / CodexPro 8787 / Windows-MCP 28731 / Legacy backend 8765，废弃 2865 与
+  含义模糊的 local_port）；AppConfig 增加 4 个持久化端口字段（1-65535 校验、旧配置迁移）；
+  RuntimeConfig.local_port 改为兼容属性（底层 legacy_backend_port）。桌面主界面新增
+  「公网入口端口（Gateway）」（检测端口/恢复默认/复制 Service URL/占用提示/运行期锁定）
+  与「高级设置…」内部端口对话框；启动前端口占用预检（CodexPro/Windows 桥/桌面 UI 层含
+  Gateway），绝不偷偷换端口；CodexPro/Windows 桥端口贯穿 ServiceCoordinator 与
+  CODEXPRO_WINDOWS_BRIDGE_URL 注入。新增 tests/test_port_config.py 16 项。
+- 2026-08-09 · **Windows-MCP 锁版本 + 工具白名单**：`engines.py` 新增
+  `WINDOWS_MCP_PINNED_VERSION=0.8.2`，启动命令 `uvx --from windows-mcp==0.8.2 ...`；
+  `CODEXPRO_WINDOWS_PROFILE` 按权限模式注入（read_only/workspace→desktop_ui，
+  system→system_full）；`windowsBridge.ts` 真实强制白名单：`windows_call`
+  校验工具 ∈ 权限档白名单 **并且** ∈ 桥端实时 inventory，拒绝即报错不转发。
+- 2026-08-09 · **构建链与发布基础设施**：重写 `scripts/build.ps1`（UTF-8、pytest→ruff→
+  pyright→PyInstaller→ISCC，版本一致性检查，纯 ASCII 输出）；新增
+  `.github/workflows/ci.yml`（test/lint/typecheck/TS build）与 `release.yml`（PyInstaller
+  onedir artifact）；根 LICENSE（MIT）+ THIRD_PARTY_LICENSES.md 补充 Windows-MCP、
+  cloudflared、桌面运行时清单。
+- 2026-08-09 · **venv 目录迁移注意**：仓库从 `local-dev-mcp-bridge` 更名为
+  `mcp-devBridge` 后，`.venv` 的 editable `.pth` 仍指向旧路径导致子进程
+  `ModuleNotFoundError`；用 `uv pip install -e ".[dev,package]"` 重装即可。
+- 2026-08-08 · 创建 AGENTS.md、项目架构.md、开发计划.md、进度验收.md。
 - 2026-08-08 · 引擎/隧道/协调层入主目录并接入目录结构：engines.py、tunnel_manager.py、
   app_state.py（ServiceCoordinator）、desktop_main.py（Phase 3 桌面）；新增三套单元测试，
   全量 124 全绿。

@@ -87,9 +87,9 @@ class BackendManager:
         workspace = Path(rc.workspace)
         if not workspace.is_dir():
             raise BackendError(f"项目目录不存在：{workspace}，无法启动后端。")
-        if port_in_use(rc.local_port):
+        if port_in_use(rc.legacy_backend_port):
             raise BackendError(
-                f"端口 {rc.local_port} 已被占用，无法启动。请更换端口或先停止占用该端口的程序。"
+                f"端口 {rc.legacy_backend_port} 已被占用，无法启动。请更换端口或先停止占用该端口的程序。"
             )
         self.config_dir.mkdir(parents=True, exist_ok=True)
         save_runtime_config(rc, self._rc_path)
@@ -106,7 +106,7 @@ class BackendManager:
                 "--config",
                 str(self._rc_path),
                 "--port",
-                str(rc.local_port),
+                str(rc.legacy_backend_port),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -119,10 +119,10 @@ class BackendManager:
 
         if not wait_ready:
             return
-        if not self._wait_ready(rc.local_port):
+        if not self._wait_ready(rc.legacy_backend_port):
             output = self._drain_output()
             self.stop()
-            raise BackendError(f"后端启动失败（端口 {rc.local_port} 未就绪）。\n{output}")
+            raise BackendError(f"后端启动失败（端口 {rc.legacy_backend_port} 未就绪）。\n{output}")
 
     def _wait_ready(self, port: int) -> bool:
         deadline = time.monotonic() + self.timeout_seconds
@@ -176,7 +176,7 @@ class BackendManager:
         rc = self.current_config()
         if rc is None or not self.is_running:
             return None
-        return backend_health(f"http://127.0.0.1:{rc.local_port}")
+        return backend_health(f"http://127.0.0.1:{rc.legacy_backend_port}")
 
     def public_url(self, public_hostname: str) -> str:
         """https://<hostname>/mcp (fixed by the tunnel)."""

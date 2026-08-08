@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
         description="以命令行方式启动 MCP DevBridge 后端（无桌面界面）",
     )
     parser.add_argument("workspace", help="项目根目录")
-    parser.add_argument("--port", type=int, default=constants.DEFAULT_LOCAL_PORT)
+    parser.add_argument("--port", type=int, default=constants.DEFAULT_LEGACY_BACKEND_PORT)
     parser.add_argument("--mode", choices=["read_only", "workspace", "system"], default="workspace")
     parser.add_argument("--auth", choices=["bearer", "anonymous"], default="bearer")
     parser.add_argument(
@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     rc = RuntimeConfig(
         workspace=str(workspace),
         permission_mode=args.mode,
-        local_port=args.port,
+        legacy_backend_port=args.port,
         auth_mode=args.auth,
         public_hostname=args.public_hostname.strip(),
         allow_local_anonymous=True,

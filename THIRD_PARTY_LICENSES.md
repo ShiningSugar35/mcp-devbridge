@@ -11,6 +11,40 @@ distributed package next to each component (e.g. `LICENSE` files inside
 |---|---|---|---|
 | codexpro (engine, fork of `rebel0789/codexpro`) | 0.29.0 | MIT | `third_party/codexpro/FORK_NOTES.md` |
 
+## Runtime engine: Windows-MCP
+
+| Component | Version | License | Source |
+|---|---|---|---|
+| windows-mcp (桥接引擎，`uvx --from windows-mcp==0.8.2` 拉取，不随包分发) | 0.8.2 | MIT | https://github.com/CursorTouch/Windows-MCP |
+
+本软件运行时通过 `uvx --from windows-mcp==0.8.2 windows-mcp serve` 启动
+Windows-MCP 子进程（仅回环 127.0.0.1）。版本锁定在 `engines.py` 的
+`WINDOWS_MCP_PINNED_VERSION`；其许可证（MIT）见上游仓库。
+
+## Bundled binary: cloudflared
+
+| Component | Version | License | Source |
+|---|---|---|---|
+| cloudflared.exe (`.tools/`, 随安装包分发) | 2026.7.3 | 以官方仓库 LICENSE 为准 | https://github.com/cloudflare/cloudflared |
+
+## Desktop runtime (打包进 PyInstaller 产物)
+
+| Component | Version | License |
+|---|---|---|
+| PySide6 | 6.11.1 | LGPL-3.0-only (plus linking exception) |
+| Python | 3.12 | PSF-2.0 |
+| mcp (MCP Python SDK) | 2.0.0 | MIT |
+| uvicorn | 0.52.1 | BSD-3-Clause |
+| starlette | 1.4.1 | BSD-3-Clause |
+| pydantic | 2.13.4 | MIT |
+| httpx | 0.28.x | BSD-3-Clause |
+| platformdirs | 4.3.x | MIT |
+| psutil | 6.1.x | BSD-3-Clause |
+| pywin32 | 312 | PSF-2.0 |
+| PyInstaller (构建工具，产物为独立 onedir) | 6.11.x | GPL-2.0-or-later (bootloader 例外，产物不传染) |
+
+完整许可证文本随各组件分发（site-packages 内 `LICENSE`/`LICENSE.txt`）。
+
 ## Engine npm dependencies (bundled with `third_party/codexpro/node_modules`)
 
 | Package | Version | License |

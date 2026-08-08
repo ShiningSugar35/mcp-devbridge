@@ -334,7 +334,7 @@ def build_backend(rc: RuntimeConfig) -> tuple[MCPServer, Starlette, LocalDevTool
         return JSONResponse(
             {
                 "status": "ok",
-                "app": "local-dev-mcp-bridge",
+                "app": "mcp-devbridge",
                 "version": __version__,
                 "workspace": str(workspace),
                 "permission_mode": rc.permission_mode,

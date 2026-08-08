@@ -61,7 +61,7 @@ class TunnelManager(EngineManager):
         cloudflared_exe: str = "",
         ngrok_exe: str = "",
         log_dir: Path | None = None,
-        port: int = 8787,
+        port: int = constants.DEFAULT_CODEXPRO_PORT,
         timeout_seconds: float = 90.0,
     ) -> None:
         super().__init__("", "隧道")

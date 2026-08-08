@@ -37,8 +37,12 @@ from pathlib import Path
 
 from . import constants
 
-CODEXPRO_LOCAL_PORT = 8787
-WINDOWS_BRIDGE_PORT = 28731
+# 端口默认值集中维护（constants.DEFAULT_*_PORT）；下列为引擎层兼容别名。
+CODEXPRO_LOCAL_PORT = constants.DEFAULT_CODEXPRO_PORT
+WINDOWS_BRIDGE_PORT = constants.DEFAULT_WINDOWS_MCP_PORT
+# 锁定 Windows-MCP 发布版本：上游迭代频繁（0.8.5 起 requires-python >=3.14），
+# 白名单/协议均按锁定版本验证。升级必须通过兼容性测试后人工修改此常量。
+WINDOWS_MCP_PINNED_VERSION = "0.8.2"
 DEFAULT_ENGINE_START_TIMEOUT_SECONDS = 90
 DEFAULT_WINDOWS_START_TIMEOUT_SECONDS = 240  # first uvx run may fetch the package
 READY_POLL_INTERVAL_SECONDS = 0.15
@@ -252,6 +256,8 @@ def build_codex_env(
         "CODEXPRO_WRITE_MODE": write_mode,
         "CODEXPRO_BASH_MODE": bash_mode,
         "CODEXPRO_TOOL_MODE": tool,
+        # Windows 桥接权限档位：完全访问 → 全部工具；其余 → desktop_ui 白名单。
+        "CODEXPRO_WINDOWS_PROFILE": "system_full" if mode == "system" else "desktop_ui",
         "CODEXPRO_TUNNEL_MODE": "0",
         "CODEXPRO_HOST": "127.0.0.1",
     }
@@ -488,6 +494,8 @@ class WindowsBridgeManager(EngineManager):
             raise SpawnError("Windows 桥接令牌长度不足。")
         cmd = [
             self.executable,
+            "--from",
+            f"windows-mcp=={WINDOWS_MCP_PINNED_VERSION}",
             "windows-mcp",
             "serve",
             "--transport",
@@ -526,6 +534,7 @@ class WindowsBridgeManager(EngineManager):
 __all__ = [
     "CODEXPRO_LOCAL_PORT",
     "WINDOWS_BRIDGE_PORT",
+    "WINDOWS_MCP_PINNED_VERSION",
     "EngineState",
     "ProcessLog",
     "SpawnError",

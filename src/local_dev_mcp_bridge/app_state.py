@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .engines import (
-    CODEXPRO_LOCAL_PORT,
     CodexProManager,
     EngineState,
     SpawnError,
@@ -54,6 +53,20 @@ class StartOptions:
     public_hostname: str = ""
     cloudflare_config: Path | None = None
     tunnel_token: str | None = None
+    # 端口（默认值集中在 constants.DEFAULT_*_PORT）
+    gateway_port: int = 0
+    codexpro_port: int = 0
+    windows_mcp_port: int = 0
+
+    def __post_init__(self) -> None:
+        from . import constants as _c
+
+        if not self.gateway_port:
+            self.gateway_port = _c.DEFAULT_GATEWAY_PORT
+        if not self.codexpro_port:
+            self.codexpro_port = _c.DEFAULT_CODEXPRO_PORT
+        if not self.windows_mcp_port:
+            self.windows_mcp_port = _c.DEFAULT_WINDOWS_MCP_PORT
 
     @property
     def url_mutable(self) -> bool:
@@ -72,7 +85,7 @@ class ServiceCoordinator:
     ) -> None:
         self.codex = codex or CodexProManager()
         self.windows = windows or WindowsBridgeManager()
-        self.tunnel = tunnel or TunnelManager(port=CODEXPRO_LOCAL_PORT)
+        self.tunnel = tunnel or TunnelManager()
         self.gateway: OAuthGateway | None = None
         self._lock = threading.Lock()
         self._state = EngineState.IDLE
@@ -126,8 +139,8 @@ class ServiceCoordinator:
         return states
 
     def _start_gateway(self, options: StartOptions) -> None:
-        """Public modes get the OAuth gateway (loopback 8786) before the
-        tunnel is considered ready; the Cloudflare route targets its port."""
+        """Public modes get the OAuth gateway on the configured loopback port
+        before the tunnel is considered ready; the Cloudflare route targets it."""
         from .constants import ACCESS_TOKEN_CRED_NAME
         from .secrets import SecretsStore
 
@@ -138,25 +151,29 @@ class ServiceCoordinator:
         self.gateway = OAuthGateway(
             public_hostname=hostname,
             workspace=options.project_root,
-            upstream_url=f"http://127.0.0.1:{CODEXPRO_LOCAL_PORT}",
+            upstream_url=f"http://127.0.0.1:{options.codexpro_port}",
             upstream_legacy_token=lambda: SecretsStore().get(ACCESS_TOKEN_CRED_NAME),
         )
-        self.gateway.start()
-        if not self._wait_gateway_ready():
+        self.gateway.start(port=options.gateway_port)
+        if not self._wait_gateway_ready(options.gateway_port):
             self.gateway.stop()
             self.gateway = None
             raise SpawnError("OAuth 网关启动失败（端口被占用？）。")
 
     @staticmethod
-    def _wait_gateway_ready(timeout_seconds: float = 20.0) -> bool:
+    def _wait_gateway_ready(port: int, timeout_seconds: float = 20.0) -> bool:
         deadline = time.monotonic() + timeout_seconds
-        from .constants import GATEWAY_PORT
-
         while time.monotonic() < deadline:
-            if port_listening(GATEWAY_PORT):
+            if port_listening(port):
                 return True
             time.sleep(0.2)
         return False
+
+    @staticmethod
+    def _check_engine_port(name: str, port: int) -> None:
+        """Refuse to start on an occupied internal port (no silent retry)."""
+        if port_listening(port):
+            raise SpawnError(f"{name} 端口 {port} 已被占用，无法启动。请先停止占用该端口的程序。")
 
     # -------------------------------------------------------- lifecycle
     def start(self, options: StartOptions) -> None:
@@ -171,8 +188,16 @@ class ServiceCoordinator:
         if options.windows_enabled and len(options.windows_token) < 24:
             raise SpawnError("Windows 控制令牌未生成。")
 
+        # 端口占用预检（引擎子进程绑定失败即崩溃；占用即报错，绝不偷偷换端口）。
+        self._check_engine_port("CodexPro", options.codexpro_port)
+        if options.windows_enabled:
+            self._check_engine_port("Windows 控制桥", options.windows_mcp_port)
+
         self._set_state(EngineState.STARTING, "正在启动服务…")
         try:
+            self.codex.port = options.codexpro_port
+            self.windows.port = options.windows_mcp_port
+            self.tunnel.port = options.codexpro_port
             if options.connection != ConnectionMethod.LOCAL:
                 self.tunnel.start(
                     kind=options.connection,
@@ -191,6 +216,11 @@ class ServiceCoordinator:
                 options.codex_token,
                 permission_mode=options.permission_mode,
                 windows_token=options.windows_token if options.windows_enabled else None,
+                extra_env=(
+                    {"CODEXPRO_WINDOWS_BRIDGE_URL": f"http://127.0.0.1:{options.windows_mcp_port}/mcp"}
+                    if options.windows_enabled
+                    else None
+                ),
             )
             if not self.codex.wait_ready():
                 raise SpawnError(self.codex.error or "Codex 引擎启动失败。")

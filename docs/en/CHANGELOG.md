@@ -1,6 +1,29 @@
 # Changelog
 
-All dates 2026-08-06 … 2026-08-08 unless noted.
+All dates 2026-08-06 … 2026-08-09 unless noted.
+
+## 0.2.0-dev (2026-08-09) — port config + bridge hardening
+
+- **Unified port configuration**: single source of truth in
+  `constants.DEFAULT_GATEWAY_PORT/DEFAULT_CODEXPRO_PORT/DEFAULT_WINDOWS_MCP_PORT/
+  DEFAULT_LEGACY_BACKEND_PORT` (8786/8787/28731/8765). `AppConfig` gains four
+  persisted port fields (1-65535 validation, old-config migration);
+  `RuntimeConfig.local_port` → compat property over `legacy_backend_port`;
+  ambiguous `ProjectConfig.local_port` removed.
+- **Desktop UI**: Gateway port spinbox + check port / restore default /
+  copy Service URL + prominent warning to sync the Cloudflare Service URL;
+  「高级设置…」dialog for the four internal ports; inputs locked while the
+  service runs; startup pre-check refuses occupied ports (no silent retry).
+- **Windows-MCP pinned** to `0.8.2` (`uvx --from windows-mcp==0.8.2 …`
+  via `engines.WINDOWS_MCP_PINNED_VERSION`).
+- **Bridge tool allowlist enforcement**: `CODEXPRO_WINDOWS_PROFILE` derived
+  from the permission mode (`desktop_ui` allowlist vs `system_full`),
+  enforced in `windowsBridge.ts` against the live bridge inventory.
+- **Build & CI**: rewritten `scripts/build.ps1` (UTF-8, full chain
+  pytest→ruff→pyright→PyInstaller→ISCC + version consistency); GitHub Actions
+  `ci.yml` + `release.yml`; root `LICENSE` (MIT) and updated
+  `THIRD_PARTY_LICENSES.md` (Windows-MCP ≥0.8.2, cloudflared, desktop runtime).
+- New tests: `tests/test_port_config.py` (16).
 
 ## 0.1.0 — first release (in progress)
 

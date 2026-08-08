@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.port:
-        rc.local_port = args.port
+        rc.legacy_backend_port = args.port
 
     try:
         ensure_access_token()
@@ -51,10 +51,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[backend] 访问密钥初始化失败: {exc}", flush=True)
         return 3
 
-    if port_in_use(rc.local_port):
+    if port_in_use(rc.legacy_backend_port):
         print(
-            f"[backend] 端口 {rc.local_port} 已被占用。若为旧后端实例，请先停止服务；"
-            "否则请更换本地端口（local_port）。",
+            f"[backend] 端口 {rc.legacy_backend_port} 已被占用。若为旧后端实例，请先停止服务；"
+            "否则请更换本地端口（legacy_backend_port）。",
             flush=True,
         )
         return 4
@@ -62,11 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     mcp_server, app, tools = build_backend(rc)
     print(
         f"[backend] 启动: workspace={rc.workspace!r} mode={rc.permission_mode} "
-        f"port={rc.local_port}",
+        f"port={rc.legacy_backend_port}",
         flush=True,
     )
     try:
-        uvicorn.run(app, host="127.0.0.1", port=rc.local_port, log_level="warning", access_log=False)
+        uvicorn.run(app, host="127.0.0.1", port=rc.legacy_backend_port, log_level="warning", access_log=False)
     except KeyboardInterrupt:
         print("[backend] 收到中断，退出。", flush=True)
     except SystemExit:

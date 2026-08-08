@@ -29,6 +29,47 @@ export const WINDOWS_BRIDGE_TOOL_NAMES = [
 const DEFAULT_WINDOWS_BRIDGE_PORT = 28731;
 const SNAPSHOT_TTL_MS = 10_000;
 
+/**
+ * Windows 桥接权限档位（由引擎注入 CODEXPRO_WINDOWS_PROFILE）：
+ *   desktop_ui  - 只放行 UI 操作白名单（点击/输入/快照/应用等），系统级工具拒绝；
+ *   system_full - 放行桥端 inventory 中的全部工具（对应「完全访问」权限模式）。
+ * 所有档位都要求工具同时出现在桥端实时 inventory 中。
+ */
+type WindowsProfile = "desktop_ui" | "system_full";
+
+const DESKTOP_UI_ALLOWLIST = new Set([
+  "Click",
+  "DoubleClick",
+  "Type",
+  "HotKey",
+  "MouseMove",
+  "MouseScroll",
+  "ScrollScreen",
+  "App",
+  "Snapshot",
+  "Wait",
+  "GetScreenSize",
+  "CurrentCursorPosition",
+  "SearchWindow",
+  "List"
+]);
+
+function bridgeProfileFromEnv(): WindowsProfile {
+  const raw = (process.env.CODEXPRO_WINDOWS_PROFILE ?? "desktop_ui").trim().toLowerCase();
+  return raw === "system_full" ? "system_full" : "desktop_ui";
+}
+
+function profileAllowlist(profile: WindowsProfile): Set<string> {
+  if (profile === "system_full") return new Set<string>();
+  const allow = new Set(DESKTOP_UI_ALLOWLIST);
+  const extra = (process.env.CODEXPRO_WINDOWS_DESKTOP_ALLOW ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  extra.forEach((name) => allow.add(name));
+  return allow;
+}
+
 function bridgeUrlFromEnv(): string {
   const rawUrl = (process.env.CODEXPRO_WINDOWS_BRIDGE_URL ?? "").trim();
   if (rawUrl) {
@@ -85,11 +126,15 @@ class WindowsBridge {
   private readonly timeoutMs: number;
   private client: Client | undefined;
   private snapshot: BridgeSnapshot | undefined;
+  readonly profile: WindowsProfile;
+  readonly allowlist: Set<string>;
 
   constructor(url: string, token: string, timeoutMs: number) {
     this.url = url;
     this.token = token;
     this.timeoutMs = timeoutMs;
+    this.profile = bridgeProfileFromEnv();
+    this.allowlist = profileAllowlist(this.profile);
     if (this.token && Buffer.byteLength(this.token, "utf8") < 24) {
       throw new Error("CODEXPRO_WINDOWS_BRIDGE_TOKEN must be at least 24 bytes.");
     }
@@ -152,11 +197,28 @@ class WindowsBridge {
 
   async callTool(name: string, args: Record<string, unknown> = {}): Promise<BridgeCallResult> {
     if (!name || !name.trim()) throw new Error("windows_call requires a non-empty tool name.");
-    const snapshot = await this.status();
-    if (!snapshot.ok || !this.client) {
+
+    // Allowlist（profile ∩ 实时 inventory）：不满足直接拒绝，绝不转发。
+    const snapshot = await this.listTools();
+    if (!snapshot.ok || !this.client || !snapshot.tools) {
       throw new Error(`Windows bridge unavailable: ${snapshot.error ?? "connection failed"}`);
     }
-    const result = await this.client.callTool({ name: name.trim(), arguments: args });
+    const inventory = new Set(snapshot.tools.map((tool) => tool.name));
+    const toolName = name.trim();
+    if (!inventory.has(toolName)) {
+      throw new Error(
+        `tool "${toolName}" is not present in the Windows bridge inventory; refusing to call.`
+      );
+    }
+    if (this.profile === "desktop_ui" && !this.allowlist.has(toolName)) {
+      throw new Error(
+        `tool "${toolName}" is not allowed by the current windows profile "desktop_ui". ` +
+          `Allowed: ${[...this.allowlist].join(", ")}. ` +
+          `System-level tools require the "complete access" permission mode (profile system_full).`
+      );
+    }
+
+    const result = await this.client.callTool({ name: toolName, arguments: args });
     if (result.isError) throw new Error(`Windows bridge tool failed: ${name}`);
     return result as unknown as BridgeCallResult;
   }
@@ -254,16 +316,18 @@ export function registerWindowsBridgeTools(server: McpServer, _config: CodexProC
     name: "windows_backend_status",
     title: "Windows Backend Status",
     description:
-      "Check the local Windows-MCP bridge on its fixed internal port and report reachability, server name, version, and cached tool inventory. Never reveals bearer tokens or URLs.",
+      "Check the local Windows-MCP bridge on its fixed internal port and report reachability, server name, version, active permission profile, and cached tool inventory. Never reveals bearer tokens or URLs.",
     inputSchema: {},
     annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false },
     handler: async () => {
-      const snapshot = await getBridge().status();
+      const bridge = getBridge();
+      const snapshot = await bridge.status();
       const lines = [
         "# Windows Backend Status",
         "",
         `Status: ${snapshot.ok ? "connected" : "unavailable"}`,
         `Server: ${bridgeTitle(snapshot)}`,
+        `Permission profile: ${bridge.profile}`,
         ...(snapshot.error ? [`Error: ${snapshot.error}`] : []),
         `Tool inventory: ${snapshot.tools?.length ?? "cached later"}`,
         "",
@@ -277,6 +341,7 @@ export function registerWindowsBridgeTools(server: McpServer, _config: CodexProC
         error: snapshot.error ?? null,
         tools_count: snapshot.tools?.length ?? null,
         checked_at: snapshot.checkedAt,
+        profile: bridge.profile,
         bridge: { local_only: true, fixed_port: true }
       });
     }
@@ -315,12 +380,12 @@ export function registerWindowsBridgeTools(server: McpServer, _config: CodexProC
     name: "windows_call",
     title: "Windows Call",
     description:
-      "Invoke one tool on the local Windows bridge, for example Click, App, PowerShell, FileSystem, Snapshot, or Shortcut. Write and system-level operations are possible, so use this only with explicit user instruction.",
+      "Invoke one tool on the local Windows bridge, for example Click, App, Snapshot, or SearchWindow. Only tools allowed by the active permission profile (desktop_ui allowlist, or all inventory tools under system_full) can be called; anything else is refused before reaching the bridge. Use with explicit user instruction.",
     inputSchema: {
-      tool: z.string().min(1).max(160).describe("Windows-MCP tool name to invoke, for example Click, App, PowerShell, FileSystem."),
+      tool: z.string().min(1).max(160).describe("Windows-MCP tool name to invoke, for example Click, App, Snapshot, SearchWindow."),
       arguments: z.record(z.any()).optional().describe("Tool arguments accepted by the Windows-MCP tool.")
     },
-    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false },
+    annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false },
     handler: async (args: WindowsCallArguments) => {
       const parsed = WindowsCallArgumentsSchema.safeParse(args ?? {});
       if (!parsed.success) {
