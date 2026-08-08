@@ -56,6 +56,10 @@ class FakeEngine:
         self.stopped = True
         self.state = EngineState.IDLE
 
+    def stop(self, timeout_seconds: float = 8.0) -> None:
+        self.stopped = True
+        self.state = EngineState.IDLE
+
 
 @dataclass
 class Rig:

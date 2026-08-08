@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture()
-def backend_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+def backend_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LOCALDEV_MCP_NO_CREDENTIAL_MANAGER", "1")
     workspace = tmp_path / "工作区"
@@ -44,6 +45,7 @@ def backend_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if proc.poll() is not None:
+            assert proc.stdout is not None
             raise RuntimeError(f"backend exited early:\n{proc.stdout.read()}")
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as r:

@@ -12,6 +12,7 @@ import hashlib
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -67,7 +68,7 @@ class _Env:
         self.calls = calls
         self.client = TestClient(self.gateway.app, raise_server_exceptions=False, follow_redirects=False)
 
-    def authorize(self, client_id: str, redirect: str | None = None) -> httpx.Response:
+    def authorize(self, client_id: str, redirect: str | None = None):
         params = {
             "client_id": client_id,
             "redirect_uri": redirect or URI,
@@ -79,12 +80,12 @@ class _Env:
         }
         return self.client.get("/authorize", params=params)
 
-    def consent(self, location: str) -> httpx.Response:
+    def consent(self, location: str):
         cid = location.split("id=", 1)[1]
         return self.client.post("/consent", data={"id": cid, "decision": "allow"})
 
     def token(self, client_id: str, code: str, *, secret: str | None = None,
-              redirect: str | None = None) -> httpx.Response:
+              redirect: str | None = None):
         body = {
             "grant_type": "authorization_code",
             "client_id": client_id,
@@ -102,7 +103,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Env:
     return _Env(tmp_path, monkeypatch)
 
 
-def _code_from(r: httpx.Response) -> str:
+def _code_from(r: Any) -> str:
     assert r.status_code == 302, r.text
     return r.headers["location"].split("code=", 1)[1].split("&", 1)[0]
 

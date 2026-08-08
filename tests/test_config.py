@@ -51,7 +51,9 @@ class TestConfigStore:
         upsert_project(p1_updated)
         projects = load_projects()
         assert len(projects) == 2
-        assert get_project(r"D:\proj\甲").display_name == "甲2"
+        proj = get_project(r"D:\proj\甲")
+        assert proj is not None
+        assert proj.display_name == "甲2"
 
     def test_corrupt_config_file(self, isolated_config: Path) -> None:
         (isolated_config / "config.json").write_text("{ not valid json", encoding="utf-8")

@@ -118,15 +118,15 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         except Exception:
             return None
 
-    async def register_client(self, client: OAuthClientInformationFull) -> None:
-        if not client.redirect_uris:
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        if not client_info.redirect_uris:
             raise RegistrationError("invalid_client_metadata", "redirect_uris 不能为空")
-        for uri in client.redirect_uris:
+        for uri in client_info.redirect_uris:
             value = str(uri)
             if value.startswith("http://") and not value.startswith("http://localhost"):
                 raise RegistrationError("invalid_client_metadata", "仅允许 https 或 http://localhost 回调地址")
-        payload = client.model_dump(exclude_none=True, mode="json")
-        self.store.set(self._client_key(client.client_id), json.dumps(payload))
+        payload = client_info.model_dump(exclude_none=True, mode="json")
+        self.store.set(self._client_key(client_info.client_id), json.dumps(payload))
 
     # ---------------------------------------------------------- consent
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
@@ -191,9 +191,9 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
 
     # ------------------------------------------------------- authz code
     async def load_authorization_code(
-        self, client: OAuthClientInformationFull, code: str
+        self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
-        auth_code = self._codes.pop(code, None)  # single-use: removed on read
+        auth_code = self._codes.pop(authorization_code, None)  # single-use: removed on read
         if auth_code is None or self._now() > auth_code.expires_at:
             return None
         return auth_code
@@ -347,7 +347,10 @@ def get_or_create_gemini_client(
     if rotate_secret or not payload.get("client_secret"):
         payload["client_secret"] = _random_token()
         payload["client_id"] = client_id
-        store.set(record_key, json.dumps(payload, ensure_ascii=False))
+        if record_key is None:
+            record_key = LocalOAuthProvider._client_key(client_id)
+    assert record_key is not None
+    store.set(record_key, json.dumps(payload, ensure_ascii=False))
     store.set(lookup_key, json.dumps({"client_id": client_id}))
 
     # sanity: must round-trip through the same model get_client() uses

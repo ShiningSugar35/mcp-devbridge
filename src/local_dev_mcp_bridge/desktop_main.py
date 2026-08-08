@@ -17,11 +17,12 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -57,7 +58,7 @@ from .config_store import (
     upsert_project,
 )
 from .engines import EngineState
-from .models import ProjectConfig, gateway_service_url, git_field_error
+from .models import PermissionMode, ProjectConfig, gateway_service_url, git_field_error
 from .oauth_provider import get_or_create_gemini_client
 from .secrets import SecretsStore, generate_token
 from .selftest import SelftestResult, run_selftest
@@ -188,7 +189,7 @@ class MainWindow(QMainWindow):
         cfg_form.addRow("公网域名:", self.hostname_edit)
 
         self.cf_token_edit = QLineEdit()
-        self.cf_token_edit.setEchoMode(QLineEdit.Password)
+        self.cf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.cf_token_edit.setPlaceholderText("（可选）Cloudflare 隧道令牌；留空使用上次保存的令牌")
         if self._tunnel_token_default:
             self.cf_token_edit.setText(self._tunnel_token_default)
@@ -212,7 +213,7 @@ class MainWindow(QMainWindow):
         gemini_form.addRow("", self.gemini_gen_btn)
 
         self.gemini_id_label = QLabel("—")
-        self.gemini_id_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.gemini_id_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.gemini_id_copy = QPushButton("复制")
         id_row = QHBoxLayout()
         id_row.addWidget(self.gemini_id_label, 1)
@@ -220,7 +221,7 @@ class MainWindow(QMainWindow):
         gemini_form.addRow("Client ID:", id_row)
 
         self.gemini_secret_label = QLabel("—")
-        self.gemini_secret_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.gemini_secret_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.gemini_secret_copy = QPushButton("复制")
         secret_row = QHBoxLayout()
         secret_row.addWidget(self.gemini_secret_label, 1)
@@ -300,10 +301,10 @@ class MainWindow(QMainWindow):
         tok_layout = QVBoxLayout(tok_box)
         self.token_label = QLabel("令牌：未生成")
         self.token_label.setWordWrap(True)
-        self.token_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.token_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.url_label = QLabel("MCP 地址：http://127.0.0.1:8765/mcp（仅本机）")
         self.url_label.setWordWrap(True)
-        self.url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         tok_row = QHBoxLayout()
         self.token_copy_btn = QPushButton("复制令牌")
         self.token_regenerate_btn = QPushButton("重新生成令牌")
@@ -339,7 +340,7 @@ class MainWindow(QMainWindow):
 
         self.service_url_label = QLabel(self._service_url_text())
         self.service_url_label.setWordWrap(True)
-        self.service_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.service_url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.service_url_label.setStyleSheet("color: gray;")
         service_row = QHBoxLayout()
         service_row.addWidget(self.service_url_label, 1)
@@ -363,7 +364,7 @@ class MainWindow(QMainWindow):
         self.test_btn.clicked.connect(self._run_selftest)
         self.test_output = QLabel("（尚未运行）")
         self.test_output.setWordWrap(True)
-        self.test_output.setAlignment(Qt.AlignTop)
+        self.test_output.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.test_output.setFont(QFont("Consolas", 9))
         self.test_output.setMinimumHeight(160)
         test_box.addWidget(self.test_btn)
@@ -376,9 +377,9 @@ class MainWindow(QMainWindow):
         msg_v = QVBoxLayout(msg_group)
         self.log_view = QTableWidget(0, 3)
         self.log_view.setHorizontalHeaderLabels(["时间", "类型", "内容"])
-        self.log_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.log_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.log_view.verticalHeader().setVisible(False)
-        self.log_view.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.log_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         msg_v.addWidget(self.log_view)
         self.ctrl_layout.addWidget(msg_group)
 
@@ -402,9 +403,9 @@ class MainWindow(QMainWindow):
         proc_v.addLayout(row)
         self.proc_view = QTableWidget(0, 3)
         self.proc_view.setHorizontalHeaderLabels(["时间", "类型", "内容"])
-        self.proc_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.proc_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.proc_view.verticalHeader().setVisible(False)
-        self.proc_view.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.proc_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         proc_v.addWidget(self.proc_view)
         self.tabs.addTab(proc_tab, "进程日志")
 
@@ -430,9 +431,9 @@ class MainWindow(QMainWindow):
         audit_v.addLayout(row)
         self.audit_view = QTableWidget(0, 6)
         self.audit_view.setHorizontalHeaderLabels(["时间", "工具", "结果", "耗时 ms", "客户端", "参数摘要"])
-        self.audit_view.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.audit_view.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.audit_view.verticalHeader().setVisible(False)
-        self.audit_view.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.audit_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         audit_v.addWidget(self.audit_view)
         self.tabs.addTab(audit_tab, "审计日志")
         self._refresh_audit_tool_combo()
@@ -500,8 +501,11 @@ class MainWindow(QMainWindow):
         data = self.project_combo.itemData(idx)
         return str(data) if data else ""
 
-    def _selected_permission_mode(self) -> str:
-        return PERMISSION_MODES[self.permission_combo.currentIndex()][0]
+    def _selected_permission_mode(self) -> PermissionMode:
+        mode = PERMISSION_MODES[self.permission_combo.currentIndex()][0]
+        if mode in ("read_only", "workspace", "system"):
+            return cast(PermissionMode, mode)
+        return "workspace"
 
     def _selected_connection(self) -> ConnectionMethod:
         data = self.connection_combo.currentData()
@@ -610,9 +614,9 @@ class MainWindow(QMainWindow):
                 "系统权限风险确认",
                 "“完全访问”模式允许读写项目目录之外的文件、执行任意命令等高风险操作。\n"
                 "请确认您理解风险后继续（仅首次确认，之后不再提示）。",
-                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if answer == QMessageBox.No:
+            if answer == QMessageBox.StandardButton.No:
                 return True
             self._app_config.first_system_risk_accepted = True
             save_app_config(self._app_config)
@@ -622,9 +626,9 @@ class MainWindow(QMainWindow):
                 "Quick Tunnel 临时测试",
                 "Quick Tunnel 的公开地址每次启动都会变化，仅适合临时调试。\n"
                 "正式使用请选择 Cloudflare 固定地址或 ngrok 固定地址。\n\n是否继续？",
-                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if answer == QMessageBox.No:
+            if answer == QMessageBox.StandardButton.No:
                 return True
         return False
 
@@ -846,11 +850,13 @@ class MainWindow(QMainWindow):
         legacy_spin.setValue(self._app_config.legacy_backend_port)
         form.addRow("Legacy backend:", legacy_spin)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
-        if dialog.exec() != QDialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._app_config.gateway_port = gateway_spin.value()
         self._app_config.codexpro_port = codex_spin.value()

@@ -377,7 +377,9 @@ class CodexProManager(EngineManager):
         if env_dir:
             candidates.append(Path(env_dir))
         if getattr(sys, "frozen", False):
-            candidates.append(Path(sys._MEIPASS) / "third_party" / "codexpro" / "dist")
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                candidates.append(Path(meipass) / "third_party" / "codexpro" / "dist")
             candidates.append(Path(sys.executable).resolve().parent.parent / "third_party" / "codexpro" / "dist")
         candidates.append(Path(__file__).resolve().parents[2] / "third_party" / "codexpro" / "dist")
         if root:

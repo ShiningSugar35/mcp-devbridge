@@ -68,7 +68,7 @@ if (-not $SkipLint) {
     if ($LASTEXITCODE -ne 0) { throw "ruff failed" }
 
     Step "3b/6 typecheck (pyright)"
-    & $script:py -m pyright src tests
+    & $script:py -m pyright --pythonpath $script:py src tests
     if ($LASTEXITCODE -ne 0) { throw "pyright failed" }
 }
 
@@ -82,7 +82,7 @@ if ($LASTEXITCODE -ne 0) {
     else { & uv pip install --python $script:py "pyinstaller>=6.11" }
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller install failed" }
 }
-& $script:py -m PyInstaller packaging\local-dev-mcp-bridge.spec --noconfirm --clean 2>&1
+& $script:py -m PyInstaller packaging\local-dev-mcp-bridge.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 if (-not (Test-Path $script:appExe)) { throw "Build artifact missing: $script:appExe" }
 

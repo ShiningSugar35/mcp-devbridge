@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import constants
 
-PermissionMode = Literal["read_only", "workspace", "system"]
-TunnelMode = Literal["named", "quick", "none"]
-AuthMode = Literal["bearer", "anonymous"]
+type PermissionMode = Literal["read_only", "workspace", "system"]
+type TunnelMode = Literal["named", "quick", "none"]
+type AuthMode = Literal["bearer", "anonymous"]
 
 GIT_FIELD_LABELS: dict[str, str] = {
     "git_user_name": "Git 用户名",
@@ -40,10 +40,6 @@ def git_field_error(kind: str, value: str) -> str | None:
     if kind == "git_user_email" and ("@" not in value or "." not in value):
         return f"{label}格式不正确（示例: name@example.com）。"
     return None
-
-PermissionMode = Literal["read_only", "workspace", "system"]
-TunnelMode = Literal["named", "quick", "none"]
-AuthMode = Literal["bearer", "anonymous"]
 
 
 def validate_port(value: int) -> int:

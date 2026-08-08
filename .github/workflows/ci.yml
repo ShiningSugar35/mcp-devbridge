@@ -16,17 +16,25 @@ jobs:
         with:
           python-version: 3.12
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: 3.12
+
+      - name: Setup venv
+        run: uv venv
+
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev,package]"
+        run: uv pip install -p .venv -e ".[dev,package]"
 
       - name: Lint (ruff)
-        run: python -m ruff check src tests
+        run: .venv\Scripts\python.exe -m ruff check src tests
 
       - name: Typecheck (pyright)
-        run: python -m pyright src tests
+        run: .venv\Scripts\python.exe -m pyright --pythonpath .venv\Scripts\python.exe src tests
 
       - name: Unit tests (pytest)
-        run: python -m pytest tests/ -q --disable-warnings
+        run: .venv\Scripts\python.exe -m pytest tests/ -q --disable-warnings
 
       - name: CodexPro engine build (TypeScript)
         working-directory: third_party/codexpro

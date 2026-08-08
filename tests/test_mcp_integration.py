@@ -110,7 +110,7 @@ async def _mcp_call(session: ClientSession, name: str, arguments: dict | None = 
     result = await session.call_tool(name, arguments or {})
     return {
         "is_error": getattr(result, "isError", False) or getattr(result, "is_error", False),
-        "text": "".join(c.text for c in result.content if getattr(c, "type", "") == "text"),
+        "text": "".join(getattr(c, "text", "") for c in result.content),
     }
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from mcp.server.transport_security import TransportSecurityMiddleware
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -123,6 +123,6 @@ class TestBuildBackendWiring:
         rc = RuntimeConfig(workspace=str(Path.cwd()), public_hostname=HOSTNAME)
         build_backend(rc)
         settings = captured.get("transport_security")
-        assert settings is not None
+        assert isinstance(settings, TransportSecuritySettings)
         assert settings.enable_dns_rebinding_protection is True
         assert HOSTNAME in settings.allowed_hosts

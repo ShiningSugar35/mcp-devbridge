@@ -13,9 +13,9 @@ from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp
 
 from . import __version__, constants
 from .audit import AuditLogger
@@ -27,7 +27,11 @@ _REQUEST_ID_KEY = "request_id"
 
 # DNS rebinding protection stays ON; only the published tunnel domain is
 # added to the Host allow-list (方案 B). Loopback hosts are always allowed.
-TRANSPORT_LOOPBACK_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+TRANSPORT_LOOPBACK_HOSTS: tuple[str, str, str] = (
+    "127.0.0.1:*",
+    "localhost:*",
+    "[::1]:*",
+)
 
 
 def build_transport_security(public_hostname: str = "") -> TransportSecuritySettings:
@@ -287,7 +291,7 @@ class AuthMiddleware:
 # ---------------------------------------------------------------------------
 
 
-def build_backend(rc: RuntimeConfig) -> tuple[MCPServer, Starlette, LocalDevTools]:
+def build_backend(rc: RuntimeConfig) -> tuple[MCPServer[Any], ASGIApp, LocalDevTools]:
     """Build the MCP server, tools instance and the HTTP app for a runtime config."""
     workspace = Path(rc.workspace)
     tools = LocalDevTools(

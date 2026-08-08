@@ -58,4 +58,4 @@ include = ["src", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 reportMissingImports = true
-reportUnusedImports = true
+reportUnusedImport = true

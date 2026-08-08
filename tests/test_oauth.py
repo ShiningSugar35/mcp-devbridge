@@ -93,7 +93,7 @@ class _Env:
         resource: str | None = None,
         verifier: str = "verifier-verifier-verifier-verifier-123456",
         redirect: str = "https://client.example/callback",
-    ) -> httpx.Response:
+    ):
         params = {
             "client_id": client_id,
             "redirect_uri": redirect,
@@ -109,12 +109,12 @@ class _Env:
             params["resource"] = resource
         return self.client.get("/authorize", params=params)
 
-    def consent_allow(self, location: str) -> httpx.Response:
+    def consent_allow(self, location: str):
         assert "/consent?id=" in location, location
         cid = location.split("id=", 1)[1]
         return self.client.post("/consent", data={"id": cid, "decision": "allow"})
 
-    def consent_deny(self, location: str) -> httpx.Response:
+    def consent_deny(self, location: str):
         cid = location.split("id=", 1)[1]
         return self.client.post("/consent", data={"id": cid, "decision": "deny"})
 
@@ -128,7 +128,7 @@ class _Env:
         verifier: str = "verifier-verifier-verifier-verifier-123456",
         redirect: str = "https://client.example/callback",
         client_secret: str | None = None,
-    ) -> httpx.Response:
+    ):
         body = {
             "grant_type": grant_type,
             "client_id": client_id,

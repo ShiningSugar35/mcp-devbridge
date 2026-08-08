@@ -32,7 +32,7 @@ async def _run_selftest(url: str, token: str | None = None) -> SelftestResult:
 
     try:
         async with httpx.AsyncClient(headers=headers, timeout=15.0) as http_client, streamable_http_client(
-            url=url, http_client=http_client
+            url=url, http_client=http_client  # type: ignore[arg-type]
         ) as streams:
             read, write = streams
             async with ClientSession(read, write) as session:

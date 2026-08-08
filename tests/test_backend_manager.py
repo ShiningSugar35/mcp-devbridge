@@ -39,7 +39,7 @@ class TestBackendManager:
     def test_start_health_stop(self, _isolate: Path) -> None:
         workspace = _make_workspace(_isolate)
         mgr = BackendManager(config_dir=_isolate / "cfg")
-        rc = RuntimeConfig(workspace=str(workspace), local_port=_free_port())
+        rc = RuntimeConfig(workspace=str(workspace), legacy_backend_port=_free_port())
         assert not mgr.is_running
 
         mgr.start(rc, wait_ready=True)
@@ -58,12 +58,12 @@ class TestBackendManager:
         workspace = _make_workspace(_isolate)
         busy = _free_port()
         mgr = BackendManager(config_dir=_isolate / "cfg")
-        rc = RuntimeConfig(workspace=str(workspace), local_port=busy)
+        rc = RuntimeConfig(workspace=str(workspace), legacy_backend_port=busy)
         mgr.start(rc, wait_ready=True)
         assert port_in_use(busy)
 
         other = BackendManager(config_dir=_isolate / "cfg")
-        other_rc = RuntimeConfig(workspace=str(workspace), local_port=busy)
+        other_rc = RuntimeConfig(workspace=str(workspace), legacy_backend_port=busy)
         with pytest.raises(BackendError, match="已被占用"):
             other.start(other_rc)
         other.stop()
@@ -72,7 +72,7 @@ class TestBackendManager:
     def test_stop_idempotent(self, _isolate: Path) -> None:
         workspace = _make_workspace(_isolate)
         mgr = BackendManager(config_dir=_isolate / "cfg")
-        rc = RuntimeConfig(workspace=str(workspace), local_port=_free_port())
+        rc = RuntimeConfig(workspace=str(workspace), legacy_backend_port=_free_port())
         mgr.start(rc, wait_ready=True)
         mgr.stop()
         mgr.stop()
@@ -81,7 +81,7 @@ class TestBackendManager:
     def test_current_config_roundtrip(self, _isolate: Path) -> None:
         workspace = _make_workspace(_isolate)
         mgr = BackendManager(config_dir=_isolate / "cfg")
-        rc = RuntimeConfig(workspace=str(workspace), local_port=_free_port(), test_command="uv run pytest")
+        rc = RuntimeConfig(workspace=str(workspace), legacy_backend_port=_free_port(), test_command="uv run pytest")
         mgr.start(rc, wait_ready=False)
         loaded = mgr.current_config()
         assert loaded is not None
@@ -90,6 +90,6 @@ class TestBackendManager:
 
     def test_start_missing_workspace_fails(self, _isolate: Path) -> None:
         mgr = BackendManager(config_dir=_isolate / "cfg")
-        rc = RuntimeConfig(workspace=str(_isolate / "不存在"), local_port=_free_port())
+        rc = RuntimeConfig(workspace=str(_isolate / "不存在"), legacy_backend_port=_free_port())
         with pytest.raises(BackendError, match="项目目录不存在"):
             mgr.start(rc, wait_ready=True)
