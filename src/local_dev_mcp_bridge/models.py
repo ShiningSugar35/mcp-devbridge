@@ -98,6 +98,8 @@ class AppConfig(BaseModel):
     tunnel_auto_reconnect: bool = True
     exit_stop_managed: bool = False
     first_system_risk_accepted: bool = False
+    execution_profile: str = "developer"
+    full_system_risk_accepted: bool = False
     first_run_version: int = 0
     # 端口配置（集中维护默认值，见 constants.DEFAULT_*_PORT）：
     gateway_port: int = constants.DEFAULT_GATEWAY_PORT
@@ -128,6 +130,8 @@ class RuntimeConfig(BaseModel):
     typecheck_command: str = ""
     build_command: str = ""
     shell: str = "auto"
+    execution_profile: str = "developer"
+    full_system_confirmed: bool = False
     ignore_patterns: list[str] = Field(default_factory=list)
     public_hostname: str = ""  # Named Tunnel 公网域名（Phase 4 transport_security 白名单）
 

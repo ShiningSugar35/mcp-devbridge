@@ -14,17 +14,25 @@ import platform
 import re
 import shutil
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
 from mcp.types import ToolAnnotations
 
 from . import constants
+from .execution_profile import (
+    DEFAULT_EXECUTION_PROFILE,
+    ExecutionProfileError,
+    check_execution,
+    enforce_full_system_confirmation,
+)
 from .permissions import PermissionError as PermissionDeniedError  # noqa: A004 - domain error type
 from .permissions import PermissionMode, PermissionPolicy
 from .processes import ProcessRegistry
 from .shell import (
     detect_binaries,
+    get_shell_info,
     powershell_version,
 )
 from .shell import (
@@ -120,6 +128,8 @@ class LocalDevTools:
         typecheck_command: str = "",
         build_command: str = "",
         shell: str = "auto",
+        execution_profile: str = "developer",
+        full_system_confirmed: bool = False,
         ignore_patterns: list[str] | None = None,
         max_file_bytes: int | None = None,
         registry: ProcessRegistry | None = None,
@@ -131,6 +141,8 @@ class LocalDevTools:
         self.typecheck_command = typecheck_command
         self.build_command = build_command
         self.shell = shell
+        self.execution_profile = execution_profile or DEFAULT_EXECUTION_PROFILE
+        self.full_system_confirmed = full_system_confirmed
         self.ignore_patterns = list(ignore_patterns or [])
         self.max_file_bytes = max_file_bytes or constants.MAX_FILE_BYTES
         self.registry = registry or ProcessRegistry()
@@ -140,6 +152,25 @@ class LocalDevTools:
     # --------------------------- helpers -----------------------------------
     def _require(self, category: str) -> None:
         self.policy.require(category)
+
+    def _guard_command(self, command: str) -> None:
+        """Approve a command against the active execution profile.
+
+        Destructive/system-modifying commands are rejected in every profile;
+        ``full_system`` additionally requires the one-time confirmation done
+        in the desktop (or a ``--confirm-full-system`` CLI flag).
+        """
+        try:
+            enforce_full_system_confirmation(
+                self.execution_profile, confirmed=self.full_system_confirmed
+            )
+        except ExecutionProfileError as exc:
+            raise PermissionDeniedError(str(exc)) from None
+        allowed, reason = check_execution(command, self.execution_profile)
+        if not allowed:
+            raise PermissionDeniedError(
+                f"命令被执行档位拒绝：{reason}\n命令：{command[:200]}"
+            )
 
     def _resolve(self, path: str | None) -> Path:
         """Resolve user path; workspace-bounded unless system mode."""
@@ -264,6 +295,72 @@ class LocalDevTools:
             label = {"python": "Python", "git": "Git", "uv": "uv", "node": "Node", "npm": "npm"}[name]
             lines.append(f"{label}: {versions.get(name) or '未安装'}")
         lines.append(f"PowerShell: {powershell_version()}")
+        return "\n".join(lines)
+
+    def shell_self_test(self) -> str:
+        """快速检测 shell 与关键开发命令是否可运行（供 AI 与桌面自查）。
+
+        依次探测：默认 shell（可执行性）、python、git、pytest、pyright、ruff。
+        返回逐项 ✓ / ✗ 与整体结论。
+        """
+        self._require("info")
+        checks: list[tuple[str, str]] = []
+
+        shell_info = get_shell_info()
+        default = shell_info["default"]
+        assert isinstance(default, dict)
+        if default.get("executable"):
+            checks.append(
+                ("shell", f"默认 Shell: {default.get('name')} ({default.get('path')})")
+            )
+        else:
+            checks.append(("shell", f"警告：默认 Shell 不可执行 ({default.get('path')})"))
+
+        for name, arg, label in (
+            ("python", "--version", "python"),
+            ("git", "--version", "git"),
+            ("pytest", "--version", "pytest"),
+            ("pyright", "--version", "pyright"),
+        ):
+            if name in ("pytest", "pyright"):
+                # uv trampoline 直接调用可能失败；改经当前解释器 -m 探测
+                try:
+                    res = _run_program(
+                        sys.executable, ["-m", name, "--version"],
+                        cwd=self.workspace, timeout_seconds=30,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    checks.append((label, f"失败：{exc}"))
+                    continue
+                text = (res.stdout or res.stderr or "").strip().splitlines()
+                checks.append(
+                    (label, text[0] if text and res.exit_code == 0 else f"退出码 {res.exit_code}: {(text or ['(无输出)'])[0]}")
+                )
+                continue
+            exe = shutil.which(name)
+            if not exe:
+                checks.append((label, "未安装（当前 PATH 中找不到）"))
+                continue
+            try:
+                res = _run_program(exe, [arg], cwd=self.workspace, timeout_seconds=30)
+                text = (res.stdout or res.stderr or "").strip().splitlines()
+                detail = text[0] if text else "(无输出)"
+                checks.append((label, detail if res.exit_code == 0 else f"退出码 {res.exit_code}: {detail}"))
+            except Exception as exc:  # noqa: BLE001
+                checks.append((label, f"失败：{exc}"))
+
+        lines = [f"{label}: {detail}" for label, detail in checks]
+        ok = all(
+            not detail.startswith(("警告", "失败", "退出码"))
+            and not detail.startswith("未安装")
+            for _, detail in checks
+        )
+        lines.insert(
+            0,
+            "shell 自测：开发工具链 OK（Shell/Python/Git/pytest/pyright 可用）"
+            if ok
+            else "shell 自测：部分工具缺失或异常，AI 的 测试/检查 步骤可能失败。",
+        )
         return "\n".join(lines)
 
     def get_environment_variable(self, name: str) -> dict:
@@ -740,6 +837,7 @@ class LocalDevTools:
         self._require("command")
         if not command.strip():
             raise ValueError("command 不能为空。")
+        self._guard_command(command)
         timeout = _clamp_int(timeout_seconds, constants.DEFAULT_COMMAND_TIMEOUT_SECONDS)
         max_output = _clamp_int(max_output_chars, constants.DEFAULT_COMMAND_OUTPUT_CHARS, 200_000)
         workdir = self._resolve(cwd) if cwd.strip() else self.workspace
@@ -767,6 +865,8 @@ class LocalDevTools:
         self._require("command")
         if not executable.strip():
             raise ValueError("executable 不能为空。")
+        full = executable + (" " + " ".join(args or []) if args else "")
+        self._guard_command(full)
         timeout = _clamp_int(timeout_seconds, constants.DEFAULT_COMMAND_TIMEOUT_SECONDS)
         workdir = self._resolve(cwd) if cwd.strip() else self.workspace
         if not workdir.is_dir():
@@ -793,6 +893,7 @@ class LocalDevTools:
         self._require("process")
         if not executable.strip():
             raise ValueError("executable 不能为空。")
+        self._guard_command(executable + (" " + " ".join(args or []) if args else ""))
         workdir = self._resolve(cwd) if cwd.strip() else self.workspace
         if not workdir.is_dir():
             raise ValueError(f"工作目录不存在: {workdir}")

@@ -20,6 +20,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("workspace", help="项目根目录")
     parser.add_argument("--port", type=int, default=constants.DEFAULT_LEGACY_BACKEND_PORT)
     parser.add_argument("--mode", choices=["read_only", "workspace", "system"], default="workspace")
+    parser.add_argument(
+        "--execution-profile",
+        choices=[p for p in ("safe", "developer", "full_system")],
+        default="developer",
+        dest="execution_profile",
+        help="shell 执行档位（默认 developer：仅开发工具白名单）",
+    )
+    parser.add_argument(
+        "--confirm-full-system",
+        action="store_true",
+        dest="full_system_confirmed",
+        help="一次性确认 full_system 档位的系统级风险（仅该档位需要）",
+    )
     parser.add_argument("--auth", choices=["bearer", "anonymous"], default="bearer")
     parser.add_argument(
         "--public-hostname",
@@ -38,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     rc = RuntimeConfig(
         workspace=str(workspace),
         permission_mode=args.mode,
+        execution_profile=args.execution_profile,
+        full_system_confirmed=args.full_system_confirmed,
         legacy_backend_port=args.port,
         auth_mode=args.auth,
         public_hostname=args.public_hostname.strip(),

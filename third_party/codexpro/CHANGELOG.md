@@ -1,5 +1,13 @@
 # Changelog
 
+## unreleased (fork: mcp-devBridge)
+
+- Added `CODEXPRO_BASH_MODE=developer`: first-word allowlist for dev tools
+  (pytest / pyright / ruff / git with full subcommands / npm / pnpm / yarn /
+  bun / uv / python / tsc / eslint / cargo / go ...) with a hard block on
+  destructive commands (rm/del/erase/rd/rmdir, format/diskpart/shutdown/
+  reboot/reg delete ...). `off` / `safe` / `full` behaviour unchanged.
+
 ## Unreleased
 
 - Added saved additional projects with `codexpro settings set --project <path>`, session-local workspace selection through the existing `open_workspace` tool, and `--clear-projects` for removing the saved allowlist.

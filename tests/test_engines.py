@@ -73,9 +73,15 @@ class TestEnvAndCmd:
         assert env["CODEXPRO_BASH_MODE"] == "off"
         assert env["CODEXPRO_TOOL_MODE"] == "minimal"
 
-    def test_workspace_maps_to_safe_bash(self) -> None:
+    def test_workspace_maps_to_developer_bash(self) -> None:
         env = build_codex_env("C:/repo", permission_mode="workspace", token="x" * 32)
         assert env["CODEXPRO_WRITE_MODE"] == "workspace"
+        assert env["CODEXPRO_BASH_MODE"] == "developer"
+
+    def test_workspace_safe_profile_keeps_safe_bash(self) -> None:
+        env = build_codex_env(
+            "C:/repo", permission_mode="workspace", token="x" * 32, execution_profile="safe"
+        )
         assert env["CODEXPRO_BASH_MODE"] == "safe"
 
     def test_system_maps_to_full(self) -> None:

@@ -77,7 +77,8 @@ mcp-devBridge/
 │       ├── shell.py            # PowerShell 命令执行、进程树终止、环境探测
 │       ├── processes.py        # 受管进程注册（dev server 等）
 │       ├── permissions.py      # 权限：read_only / workspace / system
-│       ├── tools.py            # 33 个 MCP 工具实现
+│       ├── execution_profile.py # Shell 执行档位：safe / developer（默认）/ full_system + 危险命令拦截
+│       ├── tools.py            # 34 个 MCP 工具实现（含 shell_self_test）
 │       ├── server_factory.py   # MCPServer + Starlette app + 认证/审计/限速中间件
 │       ├── server_main.py      # 后端 CLI（--config / --port），被桌面进程拉起
 │       ├── standalone_server.py# 简化 CLI 单进程入口
@@ -89,7 +90,7 @@ mcp-devBridge/
 │       ├── app_state.py        # 服务协调状态机 ServiceCoordinator（顺序、URL 固定性、故障清理；无 Qt）
 │       ├── backend_manager.py  # 后端子进程管理 /health 轮询（已归档，桌面改走 ServiceCoordinator）
 │       └── desktop_main.py     # Phase 3 桌面 UI（PySide6 单窗口，已接线 ServiceCoordinator）
-├── tests/                      # pytest 测试（当前 212 项全绿）
+├── tests/                      # pytest 测试（当前 239 项全绿）
 │   ├── conftest.py
 │   ├── test_fs.py · test_commands.py · test_git.py · test_config.py
 │   ├── test_mcp_integration.py · test_selftest.py
@@ -138,6 +139,25 @@ Phase 8 MCP OAuth（Gemini）      (代码完成：oauth_provider + gateway，te
 ---
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
+
+- 2026-08-09 · **Shell 执行档位（safe / developer / full_system）+ Shell 管理**：
+  - 新模块 `execution_profile.py`：`check_execution(command, profile)` 纯策略判定；
+    - developer（默认）：首命令 ∈ 开发工具白名单（pytest/pyright/ruff/git/npm/uv/python/…）；
+    - safe：保留原项目内命令行为；full_system：任意命令，需一次性风险确认
+      （桌面「命令执行档位」下拉 + 首次确认对话框，`AppConfig.full_system_risk_accepted`）。
+    - 危险命令硬拦截（所有档位）：format/diskpart/shutdown/reboot/bcdedit/reg delete/msiexec…、
+      `rm -rf /`、`del /s C:`、`Remove-Item -Recurse C:\Windows` 等递归删盘/系统目录命令。
+  - `shell.py` 新增 ShellInfo / detect_shells() / default_shell() / get_shell_info()：
+    顺序 pwsh → Windows PowerShell → cmd → Git Bash；**WSL Bash 永不自动选择**（检测并报告）。
+  - `tools.py`：`LocalDevTools(execution_profile=, full_system_confirmed=)`，
+    run_command / run_program / start_process 均过档位校验；新增 MCP 工具 `shell_self_test`
+    （Shell + python/git/pytest/pyright 探测，pytest/pyright 走 `python -m` 规避 uv trampoline）。
+  - 配置贯通：AppConfig / RuntimeConfig / StartOptions / standalone_server `--execution-profile`
+    + `--confirm-full-system`；desktop_main「命令执行档位」下拉 + 「开发环境检测」按钮。
+  - CodexPro fork：`CODEXPRO_BASH_MODE` 新增 `developer`（bashOps.ts 首词白名单 + 危险拦截，
+    git 子命令完整允许；safe/off/full 不变），`build_codex_env` workspace+developer → developer。
+  - 测试：tests/test_execution_profile.py 26 项；全量 **239 全绿**（含 test_app_state，先停占用
+    8787 端口的运行实例再跑）；ruff/pyright 0 错误；fork `npm run build` 通过；build.ps1 全链通过。
 
 - 2026-08-09 · **端口配置统一（改动部署）**：端口默认值集中 `constants.DEFAULT_*_PORT`
   （Gateway 8786 / CodexPro 8787 / Windows-MCP 28731 / Legacy backend 8765，废弃 2865 与

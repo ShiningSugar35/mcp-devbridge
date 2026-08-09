@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_ANALYSIS_LIMITS, type AnalysisLimits } from "./analysis/types.js";
 
-export type BashMode = "off" | "safe" | "full";
+export type BashMode = "off" | "safe" | "developer" | "full";
 export type BashTranscriptMode = "compact" | "full";
 export type CodexSessionsMode = "off" | "metadata" | "read";
 export type WriteMode = "off" | "handoff" | "workspace";
@@ -153,7 +153,7 @@ function numberFrom(value: string | undefined, fallback: number, min: number, ma
 }
 
 function bashModeFrom(value: string | undefined): BashMode {
-  if (value === "off" || value === "safe" || value === "full") return value;
+  if (value === "off" || value === "safe" || value === "developer" || value === "full") return value;
   return "safe";
 }
 

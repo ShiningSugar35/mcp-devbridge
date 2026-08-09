@@ -29,6 +29,100 @@ class CommandResult:
     original_stderr_len: int
 
 
+# ---------------------------------------------------------------------------
+# Shell detection
+# ---------------------------------------------------------------------------
+
+_WINDOWS_POWERSHELL = Path(
+    os.environ.get("WINDIR", r"C:\Windows")
+) / r"System32\WindowsPowerShell\v1.0\powershell.exe"
+_WINDOWS_CMD = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32\\cmd.exe"
+_WINDOWS_BASH = Path(os.environ.get("WINDIR", r"C:\Windows")) / r"System32\bash.exe"
+
+
+@dataclass(frozen=True)
+class ShellInfo:
+    name: str          # 展示名：pwsh / Windows PowerShell / cmd / Git Bash / WSL Bash
+    path: str          # 可执行文件路径（或空表示未安装）
+    kind: str          # pwsh | windows_powershell | cmd | bash | wsl_bash
+    required_for: bool = True
+
+    @property
+    def executable(self) -> bool:
+        return bool(self.path) and os.path.isfile(self.path)
+
+    def to_dict(self) -> dict[str, object]:
+        return {"name": self.name, "path": self.path, "kind": self.kind,
+                "executable": self.executable}
+
+
+def detect_shells() -> list[ShellInfo]:
+    """Detect every shell available on this machine, in preference order.
+
+    WSL environments stay out of the default list (see ``default_shell``) but
+    are still reported in ``get_shell_info`` so the user can switch.
+    """
+    shells: list[ShellInfo] = []
+    for name, kind, hint in (
+        ("pwsh", "pwsh", "pwsh"),
+        ("Windows PowerShell", "windows_powershell", str(_WINDOWS_POWERSHELL)),
+        ("cmd", "cmd", str(_WINDOWS_CMD)),
+        ("Git Bash", "bash", None),
+        ("WSL Bash", "wsl", str(_WINDOWS_BASH)),
+    ):
+        if kind == "pwsh":
+            path = shutil.which("pwsh") or ""
+        elif kind == "bash":
+            path = shutil.which("bash") or ""
+            if path and Path(path).resolve() == _WINDOWS_BASH.resolve():
+                path = ""  # 就是 WSL 启动器本身，单独列在 wsl 项里
+        elif kind == "wsl":
+            path = hint if hint and os.path.isfile(hint) else (shutil.which("wsl") or "")
+        elif kind == "windows_powershell":
+            path = hint
+        elif kind == "cmd":
+            path = hint
+            if path is None or not os.path.isfile(path):
+                continue
+        else:
+            path = ""
+        if not path:
+            continue
+        shells.append(ShellInfo(name=name, path=path, kind=kind))
+    return shells
+
+
+def default_shell() -> ShellInfo:
+    """The shell a new / auto-configured session will use.
+
+    Preference order: PowerShell 7 (pwsh) → Windows PowerShell → cmd →
+    non-WSL bash (Git Bash). WSL Bash is never auto-chosen because its native
+    Linux toolchain cannot run the Windows project scripts; it remains
+    selectable explicitly (prefer_user_shell stays green).
+    """
+    shells = detect_shells()
+    order = {"pwsh": 0, "windows_powershell": 1, "cmd": 2, "bash": 3}
+    best: ShellInfo | None = None
+    for shell in shells:
+        if shell.kind == "wsl":
+            continue
+        if best is None or order.get(shell.kind, 99) < order.get(best.kind, 99):
+            best = shell
+    if best is not None:
+        return best
+    return ShellInfo(name="cmd", path=str(_WINDOWS_CMD), kind="cmd")
+
+
+def get_shell_info() -> dict[str, object]:
+    """JSON-friendly report used by MCP tools, the GUI and the self-test."""
+    default = default_shell()
+    detected = [shell.to_dict() for shell in detect_shells()]
+    return {
+        "default": default.to_dict(),
+        "detected": detected,
+    }
+
+
 def find_powershell() -> str:
     """Prefer PowerShell 7 (pwsh.exe), fall back to Windows PowerShell."""
     for candidate in ("pwsh", "powershell"):

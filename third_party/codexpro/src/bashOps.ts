@@ -113,6 +113,39 @@ const SAFE_BLOCKED_PATTERNS = [
   /[\r\n]/
 ];
 
+// "developer" 档：只允许开发工具作为第一条命令（pytest / pyright / ruff / git
+// 完整子命令 / npm / pnpm / yarn / bun / uv / python ...）。仍拦截一切系统破坏
+// 或危险命令。与 safe 档的区别：allowlist 从“固定子命令前缀”放宽为“命令首词”，
+// 允许 git checkout / git push / npm install 等日常开发命令。
+const DEVELOPER_ALLOWED_BASES = new Set<string>([
+  "pwd", "ls", "dir", "echo", "cd", "cat", "type", "clear",
+  "python", "python3", "py", "uv", "uvx", "pip", "pip3",
+  "pytest", "pyright", "ruff", "mypy",
+  "node", "node.exe", "npm", "npx", "pnpm", "yarn", "bun",
+  "tsc", "npx", "eslint", "biome",
+  "git", "git.exe", "bash",
+  "pwsh", "powershell",
+  "dotnet", "cargo", "go", "java", "mvn", "gradle",
+]);
+
+const DEVELOPER_BLOCKED_PATTERNS = [
+  /(^|\s)(rm|del|erase|rd|rmdir)\s+/,
+  /(^|\s)(mv|move|cp|ren)\s+/i,
+  /(^|\s)(dd|format|diskpart|shutdown|reboot|bcdedit|diskperf)\b/i,
+  /(^|\s)(sudo|reg\s+delete|chkdsk)\b/i,
+  /(^|\s)(kill|taskkill|pkill)\s+/i,
+  /(^|\s)(\.\.(\/|\\))/,
+  /\$/,
+  /[;&|<>`]/,
+  /[\r\n]/
+];
+
+function firstBase(command: string): string {
+  const word = command.trim().split(/\s+/)[0] ?? "";
+  const cleaned = word.replace(/^['"]|['"]$/g, "");
+  return cleaned.split(/[\\/]/).pop()!.toLowerCase();
+}
+
 function compact(command: string): string {
   return command.trim().replace(/\s+/g, " ");
 }
@@ -130,17 +163,36 @@ function isAllowedPackageScript(command: string): boolean {
 
 function assertSafeCommand(config: CodexProConfig, command: string): void {
   if (config.bashMode === "off") {
-    throw new CodexProError("bash tool is disabled. Start with CODEXPRO_BASH_MODE=safe or CODEXPRO_BASH_MODE=full to enable it.");
+    throw new CodexProError("bash tool is disabled. Start with CODEXPRO_BASH_MODE=safe, developer, or full to enable it.");
   }
   if (config.bashMode === "full") return;
 
   const raw = command.trim();
   const normalized = compact(command);
+
+  if (config.bashMode === "developer") {
+    for (const pattern of DEVELOPER_BLOCKED_PATTERNS) {
+      if (pattern.test(raw) || pattern.test(normalized)) {
+        throw new CodexProError(
+          `Command is blocked in CODEXPRO_BASH_MODE=developer: ${normalized}\n` +
+            "Developer profile blocks system-destructive commands (format / diskpart / rm / del / reg delete / shutdown ...)."
+        );
+      }
+    }
+    const base = firstBase(normalized);
+    if (base && DEVELOPER_ALLOWED_BASES.has(base)) return;
+    throw new CodexProError(
+      `Command is not in the developer allowlist: ${normalized}\n` +
+        "developer 档只允许开发工具（pytest / pyright / ruff / git / npm / pnpm / yarn / bun / uv / python / node / tsc / eslint / cargo / go ...）。" +
+        "切换档位或使用文本/文件专用工具完成此操作。"
+    );
+  }
+
   for (const pattern of SAFE_BLOCKED_PATTERNS) {
     if (pattern.test(raw) || pattern.test(normalized)) {
       throw new CodexProError(
         `Command is blocked in CODEXPRO_BASH_MODE=safe: ${normalized}\n` +
-          "Use separate read/search/git tools, or restart with CODEXPRO_BASH_MODE=full only for trusted repos."
+          "Use separate read/search/git tools, or restart with CODEXPRO_BASH_MODE=developer/full only for trusted repos."
       );
     }
   }
@@ -148,7 +200,7 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
     throw new CodexProError(
       `Command is not in the safe bash allowlist: ${normalized}\n` +
         "Allowed examples: ls, find, git status, git diff, npm test, npm run typecheck, npm run build:clients, pytest, go test, cargo test. Use read/search tools for file contents. " +
-        "Use CODEXPRO_BASH_MODE=full for trusted local automation."
+        "Use CODEXPRO_BASH_MODE=developer for read/test/lint commands or CODEXPRO_BASH_MODE=full for trusted local automation."
     );
   }
 }

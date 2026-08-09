@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -62,9 +63,16 @@ from .models import PermissionMode, ProjectConfig, gateway_service_url, git_fiel
 from .oauth_provider import get_or_create_gemini_client
 from .secrets import SecretsStore, generate_token
 from .selftest import SelftestResult, run_selftest
+from .shell import get_shell_info
+from .shell import run_program as _run_program
 from .tunnel_manager import ConnectionMethod
 
 PERMISSION_MODES = [("workspace", "项目全权限（默认）"), ("read_only", "只读模式"), ("system", "完全访问（危险）")]
+EXECUTION_PROFILES = [
+    ("developer", "developer：开发工具白名单（推荐）"),
+    ("safe", "safe：保留原有项目内命令行为"),
+    ("full_system", "full_system：任意命令（危险，需一次性确认）"),
+]
 CONNECTION_METHODS = [
     ConnectionMethod.LOCAL,
     ConnectionMethod.CLOUDFLARE,
@@ -177,6 +185,24 @@ class MainWindow(QMainWindow):
         for _value, label in PERMISSION_MODES:
             self.permission_combo.addItem(label)
         cfg_form.addRow("权限模式:", self.permission_combo)
+
+        self.profile_combo = QComboBox()
+        for _value, label in EXECUTION_PROFILES:
+            self.profile_combo.addItem(label)
+        saved_profile = (self._app_config.execution_profile or "developer").lower()
+        profile_idx = [p[0] for p in EXECUTION_PROFILES].index(saved_profile) if saved_profile in [p[0] for p in EXECUTION_PROFILES] else 0
+        self.profile_combo.setCurrentIndex(profile_idx)
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        cfg_form.addRow("命令执行档位:", self.profile_combo)
+        profile_hint = QLabel(
+            "developer：仅允许开发工具（pytest/pyright/ruff/git/npm/uv…），"
+            "并拦截格式化/删盘等危险命令（推荐）。\n"
+            "safe：保留原有项目内命令行为。\n"
+            "full_system：任意命令，启用需一次性风险确认。"
+        )
+        profile_hint.setStyleSheet("color: gray;")
+        profile_hint.setWordWrap(True)
+        cfg_form.addRow("", profile_hint)
 
         self.connection_combo = QComboBox()
         for method in CONNECTION_METHODS:
@@ -360,14 +386,20 @@ class MainWindow(QMainWindow):
         # --- self test
         test_group = QGroupBox("连接自测")
         test_box = QVBoxLayout(test_group)
+        btn_row = QHBoxLayout()
         self.test_btn = QPushButton("运行连接自测")
         self.test_btn.clicked.connect(self._run_selftest)
+        self.env_btn = QPushButton("开发环境检测")
+        self.env_btn.setToolTip("检测默认 Shell 以及 python/git/pytest/pyright 是否可调用")
+        self.env_btn.clicked.connect(self._run_env_check)
+        btn_row.addWidget(self.test_btn)
+        btn_row.addWidget(self.env_btn)
         self.test_output = QLabel("（尚未运行）")
         self.test_output.setWordWrap(True)
         self.test_output.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.test_output.setFont(QFont("Consolas", 9))
-        self.test_output.setMinimumHeight(160)
-        test_box.addWidget(self.test_btn)
+        self.test_output.setMinimumHeight(190)
+        test_box.addLayout(btn_row)
         test_box.addWidget(self.test_output)
         self.ctrl_layout.addWidget(test_group)
 
@@ -507,6 +539,67 @@ class MainWindow(QMainWindow):
             return cast(PermissionMode, mode)
         return "workspace"
 
+    def _selected_execution_profile(self) -> str:
+        idx = self.profile_combo.currentIndex()
+        if 0 <= idx < len(EXECUTION_PROFILES):
+            return EXECUTION_PROFILES[idx][0]
+        return (self._app_config.execution_profile or "developer").lower()
+
+    def _on_profile_changed(self) -> None:
+        profile = self._selected_execution_profile()
+        if profile != self._app_config.execution_profile:
+            self._app_config.execution_profile = profile
+            save_app_config(self._app_config)
+            self._append_log(f"命令执行档位已切换: {profile}")
+
+    def _run_env_check(self) -> None:
+        """Detect the default shell and probe the toolchain; no server needed."""
+        self.test_output.setText("正在检测开发环境…")
+        self.test_btn.setEnabled(False)
+        self.env_btn.setEnabled(False)
+
+        def work() -> list[str]:
+            shell_info = get_shell_info()
+            default = cast(dict[str, Any], shell_info.get("default") or {})
+            detected = [str(s.get("name", "")) for s in cast(list[dict[str, Any]], shell_info.get("detected") or [])]
+            lines = [
+                f"已检测 Shell: {'、'.join(detected) or '（无）'}",
+                f"默认 Shell: {default.get('name')} ({default.get('path')})"
+                + ("" if default.get("executable") else " —— 不可执行！"),
+            ]
+            for name, arg in (
+                ("python", "--version"),
+                ("git", "--version"),
+                ("pytest", "--version"),
+                ("pyright", "--version"),
+            ):
+                exe = shutil.which(name)
+                if not exe:
+                    lines.append(f"{name}: 未安装（PATH 中找不到）")
+                    continue
+                try:
+                    res = _run_program(
+                        exe, [arg], cwd=Path(self._selected_root() or os.getcwd()),
+                        timeout_seconds=30,
+                    )
+                    text = (res.stdout or res.stderr or "").strip().splitlines()
+                    lines.append(f"{name}: {text[0] if text else '(无输出)'}")
+                except Exception as exc:  # noqa: BLE001
+                    lines.append(f"{name}: 失败（{exc}）")
+            return lines
+
+        def done(lines: list[str]) -> None:
+            self.test_btn.setEnabled(True)
+            self.env_btn.setEnabled(True)
+            ok = all(
+                not line.endswith(("未安装（PATH 中找不到）", "不可执行！")) and "失败（" not in line
+                for line in lines[2:]
+            )
+            head = "开发环境检测：工具链就绪，可运行 测试/检查 命令。" if ok else "开发环境检测：存在缺失或异常项。"
+            self.test_output.setText("\n".join([head, *lines]))
+
+        _run_async(work, done)
+
     def _selected_connection(self) -> ConnectionMethod:
         data = self.connection_combo.currentData()
         try:
@@ -585,6 +678,8 @@ class MainWindow(QMainWindow):
         return StartOptions(
             project_root=self._selected_root(),
             permission_mode=self._selected_permission_mode(),
+            execution_profile=self._selected_execution_profile(),
+            full_system_confirmed=self._app_config.full_system_risk_accepted,
             codex_token=self._current_token,
             windows_enabled=self.bridge_check.isChecked(),
             windows_token=self._bridge_token,
@@ -619,6 +714,18 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.StandardButton.No:
                 return True
             self._app_config.first_system_risk_accepted = True
+            save_app_config(self._app_config)
+        if self._selected_execution_profile() == "full_system" and not self._app_config.full_system_risk_accepted:
+            answer = QMessageBox.question(
+                self,
+                "full_system 执行档位风险确认",
+                "命令执行档位 “full_system” 允许 AI 在项目内执行任意命令（不再限定开发工具白名单）。\n"
+                "建议仅在完全受信任的客户端环境使用。确认继续？（仅首次确认，之后不再提示）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.No:
+                return True
+            self._app_config.full_system_risk_accepted = True
             save_app_config(self._app_config)
         if self._selected_connection() == ConnectionMethod.QUICK:
             answer = QMessageBox.question(

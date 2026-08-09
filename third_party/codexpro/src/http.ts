@@ -49,7 +49,7 @@ function copyCommand(title: string, description: string, command: string, displa
 
 const TUNNELS = ["cloudflare", "ngrok", "cloudflare-named", "tailscale", "none"] as const;
 const MODES = ["agent", "handoff", "pro"] as const;
-const BASH_MODES = ["safe", "off", "full"] as const;
+const BASH_MODES = ["safe", "developer", "off", "full"] as const;
 const BASH_TRANSCRIPTS = ["compact", "full"] as const;
 const CODEX_SESSIONS = ["off", "metadata", "read"] as const;
 const WRITE_MODES = ["workspace", "handoff", "off"] as const;
@@ -94,7 +94,7 @@ interface ProfileFormValues {
   ngrokConfig: string;
   cloudflareConfig: string;
   cloudflareTokenFile: string;
-  bash: "off" | "safe" | "full";
+  bash: "off" | "safe" | "developer" | "full";
   bashTranscript: "compact" | "full";
   codexSessions: "off" | "metadata" | "read";
   codexDir: string;

@@ -388,6 +388,28 @@ MCP DevBridge
 
 ---
 
+# 命令执行档位（Shell Execution Profile）
+
+执行档位与权限模式正交：权限模式决定**能触碰的范围**，执行档位决定**命令如何跑**。
+对 `run_command / run_program / start_process`（本机工具）与 Codex 引擎的 bash 工具同时生效：
+
+| 档位 | 行为 | 适用场景 |
+|---|---|---|
+| `developer`（默认） | 命令首词必须是开发工具（pytest / pyright / ruff / mypy / git（完整子命令）/ npm / pnpm / yarn / bun / uv / python / tsc / eslint / cargo …）；危险命令硬拦截 | 通用开发工作流：AI 可运行测试、类型检查、lint、git 操作 |
+| `safe` | 完全保留原有“项目内命令允许”行为（仅危险拦截；引擎端仍执行其安全 allowlist） | 需要保持旧行为的场景 |
+| `full_system` | 任意命令；启用前需要**一次性风险确认**（桌面首次提示） | 完全受信任的 AI 客户端 |
+
+**危险命令在任何档位都被硬拦截**（白名单无法绕过）：磁盘格式化（`format C:`）、
+分区操作（`diskpart`）、关机重启（`shutdown/reboot`）、引导配置（`bcdedit`）、注册表删除
+（`reg delete`）、`msiexec / cipher / takeown / icacls`，以及递归删除指向盘根或系统目录的
+`rm -rf /`、`del /s C:\`、`Remove-Item -Recurse C:\Windows` 等。
+
+Shell 选择：默认顺序 pwsh > Windows PowerShell > cmd > Git Bash，**WSL Bash 永不当默认**
+（它运行 Linux 工具链，无法保证执行 Windows 项目脚本）。桌面提供「开发环境检测」按钮，
+可一键确认 Shell / python / git / pytest / pyright 是否可调用（对应 MCP 工具 `shell_self_test`）。
+
+---
+
 # 从源码运行
 
 ## 环境要求

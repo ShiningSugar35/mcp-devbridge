@@ -46,6 +46,8 @@ class StartOptions:
 
     project_root: str
     permission_mode: str = "workspace"
+    execution_profile: str = "developer"
+    full_system_confirmed: bool = False
     codex_token: str = ""
     windows_enabled: bool = False
     windows_token: str = ""
@@ -216,6 +218,7 @@ class ServiceCoordinator:
                 options.codex_token,
                 permission_mode=options.permission_mode,
                 windows_token=options.windows_token if options.windows_enabled else None,
+                execution_profile=options.execution_profile,
                 extra_env=(
                     {"CODEXPRO_WINDOWS_BRIDGE_URL": f"http://127.0.0.1:{options.windows_mcp_port}/mcp"}
                     if options.windows_enabled

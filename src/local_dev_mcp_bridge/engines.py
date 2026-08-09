@@ -233,6 +233,7 @@ def build_codex_env(
     token: str,
     windows_token: str | None = None,
     tool_mode: str = "standard",
+    execution_profile: str = "developer",
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the environment for the CodexPro fork.
@@ -248,7 +249,11 @@ def build_codex_env(
     elif mode == "system":
         bash_mode, tool = "full", "full"
     else:
-        bash_mode, tool = "safe", tool_mode
+        # workspace 权限下按执行档位映射：developer（默认）→ CodexPro
+        # safe-bash 允许 pytest/pyright/ruff/git 等开发命令；safe → 保持
+        # 原 allowlist（“当前行为”）。
+        bash_mode = "developer" if execution_profile == "developer" else "safe"
+        tool = tool_mode
     env: dict[str, str] = {
         "CODEXPRO_HTTP_TOKEN": token,
         "CODEXPRO_ROOT": root,
@@ -424,6 +429,7 @@ class CodexProManager(EngineManager):
         *,
         permission_mode: str = "workspace",
         windows_token: str | None = None,
+        execution_profile: str = "developer",
         extra_env: dict[str, str] | None = None,
     ) -> None:
         if self.is_running:
@@ -445,6 +451,7 @@ class CodexProManager(EngineManager):
             permission_mode=permission_mode,
             token=token,
             windows_token=windows_token,
+            execution_profile=execution_profile,
             extra=extra_env,
         )
         cmd = build_codex_cmd(self.executable, http_js, root, self.port)
