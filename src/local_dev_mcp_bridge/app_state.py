@@ -84,11 +84,13 @@ class ServiceCoordinator:
         codex: CodexProManager | None = None,
         windows: WindowsBridgeManager | None = None,
         tunnel: TunnelManager | None = None,
+        workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
     ) -> None:
         self.codex = codex or CodexProManager()
         self.windows = windows or WindowsBridgeManager()
         self.tunnel = tunnel or TunnelManager()
         self.gateway: OAuthGateway | None = None
+        self._workspace_registry = workspace_registry
         self._lock = threading.Lock()
         self._state = EngineState.IDLE
         self._message: str | None = None
@@ -155,6 +157,7 @@ class ServiceCoordinator:
             workspace=options.project_root,
             upstream_url=f"http://127.0.0.1:{options.codexpro_port}",
             upstream_legacy_token=lambda: SecretsStore().get(ACCESS_TOKEN_CRED_NAME),
+            workspace_registry=self._workspace_registry,
         )
         self.gateway.start(port=options.gateway_port)
         if not self._wait_gateway_ready(options.gateway_port):

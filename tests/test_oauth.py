@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 
 from local_dev_mcp_bridge.constants import OAUTH_SCOPE
 from local_dev_mcp_bridge.gateway import OAuthGateway
-from local_dev_mcp_bridge.oauth_provider import LocalOAuthProvider
+from local_dev_mcp_bridge.oauth_provider import LocalOAuthProvider, _workspace_from_subject
 from local_dev_mcp_bridge.secrets import SecretsStore
 
 ENGINE_TOKEN = "engine-secret-token-123"
@@ -489,3 +489,338 @@ def test_secrets_not_logged_to_disk(env: _Env, tmp_path: Path) -> None:
             text = f.read_text(encoding="utf-8", errors="ignore")
             assert PUB_TOKEN not in text
             assert at not in text
+
+
+# =========================================================================
+# Multi-workspace OAuth binding tests (Phase 9)
+# =========================================================================
+
+WORKSPACE_A_ID = "workspace-aaaa"
+WORKSPACE_B_ID = "workspace-bbbb"
+WORKSPACE_A_ROOT = "C:\\Projects\\Alpha"
+WORKSPACE_B_ROOT = "C:\\Projects\\Beta"
+
+
+def test_workspace_from_subject_parsing() -> None:
+    assert _workspace_from_subject("local-user") == ""
+    assert _workspace_from_subject("local-user:abc123") == "abc123"
+    assert _workspace_from_subject("local-user:abc:123") == "abc:123"
+    assert _workspace_from_subject("") == ""
+    assert _workspace_from_subject("other") == ""
+
+
+def test_workspace_from_subject_no_workspace_returns_empty() -> None:
+    """Old tokens (just 'local-user') return empty workspace_id."""
+    assert _workspace_from_subject("local-user") == ""
+
+
+class _MultiWorkspaceEnv:
+    """Gateway + provider with mock workspace registry for dual-workspace testing."""
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg_multi"))
+        self.t = time.time()
+        self.store = SecretsStore()
+        calls_a: list[dict] = []
+        calls_b: list[dict] = []
+
+        def _handler_a(request: httpx.Request) -> httpx.Response:
+            calls_a.append({"path": request.url.path, "method": request.method})
+            return httpx.Response(200, json={"source": "alpha", "ok": True})
+
+        def _handler_b(request: httpx.Request) -> httpx.Response:
+            calls_b.append({"path": request.url.path, "method": request.method})
+            return httpx.Response(200, json={"source": "beta", "ok": True})
+
+        # Mock two CodexPro engines on different ports
+        self.transport_a = httpx.MockTransport(_handler_a)
+        self.transport_b = httpx.MockTransport(_handler_b)
+
+        def registry(project_id: str) -> tuple[int, str] | None:
+            if project_id == WORKSPACE_A_ID:
+                return (18787, WORKSPACE_A_ROOT)
+            if project_id == WORKSPACE_B_ID:
+                return (18788, WORKSPACE_B_ROOT)
+            return None
+
+        self.provider = LocalOAuthProvider(
+            issuer_url="https://mcp.example.test",
+            resource_url="https://mcp.example.test/mcp",
+            workspace=WORKSPACE_A_ROOT,
+            store=self.store,
+            now=lambda: self.t,
+        )
+        self.gateway = OAuthGateway(
+            public_hostname="mcp.example.test",
+            workspace=WORKSPACE_A_ROOT,
+            upstream_url="http://127.0.0.1:18787",
+            upstream_legacy_token=lambda: PUB_TOKEN,
+            provider=self.provider,
+            workspace_registry=registry,
+        )
+        self.calls_a = calls_a
+        self.calls_b = calls_b
+        self.client = TestClient(
+            self.gateway.app, raise_server_exceptions=False, follow_redirects=False
+        )
+
+    def register_and_authorize(self, workspace_id: str = "") -> tuple[str, str, str]:
+        """Full flow: register → authorize → consent with workspace → get token.
+        
+        Returns (access_token, refresh_token, client_id).
+        """
+        resp = self.client.post(
+            "/register",
+            json={
+                "redirect_uris": ["https://client.example/callback"],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        cid = resp.json()["client_id"]
+
+        verifier = "verifier-multi-ws-12345678901234567890"
+        loc = self.client.get(
+            "/authorize",
+            params={
+                "client_id": cid,
+                "redirect_uri": "https://client.example/callback",
+                "response_type": "code",
+                "code_challenge": _challenge(verifier),
+                "code_challenge_method": "S256",
+                "state": "st-multi",
+                "scope": OAUTH_SCOPE,
+            },
+        ).headers["location"]
+        assert "/consent?id=" in loc, loc
+        cid_param = loc.split("id=", 1)[1]
+
+        # POST consent with workspace_id
+        consent_data = {"id": cid_param, "decision": "allow"}
+        if workspace_id:
+            consent_data["workspace_id"] = workspace_id
+        r = self.client.post("/consent", data=consent_data)
+        assert r.status_code == 302
+        code = r.headers["location"].split("code=", 1)[1].split("&", 1)[0]
+
+        t = self.client.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": verifier,
+                "client_id": cid,
+                "redirect_uri": "https://client.example/callback",
+            },
+        )
+        assert t.status_code == 200, t.text
+        return t.json()["access_token"], t.json()["refresh_token"], cid
+
+
+@pytest.fixture
+def mw_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _MultiWorkspaceEnv:
+    return _MultiWorkspaceEnv(tmp_path, monkeypatch)
+
+
+def test_consent_page_shows_workspace_dropdown(env: _Env) -> None:
+    """Consent page should contain workspace selection options."""
+    cid = env.register_client()
+    loc = env.authorize(cid).headers["location"]
+    page = env.client.get(loc)
+    assert page.status_code == 200
+    assert "工作区授权" in page.text or "workspace" in page.text.lower()
+    assert "允许访问" in page.text
+
+
+def test_token_subject_encodes_workspace(mw_env: _MultiWorkspaceEnv) -> None:
+    """OAuth token subject should carry workspace_id when bound."""
+    at, _rt, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
+    record = mw_env.provider.load_access_token_sync(at)
+    assert record is not None
+    assert record.subject == "local-user:" + WORKSPACE_A_ID
+    assert _workspace_from_subject(record.subject) == WORKSPACE_A_ID
+
+
+def test_token_without_workspace_has_empty_subject(mw_env: _MultiWorkspaceEnv) -> None:
+    """Consent without workspace_id selection → empty workspace in token."""
+    at, _rt, _cid = mw_env.register_and_authorize("")
+    record = mw_env.provider.load_access_token_sync(at)
+    assert record is not None
+    assert _workspace_from_subject(record.subject) == ""
+
+
+def test_refresh_token_preserves_workspace(mw_env: _MultiWorkspaceEnv) -> None:
+    """Refresh token rotation should carry workspace forward."""
+    at1, rt1, cid = mw_env.register_and_authorize(WORKSPACE_B_ID)
+    record1 = mw_env.provider.load_access_token_sync(at1)
+    assert _workspace_from_subject(record1.subject) == WORKSPACE_B_ID
+
+    # Exchange refresh token using the SAME client_id
+    rt_resp = mw_env.client.post(
+        "/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": rt1,
+            "client_id": cid,
+        },
+    )
+    assert rt_resp.status_code == 200, rt_resp.text
+    body = rt_resp.json()
+    at2 = body["access_token"]
+    record2 = mw_env.provider.load_access_token_sync(at2)
+    assert _workspace_from_subject(record2.subject) == WORKSPACE_B_ID
+
+
+def test_mcp_proxy_routes_to_correct_workspace(mw_env: _MultiWorkspaceEnv) -> None:
+    """OAuth token bound to workspace A proxies to A's CodexPro port."""
+    at_a, _, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
+
+    routed_to: list[tuple[str, int]] = []
+
+    class _Router(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request):
+            from urllib.parse import urlparse
+            parsed = urlparse(str(request.url))
+            port = parsed.port or 18787
+            routed_to.append((port, str(request.url)))
+            if port == 18787:
+                return await self.transport_a.handle_async_request(request)
+            else:
+                return await self.transport_b.handle_async_request(request)
+
+    _router = _Router()
+    _router.transport_a = mw_env.transport_a
+    _router.transport_b = mw_env.transport_b
+
+    mw_env.gateway._http = httpx.AsyncClient(transport=_router)
+
+    r = mw_env.client.get("/mcp", headers={"Authorization": f"Bearer {at_a}"})
+    assert r.status_code == 200, r.text
+    # Should have routed to port 18787 (workspace A)
+    assert any(p[0] == 18787 for p in routed_to), f"Expected route to 18787, got {routed_to}"
+
+
+def test_two_tokens_different_workspaces_routed_differently(mw_env: _MultiWorkspaceEnv) -> None:
+    """GPT (workspace A) and Gemini (workspace B) tokens route to different ports."""
+    at_a, _, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
+    at_b, _, _cid2 = mw_env.register_and_authorize(WORKSPACE_B_ID)
+
+    record_a = mw_env.provider.load_access_token_sync(at_a)
+    record_b = mw_env.provider.load_access_token_sync(at_b)
+    assert _workspace_from_subject(record_a.subject) == WORKSPACE_A_ID
+    assert _workspace_from_subject(record_b.subject) == WORKSPACE_B_ID
+    assert _workspace_from_subject(record_a.subject) != _workspace_from_subject(record_b.subject)
+
+
+def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
+    """switch_workspace only affects the calling session, not others."""
+    import json  # noqa: F811 - local import is fine
+
+    at_a, _, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
+
+    # Simulate session A switching to workspace B
+    rpc_switch = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "switch_workspace", "arguments": {"project_id": WORKSPACE_B_ID}},
+    })
+    # Session "sess-gpt" switches
+    r = mw_env.client.post(
+        "/mcp",
+        content=rpc_switch,
+        headers={
+            "Authorization": f"Bearer {at_a}",
+            "mcp-session-id": "sess-gpt",
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    # Now session "sess-gpt" get_current_workspace should show B
+    rpc_gcw = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "get_current_workspace", "arguments": {}},
+    })
+    r2 = mw_env.client.post(
+        "/mcp",
+        content=rpc_gcw,
+        headers={
+            "Authorization": f"Bearer {at_a}",
+            "mcp-session-id": "sess-gpt",
+            "Content-Type": "application/json",
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    result = json.loads(r2.text)
+    text = result["result"]["content"][0]["text"]
+    assert WORKSPACE_B_ID in text
+
+    # Meanwhile, session "sess-gemini" (same token) should still be on workspace A
+    r3 = mw_env.client.post(
+        "/mcp",
+        content=rpc_gcw,
+        headers={
+            "Authorization": f"Bearer {at_a}",
+            "mcp-session-id": "sess-gemini",
+            "Content-Type": "application/json",
+        },
+    )
+    assert r3.status_code == 200
+    result3 = json.loads(r3.text)
+    text3 = result3["result"]["content"][0]["text"]
+    assert WORKSPACE_A_ID in text3, f"Expected workspace A for sess-gemini, got: {text3}"
+
+
+def test_switch_workspace_unknown_project_returns_error(mw_env: _MultiWorkspaceEnv) -> None:
+    """switch_workspace to non-existent project returns error."""
+    at_a, _, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
+
+    rpc = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "switch_workspace", "arguments": {"project_id": "no-such-project"}},
+    })
+    r = mw_env.client.post(
+        "/mcp",
+        content=rpc,
+        headers={
+            "Authorization": f"Bearer {at_a}",
+            "mcp-session-id": "sess-test",
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 200
+    result = json.loads(r.text)
+    assert "error" in result
+
+
+def test_list_workspaces_returns_projects() -> None:
+    """list_workspaces tool returns registered projects (or empty list)."""
+    from local_dev_mcp_bridge.gateway import OAuthGateway as _GW
+    # Quick smoke: the method exists and doesn't crash
+    gw = _GW(
+        public_hostname="test.local",
+        workspace=".",
+        upstream_url="http://127.0.0.1:1",
+    )
+    result = gw._list_workspaces()
+    assert isinstance(result, str)
+    assert "工作区" in result
+
+
+def test_get_current_workspace_empty_session(env: _Env) -> None:
+    """get_current_workspace with no workspace_id shows default."""
+    result = env.gateway._get_current_workspace("", "")
+    assert "当前工作区" in result
+
+
+def test_backward_compat_legacy_bearer_still_works(env: _Env) -> None:
+    """Legacy ChatGPT bearer (engine token) passes through without workspace binding."""
+    r = env.client.get("/mcp", headers={"Authorization": f"Bearer {PUB_TOKEN}"})
+    assert r.status_code == 200
+    assert env.calls[-1]["authorization"] == f"Bearer {PUB_TOKEN}"

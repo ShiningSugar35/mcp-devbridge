@@ -142,8 +142,8 @@ def _remember_tunnel_token(token: str) -> None:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.coord = ServiceCoordinator()
         self.pm = ProjectManager()
+        self.coord = ServiceCoordinator(workspace_registry=self._lookup_workspace)
         self._signals = _Signals()
         self._signals.coord_event.connect(self._on_coord_event)
         self.coord.listen(self._emit_coord_event)
@@ -902,6 +902,17 @@ class MainWindow(QMainWindow):
         if unit is not None:
             self.coord.codex = unit.codex
             self.coord.windows = unit.windows
+
+    def _lookup_workspace(self, project_id: str) -> tuple[int, str] | None:
+        """Given a project_id, return (codexpro_port, root_path) if running, else None."""
+        project = self.pm.get(project_id)
+        if project is None:
+            return None
+        unit = self.pm.unit(project_id)
+        if unit is not None and unit.state == EngineState.READY:
+            port = project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT
+            return (port, project.root_path)
+        return None
 
     # -------------------------------------------------- service control
     def _start_all_services(self) -> None:

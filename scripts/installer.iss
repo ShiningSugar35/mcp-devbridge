@@ -4,7 +4,7 @@
 
 #define MyAppName "MCP DevBridge"
 #define MyAppId "1A2B3C4D-5E6F-4A8B-9C0D-1E2F3A4B5C6D"
-#define MyAppVersion "0.3.0"
+#define MyAppVersion "0.4.0"
 #define MyAppPublisher "MCP DevBridge"
 #define MyAppExeName "MCPDevBridge.exe"
 

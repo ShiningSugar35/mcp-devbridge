@@ -62,6 +62,13 @@ def _redirect_uri(redirect_uri: str | None, **query: str | None) -> str:
     return f"{uri}{sep}{urlencode(pairs)}"
 
 
+def _workspace_from_subject(subject: str) -> str:
+    """Extract workspace_id from token subject ('local-user:{id}' → '{id}', 'local-user' → '')."""
+    if subject and subject.startswith("local-user:"):
+        return subject.split(":", 1)[1]
+    return ""
+
+
 class LocalOAuthProvider(OAuthAuthorizationServerProvider):
     """Minimal single-user OAuth 2.1 authorization server for the bridge."""
 
@@ -148,6 +155,12 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         }
         return f"/consent?id={consent_id}"
 
+    def bind_workspace(self, consent_id: str, workspace_id: str) -> None:
+        """Store the user's workspace selection into the consent record."""
+        record = self._consents.get(consent_id)
+        if record is not None:
+            record["workspace_id"] = workspace_id
+
     def get_consent(self, consent_id: str) -> dict[str, Any] | None:
         record = self._consents.get(consent_id)
         if record is None:
@@ -163,6 +176,8 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         if record is None:
             raise ConsentExpired()
         self._consents.pop(consent_id, None)
+        workspace_id = record.get("workspace_id", "")
+        subject = f"local-user:{workspace_id}" if workspace_id else "local-user"
         code = AuthorizationCode(
             code=_random_token(),
             scopes=record["scopes"],
@@ -172,7 +187,7 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
             redirect_uri=record["redirect_uri"],
             redirect_uri_provided_explicitly=record["redirect_uri_provided_explicitly"],
             resource=record["resource"],
-            subject="local-user",
+            subject=subject,
         )
         self._codes[code.code] = code
         return _redirect_uri(record["redirect_uri"], code=code.code, state=record.get("state"))
@@ -202,7 +217,8 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
         self._check_scope(authorization_code.scopes, TokenError)
-        return self._issue_tokens(authorization_code.client_id, authorization_code.scopes)
+        workspace_id = _workspace_from_subject(authorization_code.subject)
+        return self._issue_tokens(authorization_code.client_id, authorization_code.scopes, workspace_id)
 
     # ------------------------------------------------------- refresh
     @staticmethod
@@ -229,7 +245,7 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
             client_id=client.client_id,
             scopes=list(data.get("scopes", [constants.OAUTH_SCOPE])),
             expires_at=data.get("expires_at"),
-            subject="local-user",
+            subject=data.get("workspace_id", ""),
         )
 
     async def exchange_refresh_token(
@@ -237,10 +253,18 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
     ) -> OAuthToken:
         requested = self._check_scope(scopes, TokenError)
         self.store.delete(self._refresh_key(refresh_token.token))  # rotate
-        return self._issue_tokens(client.client_id, requested)
+        workspace_id = refresh_token.subject or ""
+        return self._issue_tokens(client.client_id, requested, workspace_id)
 
     # ----------------------------------------------------------- access
     async def load_access_token(self, token: str) -> AccessToken | None:
+        return self._load_access_token_impl(token)
+
+    def load_access_token_sync(self, token: str) -> AccessToken | None:
+        """Synchronous alias for tests."""
+        return self._load_access_token_impl(token)
+
+    def _load_access_token_impl(self, token: str) -> AccessToken | None:
         key = _hash(token)
         record = self._access_tokens.get(key)
         if record is None:
@@ -255,21 +279,27 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         self.store.delete(self._refresh_key(token.token))
 
     # ---------------------------------------------------------- helpers
-    def _issue_tokens(self, client_id: str, scopes: list[str]) -> OAuthToken:
+    def _issue_tokens(self, client_id: str, scopes: list[str], workspace_id: str = "") -> OAuthToken:
         access = _random_token()
         refresh = _random_token()
         now = float(self._now())
+        subject = f"local-user:{workspace_id}" if workspace_id else "local-user"
         self._access_tokens[_hash(access)] = AccessToken(
             token=access,
             client_id=client_id,
             scopes=list(scopes),
             expires_at=int(now + self.access_ttl),
             resource=self.resource_url,
-            subject="local-user",
+            subject=subject,
         )
         self.store.set(
             self._refresh_key(refresh),
-            json.dumps({"client_id": client_id, "scopes": list(scopes), "expires_at": int(now + self.refresh_ttl)}),
+            json.dumps({
+                "client_id": client_id,
+                "scopes": list(scopes),
+                "expires_at": int(now + self.refresh_ttl),
+                "workspace_id": workspace_id,
+            }),
         )
         return OAuthToken(
             access_token=access,
@@ -358,4 +388,4 @@ def get_or_create_gemini_client(
     return client_id, payload["client_secret"]
 
 
-__all__ = ["LocalOAuthProvider", "ConsentExpired", "_random_token", "_hash"]
+__all__ = ["LocalOAuthProvider", "ConsentExpired", "_random_token", "_hash", "_workspace_from_subject"]

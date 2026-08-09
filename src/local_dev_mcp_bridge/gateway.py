@@ -45,11 +45,14 @@ from starlette.responses import (
 from starlette.routing import Route
 
 from . import constants
-from .oauth_provider import ConsentExpired, LocalOAuthProvider
+from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
 from .secrets import SecretsStore
 from .shell import detect_binaries, get_shell_info, run_command, run_program
 
-_LOCAL_TOOL_NAMES = frozenset({"run_command", "run_program", "shell_self_test"})
+_LOCAL_TOOL_NAMES = frozenset({
+    "run_command", "run_program", "shell_self_test",
+    "list_workspaces", "get_current_workspace", "switch_workspace",
+})
 
 _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     {
@@ -87,25 +90,57 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
             "properties": {},
         },
     },
+    {
+        "name": "list_workspaces",
+        "description": "列出所有已注册的项目工作区，包含路径、状态和 CodexPro 端口。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_current_workspace",
+        "description": "返回当前 MCP 会话绑定的工作区项目信息。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "switch_workspace",
+        "description": "将当前 MCP 会话切换到指定项目工作区（仅影响当前客户端，不影响其他 GPT/Gemini 会话）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "项目 ID（来自 list_workspaces 返回的 id）"},
+            },
+            "required": ["project_id"],
+        },
+    },
 ]
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>MCP DevBridge</title>
+<head><meta charset="utf-8"><title>MCP DevBridge - 工作区授权</title>
 <style>
-body{{font-family:system-ui,sans-serif;max-width:540px;margin:48px auto;padding:0 16px;color:#1f2328}}
+body{{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 16px;color:#1f2328}}
 h1{{font-size:20px}}
 dl{{background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:12px 16px}}
 dt{{color:#57606a;font-size:12px;text-transform:uppercase;margin-top:8px}}
 dd{{margin:2px 0 8px;word-break:break-all}}
+select{{font-size:14px;padding:6px 10px;border:1px solid #d0d7de;border-radius:6px;width:100%;margin:8px 0}}
 form{{margin-top:16px;display:flex;gap:12px}}
 button{{font-size:15px;padding:8px 22px;border-radius:6px;cursor:pointer}}
 .allow{{background:#1f883d;color:#fff;border:1px solid #1f883d}}
 .cancel{{background:#fff;border:1px solid #d0d7de}}
+.workspace-label{{font-weight:600;margin-top:12px}}
 </style></head>
-<body><h1>MCP DevBridge</h1>
-<p>Gemini 正在请求访问你的本地开发环境。</p>
+<body><h1>MCP DevBridge - 工作区授权</h1>
+<p>AI 客户端正在请求访问你的本地开发环境。请选择要绑定的项目工作区。</p>
 <dl>{rows}</dl>
+<div class="workspace-label">选择工作区：</div>
+<select name="workspace_id">{workspace_options}</select>
+<p style="color:#57606a;font-size:13px">所选工作区将绑定到此客户端的 OAuth 授权中。不同客户端可以绑定不同工作区。</p>
 <form method="post" action="/consent">
 <input type="hidden" name="id" value="{cid}">
 <button type="submit" name="decision" value="allow" class="allow">允许访问</button>
@@ -246,6 +281,7 @@ class OAuthGateway:
         store: SecretsStore | None = None,
         provider: LocalOAuthProvider | None = None,
         transport: Any | None = None,
+        workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
     ) -> None:
         hostname = (public_hostname or "").strip().rstrip("/")
         base = hostname if hostname.lower().startswith(("http://", "https://")) else f"https://{hostname}"
@@ -264,6 +300,7 @@ class OAuthGateway:
         )
         self.allow_local_anonymous = allow_local_anonymous
         self._workspace = Path(workspace) if workspace else None
+        self._workspace_registry = workspace_registry
         self._provider = provider or LocalOAuthProvider(
             issuer_url=self.public_base,
             resource_url=self.resource_url,
@@ -277,6 +314,9 @@ class OAuthGateway:
             timeout=httpx.Timeout(900.0, connect=30.0),
             transport=transport,
         )
+        # Session → workspace_id mapping for switch_workspace tool
+        self._session_workspaces: dict[str, str] = {}
+        self._session_lock = threading.Lock()
 
     # ------------------------------------------------------------ build
     @property
@@ -329,15 +369,45 @@ class OAuthGateway:
             _row("请求的权限范围", ", ".join(consent["scopes"])),
             _row("调用方 Client ID", consent["client_id"]),
         ]
+        workspace_options = self._build_workspace_options()
         cid = html.escape(request.query_params.get("id", ""))
-        return HTMLResponse(_PAGE.format(rows="".join(rows), cid=cid))
+        return HTMLResponse(
+            _PAGE.format(rows="".join(rows), cid=cid, workspace_options=workspace_options)
+        )
+
+    def _build_workspace_options(self) -> str:
+        """Build <option> tags for available projects (for consent page dropdown)."""
+        options = ['<option value="">（当前激活项目）</option>']
+        if self._workspace_registry is not None:
+            try:
+                from .config_store import load_projects
+                projects = load_projects()
+                for p in projects:
+                    if p.id:
+                        port = ""
+                        info = self._workspace_registry(p.id)
+                        if info:
+                            port = f"（运行中 :{info[0]}）"
+                        selected = ""
+                        name = p.display_name or Path(p.root_path).name
+                        options.append(
+                            f'<option value="{html.escape(p.id)}" {selected}>'
+                            f"{html.escape(name)} - {html.escape(p.root_path)}{html.escape(port)}"
+                            f"</option>"
+                        )
+            except Exception:
+                pass
+        return "\n".join(options)
 
     async def _consent_submit(self, request: Request) -> Response:
         form = await request.form()
         consent_id = str(form.get("id", ""))
         decision = str(form.get("decision", "deny"))
+        workspace_id = str(form.get("workspace_id", ""))
         try:
             if decision == "allow":
+                if workspace_id:
+                    self._provider.bind_workspace(consent_id, workspace_id)
                 target = self._provider.approve(consent_id)
             else:
                 target = self._provider.deny(consent_id)
@@ -355,8 +425,12 @@ class OAuthGateway:
         bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
         engine_token = self.upstream_token_source()
 
-        # --- resolve proxy token (same as before) ---
+        # --- resolve proxy token and workspace ---
         proxy_token: str | None = None
+        workspace_id: str = ""
+        upstream_target: str | None = None
+        session_id = self._extract_session_id(request)
+
         if bearer:
             if _constant_time_eq(bearer, engine_token):
                 proxy_token = bearer
@@ -369,6 +443,19 @@ class OAuthGateway:
                         proxy_token = engine_token
                     else:
                         return self._unauthorized()
+                    workspace_id = _workspace_from_subject(record.subject)
+                    # Session override: if user called switch_workspace, use that instead
+                    with self._session_lock:
+                        if session_id and session_id in self._session_workspaces:
+                            workspace_id = self._session_workspaces[session_id]
+                    # Resolve upstream for this workspace
+                    upstream_target = self._resolve_upstream(workspace_id)
+                    if not upstream_target:
+                        return JSONResponse(
+                            _jsonrpc_error(None, -32000,
+                                "工作区未就绪。请先在桌面启动对应项目的 CodexPro 引擎。"),
+                            status_code=502,
+                        )
                 else:
                     return self._unauthorized()
         elif self.allow_local_anonymous and _is_loopback(request):
@@ -386,12 +473,13 @@ class OAuthGateway:
                 params = rpc.get("params") or {}
                 name = params.get("name", "")
                 if name in _LOCAL_TOOL_NAMES:
-                    return await self._exec_local_tool(name, rpc, params)
+                    return await self._exec_local_tool(name, rpc, params, workspace_id, session_id)
 
-        return await self._proxy(request, body, proxy_token)
+        return await self._proxy(request, body, proxy_token, upstream_target=upstream_target)
 
-    async def _proxy(self, request: Request, body: bytes, authorization: str | None) -> Response:
-        target = f"{self.upstream_url}{request.url.path}"
+    async def _proxy(self, request: Request, body: bytes, authorization: str | None, *, upstream_target: str | None = None) -> Response:
+        base = upstream_target or self.upstream_url
+        target = f"{base}{request.url.path}"
         if request.url.query:
             target = f"{target}?{request.url.query}"
         headers = {
@@ -428,9 +516,12 @@ class OAuthGateway:
         )
 
     # ---------------------------------------------------- local tools
-    async def _exec_local_tool(self, name: str, rpc: dict[str, Any], params: dict[str, Any]) -> JSONResponse:
+    async def _exec_local_tool(
+        self, name: str, rpc: dict[str, Any], params: dict[str, Any],
+        workspace_id: str = "", session_id: str = "",
+    ) -> JSONResponse:
         rpc_id = rpc.get("id")
-        workspace = self._workspace or Path.cwd()
+        workspace = self._resolve_workspace_path(workspace_id) or self._workspace or Path.cwd()
         try:
             if name == "run_command":
                 command = str(params.get("command", ""))
@@ -493,12 +584,116 @@ class OAuthGateway:
                     except Exception:
                         lines.append(f"[✗] {tool}: 未安装或不可调用")
                 return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": "\n".join(lines)}]}))
+            elif name == "list_workspaces":
+                result = self._list_workspaces()
+                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
+            elif name == "get_current_workspace":
+                result = self._get_current_workspace(workspace_id, session_id)
+                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
+            elif name == "switch_workspace":
+                args = params.get("arguments", {}) if isinstance(params, dict) else {}
+                target_id = str(args.get("project_id", ""))
+                if not target_id:
+                    raise ValueError("project_id 不能为空。")
+                result = self._do_switch_workspace(target_id, session_id)
+                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
             else:
                 raise ValueError(f"未知的本地工具: {name}")
         except ValueError as exc:
             return JSONResponse(_jsonrpc_error(rpc_id, -32602, str(exc)))
         except Exception as exc:
             return JSONResponse(_jsonrpc_error(rpc_id, -32603, f"工具执行失败: {exc}"))
+
+    # -------------------------------------------------------- workspace helpers
+    def _resolve_upstream(self, workspace_id: str) -> str | None:
+        """Return the upstream target URL for a workspace, or None if not running."""
+        if not workspace_id:
+            return self.upstream_url
+        if self._workspace_registry is None:
+            return self.upstream_url
+        info = self._workspace_registry(workspace_id)
+        if info is None:
+            return None
+        port, _root = info
+        return f"http://127.0.0.1:{port}"
+
+    def _resolve_workspace_path(self, workspace_id: str) -> Path | None:
+        """Return the root Path for a workspace, or None."""
+        if not workspace_id or self._workspace_registry is None:
+            return None
+        info = self._workspace_registry(workspace_id)
+        if info is None:
+            return None
+        _port, root = info
+        return Path(root) if root else None
+
+    @staticmethod
+    def _extract_session_id(request: Request) -> str:
+        """Extract mcp-session-id header from request."""
+        sid = request.headers.get("mcp-session-id", "")
+        return sid.strip()
+
+    def _list_workspaces(self) -> str:
+        """Build a text report of all registered projects with status."""
+        lines = ["已注册的工作区：", ""]
+        try:
+            from .config_store import load_projects
+            projects = load_projects()
+            for i, p in enumerate(projects, 1):
+                port_info = ""
+                running = "（未运行）"
+                if self._workspace_registry and p.id:
+                    info = self._workspace_registry(p.id)
+                    if info:
+                        port_info = f" : {info[0]}"
+                        running = "（运行中）"
+                name = p.display_name or Path(p.root_path).name
+                lines.append(f"{i}. id={p.id}  {name}  {p.root_path}{port_info} {running}")
+            if not projects:
+                lines.append("（无已注册项目）")
+        except Exception:
+            lines.append("（无法加载项目列表）")
+        return "\n".join(lines)
+
+    def _get_current_workspace(self, workspace_id: str, session_id: str) -> str:
+        """Return info about the current session's workspace."""
+        with self._session_lock:
+            effective = self._session_workspaces.get(session_id, workspace_id) if session_id else workspace_id
+        if not effective:
+            default_root = str(self._workspace) if self._workspace else "（未设置）"
+            return f"当前工作区：默认（{default_root}）"
+        root = str(self._resolve_workspace_path(effective) or "未知")
+        return f"当前工作区：id={effective}\n路径：{root}"
+
+    def _do_switch_workspace(self, project_id: str, session_id: str) -> str:
+        """Switch the current session's workspace binding."""
+        # Verify the project exists
+        try:
+            from .config_store import load_projects
+            projects = load_projects()
+            match = next((p for p in projects if p.id == project_id), None)
+            if match is None:
+                raise ValueError(f"未找到项目：{project_id}。可用 list_workspaces 查看。")
+        except Exception:
+            pass
+        if not session_id:
+            raise ValueError("无法识别当前会话（缺少 mcp-session-id 请求头），请使用支持会话的 MCP 客户端。")
+        # Verify engine is running for this workspace
+        if self._workspace_registry and not self._workspace_registry(project_id):
+            raise ValueError(
+                f"项目 {project_id} 的 CodexPro 引擎未运行。"
+                "请先在 MCP DevBridge 桌面上启动该项目的服务。"
+            )
+        with self._session_lock:
+            self._session_workspaces[session_id] = project_id
+        try:
+            from .config_store import load_projects
+            projects = load_projects()
+            match = next((p for p in projects if p.id == project_id), None)
+            name = (match.display_name or Path(match.root_path).name) if match else project_id
+        except Exception:
+            name = project_id
+        return f"已切换到工作区：{name}（{project_id}）\n仅影响当前 MCP 会话。"
 
     # ----------------------------------------------------------- helper
     def _unauthorized(self) -> Response:
