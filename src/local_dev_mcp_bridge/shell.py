@@ -51,9 +51,27 @@ class ShellInfo:
     def executable(self) -> bool:
         return bool(self.path) and os.path.isfile(self.path)
 
+    @property
+    def is_wsl(self) -> bool:
+        """True when this shell runs inside the Windows Subsystem for Linux."""
+        return self.kind == "wsl" or self.kind == "bash" and self.path and Path(self.path).resolve() == _WINDOWS_BASH.resolve()
+
+    @property
+    def version(self) -> str:
+        """Human-readable shell version (PowerShell family only; cheap)."""
+        if self.kind in ("pwsh", "windows_powershell"):
+            return powershell_version(self.path)
+        return ""
+
     def to_dict(self) -> dict[str, object]:
-        return {"name": self.name, "path": self.path, "kind": self.kind,
-                "executable": self.executable}
+        return {
+            "name": self.name,
+            "path": self.path,
+            "type": self.kind,
+            "executable": self.executable,
+            "is_wsl": self.is_wsl,
+            "version": self.version,
+        }
 
 
 def detect_shells() -> list[ShellInfo]:

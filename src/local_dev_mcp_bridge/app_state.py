@@ -191,8 +191,10 @@ class ServiceCoordinator:
             raise SpawnError("Windows 控制令牌未生成。")
 
         # 端口占用预检（引擎子进程绑定失败即崩溃；占用即报错，绝不偷偷换端口）。
-        self._check_engine_port("CodexPro", options.codexpro_port)
-        if options.windows_enabled:
+        # 多项目场景：引擎可能已由 ProjectManager 先行启动（同实例复用），跳过预检。
+        if not self.codex.is_running:
+            self._check_engine_port("CodexPro", options.codexpro_port)
+        if options.windows_enabled and not self.windows.is_running:
             self._check_engine_port("Windows 控制桥", options.windows_mcp_port)
 
         self._set_state(EngineState.STARTING, "正在启动服务…")

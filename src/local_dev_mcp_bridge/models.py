@@ -58,6 +58,7 @@ def gateway_service_url(port: int) -> str:
 class ProjectConfig(BaseModel):
     """Per-project persisted settings."""
 
+    id: str = ""  # 多项目唯一标识（add 时自动分配）；空串视为未初始化
     display_name: str = ""
     root_path: str
     permission_mode: PermissionMode = "workspace"
@@ -75,6 +76,13 @@ class ProjectConfig(BaseModel):
     default_push_remote: str = ""
     default_push_branch: str = ""
     last_used_at: str = ""
+    # 多项目并行（Phase 9）：每个项目独立 CodexPro / Windows 桥端口；
+    # 0 = 未分配，启动时回退到全局默认端口（constants.DEFAULT_*_PORT）。
+    codexpro_port: int = 0
+    windows_bridge_port: int = 0
+    windows_enabled: bool = False
+    # 启用 = 桌面启动后自动恢复该项目的引擎进程。
+    enabled: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -134,6 +142,7 @@ class RuntimeConfig(BaseModel):
     full_system_confirmed: bool = False
     ignore_patterns: list[str] = Field(default_factory=list)
     public_hostname: str = ""  # Named Tunnel 公网域名（Phase 4 transport_security 白名单）
+    project_catalog_enabled: bool = True  # 后端是否加载 projects.json（多项目目录）
 
     @field_validator("legacy_backend_port")
     @classmethod

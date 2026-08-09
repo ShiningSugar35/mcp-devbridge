@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,73 @@ def get_project(root: str) -> ProjectConfig | None:
         if _norm_path(project.root_path) == target:
             return project
     return None
+
+
+def get_project_by_id(project_id: str) -> ProjectConfig | None:
+    for project in load_projects():
+        if project.id and project.id == project_id:
+            return project
+    return None
+
+
+def delete_project(root: str) -> list[ProjectConfig]:
+    """Remove a project by normalized root path; returns the surviving list."""
+    target = _norm_path(root)
+    projects = [p for p in load_projects() if _norm_path(p.root_path) != target]
+    save_projects(projects)
+    return projects
+
+
+def migrate_project_id(project: ProjectConfig) -> ProjectConfig:
+    """Backfill a stable short id for projects saved before multi-project support."""
+    if project.id:
+        return project
+    project.id = uuid.uuid4().hex[:8]
+    return project
+
+
+def assign_project_ports(
+    projects: list[ProjectConfig],
+    *,
+    index: int | None = None,
+    base_codex: int = constants.DEFAULT_CODEXPRO_PORT,
+    base_windows: int = constants.DEFAULT_WINDOWS_MCP_PORT,
+) -> list[ProjectConfig]:
+    """Assign per-project internal ports (0 = unset) without collisions.
+
+    ``index`` selects the project whose ports are being allocated (defaults to
+    the first project with any unset port). Uses the lowest free integer >= the
+    default base for each kind, skipping ports already claimed by other
+    projects (or by a coexisting project of the other kind when the bases
+    differ). Pure function; caller persists the result.
+    """
+    used_codex = {p.codexpro_port for p in projects if p.codexpro_port}
+    used_windows = {p.windows_bridge_port for p in projects if p.windows_bridge_port}
+
+    if index is None:
+        for idx, project in enumerate(projects):
+            if not project.codexpro_port or not project.windows_bridge_port:
+                index = idx
+                break
+        if index is None:
+            return projects
+    target = projects[index]
+    if not target.codexpro_port:
+        port = find_free(base_codex, used_codex | {p.windows_bridge_port for p in projects})
+        target.codexpro_port = port
+        used_codex.add(port)
+    if not target.windows_bridge_port:
+        port = find_free(base_windows, used_windows | {p.codexpro_port for p in projects})
+        target.windows_bridge_port = port
+        used_windows.add(port)
+    return projects
+
+
+def find_free(base: int, used: set[int]) -> int:
+    port = base
+    while port in used:
+        port += 1
+    return port
 
 
 def _norm_path(value: str) -> str:

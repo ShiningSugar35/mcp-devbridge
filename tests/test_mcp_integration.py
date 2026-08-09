@@ -19,6 +19,9 @@ from mcp.client.streamable_http import streamable_http_client
 from local_dev_mcp_bridge.models import RuntimeConfig
 from local_dev_mcp_bridge.secrets import SecretsStore
 
+PROJ_WIRE_A = "wire-id-a"
+PROJ_WIRE_B = "wire-id-b"
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -100,8 +103,9 @@ def backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config_path = tmp_path / "runtime.json"
 
     def _start(**overrides) -> _Backend:
+        workspace = overrides.pop("workspace", None) or workspace_dir
         rc = RuntimeConfig(
-            workspace=str(workspace_dir),
+            workspace=str(workspace),
             log_dir=str(tmp_path / "logs"),
             **overrides,
         )
@@ -175,6 +179,60 @@ class TestMCPIntegration:
                     res = await _mcp_call(session, "get_workspace_info")
                     assert not res["is_error"]
                     assert "工作区 空间" in res["text"]
+
+    async def test_two_sessions_isolated_workspace_switch(self, backend, tmp_path):
+        """两个 MCP 会话在同一个后端进程里互不干扰（多项目并发）。"""
+        from local_dev_mcp_bridge.config_store import save_projects
+        from local_dev_mcp_bridge.models import ProjectConfig
+
+        ws_a = tmp_path / "projA"
+        ws_b = tmp_path / "projB"
+        ws_a.mkdir()
+        ws_b.mkdir()
+        (ws_a / "marker_A.txt").write_text("AAA", encoding="utf-8")
+        save_projects(
+            [
+                ProjectConfig(
+                    id=PROJ_WIRE_A, display_name="项目A", root_path=str(ws_a), permission_mode="workspace"
+                ),
+                ProjectConfig(
+                    id=PROJ_WIRE_B, display_name="项目B", root_path=str(ws_b), permission_mode="workspace"
+                ),
+            ]
+        )
+        with backend(workspace=str(ws_a)) as srv:
+            async with (
+                streamable_http_client(srv.base_url + "/mcp") as streams_a,
+                ClientSession(streams_a[0], streams_a[1]) as session_a,
+            ):
+                await session_a.initialize()
+                async with (
+                    streamable_http_client(srv.base_url + "/mcp") as streams_b,
+                    ClientSession(streams_b[0], streams_b[1]) as session_b,
+                ):
+                    await session_b.initialize()
+                    # 两个会话默认都绑到入口项目 A
+                    ra = await _mcp_call(session_a, "list_directory", {"path": "."})
+                    rb = await _mcp_call(session_b, "list_directory", {"path": "."})
+                    assert "marker_A.txt" in ra["text"]
+                    assert "marker_A.txt" in rb["text"]
+                    # 会话 A 切换到项目 B —— 只影响 A
+                    sw = await _mcp_call(session_a, "switch_workspace", {"project_id": PROJ_WIRE_B})
+                    assert not sw["is_error"], sw
+                    # A 相对路径读写生效在 B 的工作区
+                    ra = await _mcp_call(session_a, "write_file", {"path": "from_A.txt", "content": "x\n"})
+                    assert not ra["is_error"], ra
+                    assert (ws_a / "from_A.txt").exists() is False
+                    assert (ws_b / "from_A.txt").exists() is True
+                    # B 会话仍看项目 A
+                    rb = await _mcp_call(session_b, "list_directory", {"path": "."})
+                    assert "marker_A.txt" in rb["text"]
+                    assert "from_A.txt" not in rb["text"]
+                    # list_projects 显示各自的会话绑定
+                    pa = await _mcp_call(session_a, "list_projects")
+                    pb = await _mcp_call(session_b, "list_projects")
+                    assert "项目B" in pa["text"]
+                    assert "项目A" in pb["text"]
 
 
 @pytest.mark.asyncio

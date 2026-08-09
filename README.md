@@ -53,7 +53,7 @@ MCP DevBridge 解决的就是中间这一层：
 ## 主要功能
 
 - **可视化项目选择**  
-  在桌面窗口直接选择需要开发的本地项目，无需手写路径配置。
+  在桌面窗口直接选择需要开发的本地项目，无需手写路径配置。支持**多项目并行**运行，每个项目拥有独立的 CodexPro 引擎进程和端口。
 
 - **固定 MCP 地址**  
   支持 Cloudflare Named Tunnel，例如：
@@ -330,6 +330,32 @@ mcp-devbridge
 ```text
 MCP DevBridge
 ```
+
+---
+
+# 多项目并行开发
+
+MCP DevBridge 支持同时管理多个项目：
+
+1. 在 "项目列表" 区域点击「添加项目」选择多个本地项目
+2. 每个项目拥有**独立的 CodexPro 引擎**（不同端口）和**独立的 Windows 桥接**
+3. 勾选「启用」的项目在桌面启动时自动恢复引擎
+4. **GPT 和 Gemini 可以同时操作不同项目**，互不影响
+5. 通过 MCP 工具 `switch_workspace` 可切换当前会话的操作项目
+6. 使用 `list_projects` 查看所有已注册项目及运行状态
+
+项目数据持久化于 `projects.json`，重启程序后自动恢复。
+
+## Shell 与命令执行
+
+Windows 上 Shell 默认优先级：
+
+1. **pwsh.exe**（PowerShell 7）
+2. **powershell.exe**（Windows PowerShell 5.1）
+3. **cmd.exe**
+4. **Git Bash**
+
+**WSL Bash 不会被自动选择**，仅当用户明确指定时才会使用（WSL 的 Linux 工具链无法保证运行 Windows 项目脚本和开发工具）。使用 `shell_info` MCP 工具可查看所有可用 Shell 及其类型、路径和版本。桌面「开发环境检测」按钮也可一键确认 Shell / python / git / pytest / pyright 是否可调用。
 
 ---
 
@@ -639,6 +665,8 @@ MCP DevBridge 内维护了一个受控 fork，用于增加 Windows Bridge 等集
 - Gemini Spark 接入
 - ChatGPT MCP 接入
 - Windows-MCP 可选桥接
+- **多项目并行开发**（每个项目独立 CodexPro 引擎与端口，GPT/Gemini 可同时操作不同项目）
+- **Windows Shell 自动检测**（pwsh > PowerShell > cmd > Git Bash 优先级，WSL 不会自动调用）
 - 日志与审计
 - PyInstaller / Inno Setup 打包
 

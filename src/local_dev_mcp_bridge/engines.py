@@ -469,8 +469,10 @@ class CodexProManager(EngineManager):
                 self._fail("CodexPro 进程提前退出。")
                 return False
             if CODEXPRO_READY_RE.search(proc.log.tail(50)):
+                self._set_state(EngineState.READY)
                 return True
             if port_listening(self.port):
+                self._set_state(EngineState.READY)
                 return True
             time.sleep(READY_POLL_INTERVAL_SECONDS)
         self._fail(f"CodexPro 启动超时（{timeout_seconds or self.timeout} 秒）。")
@@ -534,6 +536,7 @@ class WindowsBridgeManager(EngineManager):
                 self._fail("Windows-MCP 进程提前退出。")
                 return False
             if port_listening(self.port):
+                self._set_state(EngineState.READY)
                 return True
             time.sleep(READY_POLL_INTERVAL_SECONDS)
         self._fail(f"Windows-MCP 启动超时（{timeout_seconds or self.timeout} 秒）。")

@@ -19,7 +19,7 @@ from starlette.types import ASGIApp
 
 from . import __version__, constants
 from .audit import AuditLogger
-from .models import RuntimeConfig
+from .models import ProjectConfig, RuntimeConfig
 from .secrets import SecretsStore
 from .tools import LocalDevTools
 
@@ -294,6 +294,8 @@ class AuthMiddleware:
 def build_backend(rc: RuntimeConfig) -> tuple[MCPServer[Any], ASGIApp, LocalDevTools]:
     """Build the MCP server, tools instance and the HTTP app for a runtime config."""
     workspace = Path(rc.workspace)
+    projects = _load_catalog(rc)
+    default_id = _catalog_default_id(projects, workspace)
     tools = LocalDevTools(
         workspace,
         rc.permission_mode,
@@ -306,6 +308,8 @@ def build_backend(rc: RuntimeConfig) -> tuple[MCPServer[Any], ASGIApp, LocalDevT
         full_system_confirmed=rc.full_system_confirmed,
         ignore_patterns=rc.ignore_patterns,
         max_file_bytes=rc.max_file_bytes,
+        projects=projects,
+        default_project_id=default_id,
     )
 
     logger = AuditLogger(directory=Path(rc.log_dir) if rc.log_dir else None)
@@ -393,6 +397,26 @@ def build_backend(rc: RuntimeConfig) -> tuple[MCPServer[Any], ASGIApp, LocalDevT
 _START_TIME = time.monotonic()
 
 
+def _load_catalog(rc: RuntimeConfig) -> list[ProjectConfig]:
+    """Projects registered in ``projects.json`` (best-effort; empty ok)."""
+    from .config_store import load_projects
+
+    if not rc.project_catalog_enabled:
+        return []
+    return load_projects()
+
+
+def _catalog_default_id(projects: list[ProjectConfig], workspace: Path) -> str | None:
+    """The catalog entry matching the runtime workspace is the session default."""
+    for project in projects:
+        try:
+            if Path(project.root_path).expanduser().resolve() == workspace:
+                return project.id
+        except Exception:
+            continue
+    return None
+
+
 def _session_count(mcp: MCPServer) -> int:
     try:
         manager = mcp.session_manager
@@ -413,7 +437,10 @@ def _register_tools(tools: LocalDevTools) -> list[tuple[str, str, str, Callable,
 
     items.extend(
         [
-            ("get_workspace_info", "获取项目信息", "返回项目根目录、权限模式、Git 分支、工具版本与默认测试命令。", tools.get_workspace_info, read()),
+            ("list_projects", "项目列表", "列出已注册项目（名称、路径、状态、CodexPro 端口）与当前会话绑定项目。", tools.list_projects, read()),
+            ("switch_workspace", "切换项目", "切换当前 MCP session 操作的项目；只影响调用它的 session，其他 session 保持不变。", tools.switch_workspace, write()),
+            ("shell_info", "Shell 信息", "返回默认 Shell 与已检测 Shell 的信息（shell/path/type/is_wsl/version）。", tools.shell_info, read()),
+            ("get_workspace_info", "获取项目信息", "返回当前项目根目录、权限模式、Git 分支、工具版本与默认测试命令。", tools.get_workspace_info, read()),
             ("get_capabilities", "获取能力清单", "返回当前允许的工具类型、写入/命令/项目外访问开关与输出限制。", tools.get_capabilities, read()),
             ("get_system_info", "获取系统信息", "返回 Windows 版本、CPU 架构、磁盘空间与常用开发工具版本。", tools.get_system_info, read()),
             ("shell_self_test", "Shell 环境自检", "检测默认 Shell 是否可执行以及 python/git/pytest/pyright 是否可调用，返回逐项结果。", tools.shell_self_test, read()),

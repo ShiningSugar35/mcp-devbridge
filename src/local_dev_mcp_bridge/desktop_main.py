@@ -58,12 +58,12 @@ from .config_store import (
     load_app_config,
     load_projects,
     save_app_config,
-    suggest_commands,
     upsert_project,
 )
 from .engines import EngineState
 from .models import PermissionMode, ProjectConfig, gateway_service_url, git_field_error
 from .oauth_provider import get_or_create_gemini_client
+from .project_manager import ProjectManager
 from .secrets import SecretsStore, generate_token
 from .selftest import SelftestResult, run_selftest
 from .shell import get_shell_info
@@ -111,6 +111,14 @@ def _run_async(fn: Callable[[], Any], callback: Callable[[Any], None]) -> None:
     QThreadPool.globalInstance().start(target)
 
 
+def _same_root(a: str, b: str) -> bool:
+    """Compare two root paths in a case-insensitive, resolved way (Windows)."""
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return a.casefold() == b.casefold()
+
+
 def _bridge_token(ensure: bool = False) -> str:
     """Windows bridge token: persisted in the secret store, auto-created."""
     store = SecretsStore()
@@ -137,6 +145,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.coord = ServiceCoordinator()
+        self.pm = ProjectManager()
         self._signals = _Signals()
         self._signals.coord_event.connect(self._on_coord_event)
         self.coord.listen(self._emit_coord_event)
@@ -153,6 +162,7 @@ class MainWindow(QMainWindow):
         self._sync_token_ui()
         self._poll_status()
         self._timer.start(3000)
+        QTimer.singleShot(2500, self._auto_restore_enabled_projects)
 
     # ---------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -180,25 +190,46 @@ class MainWindow(QMainWindow):
         self.ctrl_layout.setSpacing(8)
         self.tabs.addTab(self.ctrl_tab, "控制")
 
-        # --- project
-        proj_box = QGroupBox("项目")
-        proj_form = QFormLayout(proj_box)
-        proj_form.setContentsMargins(12, 12, 12, 12)
-        proj_form.setSpacing(8)
-        self.project_combo = QComboBox()
-        self.project_combo.currentIndexChanged.connect(self._on_project_selected)
-        self.browse_btn = QPushButton("添加/浏览…")
-        self.browse_btn.setFixedWidth(110)
-        self.browse_btn.clicked.connect(self._browse_project)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(self.project_combo, 1)
-        row.addWidget(self.browse_btn)
-        proj_form.addRow("选择项目:", row)
-        self.root_label = QLabel("（尚未选择项目）")
-        self.root_label.setWordWrap(True)
-        self.root_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        proj_form.addRow("根目录:", self.root_label)
+        # --- project list (多项目并行)
+        proj_box = QGroupBox("项目列表（多项目并行；选中行 = 启动公网服务的项目）")
+        proj_v = QVBoxLayout(proj_box)
+        proj_v.setContentsMargins(12, 12, 12, 12)
+        proj_v.setSpacing(8)
+        self.project_table = QTableWidget(0, 6)
+        self.project_table.setHorizontalHeaderLabels(["名称", "路径", "状态", "CodexPro端口", "启用", "入口"])
+        self.project_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.project_table.verticalHeader().setVisible(False)
+        self.project_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.project_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.project_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.project_table.itemSelectionChanged.connect(self._on_project_selected)
+        proj_v.addWidget(self.project_table)
+
+        proj_btns = QHBoxLayout()
+        proj_btns.setSpacing(8)
+        self.add_project_btn = QPushButton("添加项目…")
+        self.add_project_btn.setFixedWidth(110)
+        self.add_project_btn.clicked.connect(self._browse_project)
+        self.remove_project_btn = QPushButton("删除项目")
+        self.remove_project_btn.clicked.connect(self._remove_project)
+        self.start_project_btn = QPushButton("启动项目（引擎）")
+        self.start_project_btn.setToolTip("仅启动该项目 CodexPro 引擎（本机回环端口），不影响其他项目")
+        self.start_project_btn.clicked.connect(self._start_project_engine)
+        self.stop_project_btn = QPushButton("停止项目")
+        self.stop_project_btn.clicked.connect(self._stop_project_engine)
+        proj_btns.addWidget(self.add_project_btn)
+        proj_btns.addWidget(self.remove_project_btn)
+        proj_btns.addWidget(self.start_project_btn)
+        proj_btns.addWidget(self.stop_project_btn)
+        proj_btns.addStretch(1)
+        proj_v.addLayout(proj_btns)
+        proj_hint = QLabel(
+            "「启动公网服务」使用选中项目；「启动项目（引擎）」可让多个项目引擎同时在 127.0.0.1 各自端口运行，"
+            "彼此独立。表中勾选「启用」后，桌面启动会自动恢复该项目引擎。"
+        )
+        proj_hint.setWordWrap(True)
+        proj_hint.setStyleSheet("color: gray;")
+        proj_v.addWidget(proj_hint)
         self.ctrl_layout.addWidget(proj_box)
 
         # --- config: permission + connection + bridge
@@ -519,39 +550,56 @@ class MainWindow(QMainWindow):
             self._refresh_audit_tool_combo()
             self._refresh_audit_log()
 
-    # ---------------------------------------------------------- helpers
+# ---------------------------------------------------------- helpers
     def _refresh_project_list(self) -> None:
-        self._projects = load_projects()
-        self.project_combo.clear()
-        if not self._projects:
-            self.project_combo.addItem("（尚无项目，点击“添加/浏览…”）")
-            return
-        for p in self._projects:
-            self.project_combo.addItem(f"{p.display_name}  ·  {p.root_path}", p.root_path)
+        table = self.project_table
+        table.setRowCount(0)
+        views = self.pm.views()
+        active = self._app_config.active_workspace
+        for row, view in enumerate(views):
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(view.name))
+            table.setItem(row, 1, QTableWidgetItem(view.root_path))
+            table.setItem(row, 2, QTableWidgetItem(view.state))
+            table.setItem(row, 3, QTableWidgetItem(str(view.codexpro_port)))
+            table.setItem(row, 4, QTableWidgetItem(""))
+            table.setItem(row, 5, QTableWidgetItem("★" if active and _same_root(view.root_path, active) else ""))
+            enable_box = QCheckBox()
+            enable_box.setChecked(view.enabled)
+            enable_box.setToolTip("启用后，桌面启动时自动恢复该项目引擎")
+            enable_box.stateChanged.connect(lambda _state, root=view.root_path: self._toggle_project_enabled(root))
+            table.setCellWidget(row, 4, enable_box)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        if views:
+            table.selectRow(max(self._row_of_root(self._app_config.active_workspace), 0))
+
+    def _row_of_root(self, root: str) -> int:
+        for row in range(self.project_table.rowCount()):
+            item = self.project_table.item(row, 1)
+            if item is not None and _same_root(item.text(), root):
+                return row
+        return 0
+
+    def _select_root(self, root: str) -> None:
+        self.project_table.selectRow(self._row_of_root(root))
 
     def _load_active_project(self) -> None:
-        active = self._app_config.active_workspace
-        if active:
-            idx = self.project_combo.findData(active)
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-                return
-        if self._projects:
-            latest = max(self._projects, key=lambda p: p.last_used_at or "")
-            idx = self.project_combo.findData(latest.root_path)
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-                return
         self._apply_selected_project()
 
     def _apply_selected_project(self) -> None:
         root = self._selected_root()
         if not root:
             return
+        if not _same_root(root, self._app_config.active_workspace or ""):
+            self._app_config.active_workspace = root
+            save_app_config(self._app_config)
         project = next((p for p in load_projects() if p.root_path == root), None)
         if project is None:
             return
-        self.root_label.setText(project.root_path)
         modes = [m[0] for m in PERMISSION_MODES]
         idx = modes.index(project.permission_mode) if project.permission_mode in modes else 0
         self.permission_combo.setCurrentIndex(idx)
@@ -568,12 +616,30 @@ class MainWindow(QMainWindow):
         self.git_email_edit.setText(project.git_user_email or "")
         self.git_remote_edit.setText(project.default_push_remote or "")
         self.git_branch_edit.setText(project.default_push_branch or "")
+        self.bridge_check.setChecked(project.windows_enabled)
         self._sync_connection_fields()
 
+    def _project_config(self) -> ProjectConfig | None:
+        """Config of the currently selected table row, or None."""
+        root = self._selected_root()
+        if not root:
+            return None
+        project = self.pm.by_root(root)
+        if project is None:
+            project = next((p for p in load_projects() if p.root_path == root), None)
+        return project
+
+    def _selected_project_id(self) -> str:
+        """Project id of the currently selected table row."""
+        project = self._project_config()
+        return project.id if project is not None else ""
+
     def _selected_root(self) -> str:
-        idx = self.project_combo.currentIndex()
-        data = self.project_combo.itemData(idx)
-        return str(data) if data else ""
+        row = self.project_table.currentRow()
+        if row < 0:
+            return ""
+        item = self.project_table.item(row, 1)
+        return str(item.text()) if item is not None else ""
 
     def _selected_permission_mode(self) -> PermissionMode:
         mode = PERMISSION_MODES[self.permission_combo.currentIndex()][0]
@@ -682,32 +748,168 @@ class MainWindow(QMainWindow):
         if not root.is_dir():
             QMessageBox.warning(self, "无法添加项目", f"目录不存在：{root}")
             return
-        suggestions = suggest_commands(root)
-        existing = next((p for p in load_projects() if p.root_path == str(root)), None)
-        project = ProjectConfig(
-            display_name=root.name,
-            root_path=str(root),
-            permission_mode=existing.permission_mode if existing else "workspace",
-            test_command=(existing.test_command if existing else "")
-            or suggestions.get("test_command", ""),
-            lint_command=(existing.lint_command if existing else "")
-            or suggestions.get("lint_command", ""),
-            typecheck_command=(existing.typecheck_command if existing else "")
-            or suggestions.get("typecheck_command", ""),
-            build_command=(existing.build_command if existing else "") or suggestions.get("build_command", ""),
-        )
-        upsert_project(project)
-        self._app_config.active_workspace = str(root)
+        root_str = str(root)
+        project = self.pm.by_root(root_str)
+        if project is None:
+            try:
+                project = self.pm.add(root_str)
+            except ValueError as exc:
+                QMessageBox.warning(self, "无法添加项目", str(exc))
+                return
+        self._app_config.active_workspace = root_str
         save_app_config(self._app_config)
         self._refresh_project_list()
-        idx = self.project_combo.findData(str(root))
-        if idx >= 0:
-            self.project_combo.setCurrentIndex(idx)
+        self._select_root(root_str)
         self._apply_selected_project()
-        self._append_log(f"已添加项目：{root}")
+        self._append_log(f"已添加项目：{project.display_name}（{root_str}）")
+
+    # ----------------------------------------------- project engine control
+    def _toggle_project_enabled(self, root: str) -> None:
+        """Persist the 「启用」checkbox for auto-restore of a project engine."""
+        project = self.pm.by_root(root)
+        if project is None:
+            return
+        checkbox = self.sender()
+        checked = bool(checkbox.isChecked()) if isinstance(checkbox, QCheckBox) else False
+        project.enabled = checked
+        self.pm.update(project)
+        self._append_log(f"{'已启用' if checked else '已停用'}自动恢复：{project.display_name or root}")
+
+    def _start_project_engine(self) -> None:
+        """Start ONLY this project's CodexPro engine on its own loopback port."""
+        project = self._project_config()
+        if project is None:
+            QMessageBox.warning(self, "未选择项目", "请先选择或添加项目，再启动该项目引擎。")
+            return
+        if not self._current_token:
+            QMessageBox.warning(self, "缺少令牌", "请先点击“重新生成令牌”创建访问令牌。")
+            return
+        self._append_log(f"正在启动项目引擎（{project.display_name}）…")
+
+        def run() -> str:
+            view = self.pm.start(project.id, codex_token=self._current_token, windows_token=self._bridge_token)
+            return f"项目引擎已启动：{project.display_name} @127.0.0.1:{view.codexpro_port}（{view.state}）"
+
+        def done(result: Any) -> None:
+            if isinstance(result, Exception):
+                self._append_log(f"启动项目引擎失败:{result}")
+            else:
+                self._append_log(str(result))
+            self._refresh_project_list()
+            self._poll_status()
+
+        _run_async(run, done)
+
+    def _stop_project_engine(self) -> None:
+        project = self._project_config()
+        if project is None:
+            QMessageBox.warning(self, "未选择项目", "请先选择或添加项目。")
+            return
+        self._append_log(f"正在停止项目引擎（{project.display_name}）…")
+
+        def run() -> str:
+            self.pm.stop(project.id)
+            return f"项目引擎已停止：{project.display_name}"
+
+        def done(result: Any) -> None:
+            if isinstance(result, Exception):
+                self._append_log(f"停止项目引擎出错:{result}")
+            else:
+                self._append_log(str(result))
+            self._refresh_project_list()
+            self._poll_status()
+
+        _run_async(run, done)
+
+    def _remove_project(self) -> None:
+        project = self._project_config()
+        if project is None:
+            QMessageBox.warning(self, "未选择项目", "请先选择或添加项目。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除项目",
+            f"确定从项目列表移除“{project.display_name}”吗？\n"
+            "其引擎进程（若运行中）会一并停止，但磁盘上的项目文件不受影响。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def run() -> str:
+            self.pm.remove(project.id)
+            if _same_root(project.root_path, self._app_config.active_workspace or ""):
+                self._app_config.active_workspace = ""
+                save_app_config(self._app_config)
+            return f"已移除项目：{project.display_name}"
+
+        def done(result: Any) -> None:
+            if isinstance(result, Exception):
+                self._append_log(f"删除项目出错:{result}")
+            else:
+                self._append_log(str(result))
+            self._refresh_project_list()
+            self._apply_selected_project()
+            self._poll_status()
+
+        _run_async(run, done)
+
+    def _auto_restore_enabled_projects(self) -> None:
+        """桌面启动后自动恢复「启用」勾选的项目引擎（后台，不阻塞 UI）。"""
+        if not self._current_token:
+            self._append_log("尚未生成访问令牌，跳过项目引擎自动恢复。")
+            return
+        enabled = [p for p in self.pm.list() if p.enabled]
+        if not enabled:
+            return
+        self._append_log(f"正在自动恢复已启用项目的引擎（{len(enabled)} 个）…")
+
+        def run() -> str:
+            views = self.pm.start_enabled(codex_token=self._current_token, windows_token=self._bridge_token)
+            if not views:
+                return "自动恢复：没有可启动的项目引擎。"
+            return "自动恢复完成：" + "；".join(
+                f"{v.name} @127.0.0.1:{v.codexpro_port}" for v in views
+            )
+
+        def done(result: Any) -> None:
+            if isinstance(result, Exception):
+                self._append_log(f"自动恢复失败:{result}")
+            else:
+                self._append_log(str(result))
+            self._refresh_project_list()
+            self._poll_status()
+
+        _run_async(run, done)
+
+    def _bind_coord_engines(self) -> None:
+        """让 ServiceCoordinator 复用选中项目的引擎实例，避免重复 spawn。
+
+        多项目场景下，Coordinator 自身构造的默认管理器仅用于无项目占位；
+        一旦以某项目启动公网服务，就把它替换为该项目 unit 的引擎管理器，
+        使引擎只存在一份，端口一致，停止/重启都作用于同一个进程。
+        """
+        project_id = self._selected_project_id()
+        if not project_id:
+            return
+        unit = self.pm.unit_for(project_id)
+        if unit is not None:
+            self.coord.codex = unit.codex
+            self.coord.windows = unit.windows
 
     # -------------------------------------------------- service control
     def _current_options(self) -> StartOptions:
+        project = self._project_config()
+        codexpro_port = (
+            (project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT)
+            if project is not None
+            else self._app_config.codexpro_port
+        )
+        windows_mcp_port = (
+            (project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT)
+            if project is not None
+            else self._app_config.windows_mcp_port
+        )
         return StartOptions(
             project_root=self._selected_root(),
             permission_mode=self._selected_permission_mode(),
@@ -720,8 +922,8 @@ class MainWindow(QMainWindow):
             public_hostname=self.hostname_edit.text().strip(),
             tunnel_token=self._tunnel_token_value(),
             gateway_port=self._app_config.gateway_port,
-            codexpro_port=self._app_config.codexpro_port,
-            windows_mcp_port=self._app_config.windows_mcp_port,
+            codexpro_port=codexpro_port,
+            windows_mcp_port=windows_mcp_port,
         )
 
     def _tunnel_token_value(self) -> str | None:
@@ -815,6 +1017,7 @@ class MainWindow(QMainWindow):
         project.permission_mode = self._selected_permission_mode()
         project.connection = self._selected_connection().value
         project.public_hostname = self.hostname_edit.text().strip()
+        project.windows_enabled = self.bridge_check.isChecked()
         project.git_user_name = git_vals["git_user_name"]
         project.git_user_email = git_vals["git_user_email"]
         project.default_push_remote = git_vals["default_push_remote"]
@@ -833,6 +1036,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "未选择项目", "请先选择项目目录。")
             return
         self._save_project_settings()
+        self._bind_coord_engines()
         options = self._current_options()
         conflict = self._ports_conflict(options)
         if conflict:
@@ -861,6 +1065,7 @@ class MainWindow(QMainWindow):
         _run_async(run, done)
 
     def _stop_service(self) -> None:
+        self._bind_coord_engines()
         self._set_busy(True)
         self.status_label.setText("状态：正在停止…")
         self._append_log("正在停止服务…")
@@ -884,6 +1089,7 @@ class MainWindow(QMainWindow):
             self._start_service()
             return
         self._save_project_settings()
+        self._bind_coord_engines()
         options = self._current_options()
         conflict = self._ports_conflict(options)
         if conflict:
@@ -999,9 +1205,13 @@ class MainWindow(QMainWindow):
         self._append_log("内部组件端口已保存，重启服务后生效。")
 
     def _ports_conflict(self, options: StartOptions) -> str | None:
-        if port_in_use(options.codexpro_port):
+        if not self.coord.codex.is_running and port_in_use(options.codexpro_port):
             return f"CodexPro 引擎端口 {options.codexpro_port} 已被占用。请先停止占用该端口的程序。"
-        if options.windows_enabled and port_in_use(options.windows_mcp_port):
+        if (
+            options.windows_enabled
+            and not self.coord.windows.is_running
+            and port_in_use(options.windows_mcp_port)
+        ):
             return f"Windows 控制桥端口 {options.windows_mcp_port} 已被占用。请先停止占用该端口的程序。"
         if options.connection != ConnectionMethod.LOCAL and port_in_use(options.gateway_port):
             return f"Gateway 端口 {options.gateway_port} 已被占用，公网连接无法建立。请先停止占用该端口的程序。"
@@ -1183,6 +1393,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         if self.coord.running:
             self.coord.stop()
+        self.pm.stop_all()
         super().closeEvent(event)
 
 
