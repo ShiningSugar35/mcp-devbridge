@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -38,7 +38,10 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -67,12 +70,16 @@ from .shell import get_shell_info
 from .shell import run_program as _run_program
 from .tunnel_manager import ConnectionMethod
 
-PERMISSION_MODES = [("workspace", "项目全权限（默认）"), ("read_only", "只读模式"), ("system", "完全访问（危险）")]
-EXECUTION_PROFILES = [
-    ("developer", "developer：开发工具白名单（推荐）"),
-    ("safe", "safe：保留原有项目内命令行为"),
-    ("full_system", "full_system：任意命令（危险，需一次性确认）"),
+# 权限模式（与命令执行档位合二为一）：
+#   只读     = read_only  + safe        （只读安全操作）
+#   默认     = workspace  + developer   （项目内开发工具白名单）
+#   完全访问 = system     + full_system （任意命令，首次启动需风险确认）
+PERMISSION_MODES = [
+    ("read_only", "只读"),
+    ("workspace", "默认（推荐）"),
+    ("system", "完全访问（危险）"),
 ]
+PERMISSION_PROFILE = {"read_only": "safe", "workspace": "developer", "system": "full_system"}
 CONNECTION_METHODS = [
     ConnectionMethod.LOCAL,
     ConnectionMethod.CLOUDFLARE,
@@ -150,59 +157,67 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- UI
     def _build_ui(self) -> None:
         self.setWindowTitle(f"{APP_NAME} v{__version__}")
-        self.resize(820, 820)
+        self.resize(1200, 850)
+        self.setMinimumSize(900, 650)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         central = QWidget()
-        self.setCentralWidget(central)
+        scroll.setWidget(central)
+        self.setCentralWidget(scroll)
+
         root = QVBoxLayout(central)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
         self.tabs = QTabWidget()
         root.addWidget(self.tabs)
         self.ctrl_tab = QWidget()
         self.ctrl_layout = QVBoxLayout(self.ctrl_tab)
+        self.ctrl_layout.setContentsMargins(0, 4, 0, 4)
+        self.ctrl_layout.setSpacing(8)
         self.tabs.addTab(self.ctrl_tab, "控制")
 
         # --- project
         proj_box = QGroupBox("项目")
         proj_form = QFormLayout(proj_box)
+        proj_form.setContentsMargins(12, 12, 12, 12)
+        proj_form.setSpacing(8)
         self.project_combo = QComboBox()
         self.project_combo.currentIndexChanged.connect(self._on_project_selected)
         self.browse_btn = QPushButton("添加/浏览…")
         self.browse_btn.setFixedWidth(110)
         self.browse_btn.clicked.connect(self._browse_project)
         row = QHBoxLayout()
+        row.setSpacing(8)
         row.addWidget(self.project_combo, 1)
         row.addWidget(self.browse_btn)
         proj_form.addRow("选择项目:", row)
         self.root_label = QLabel("（尚未选择项目）")
         self.root_label.setWordWrap(True)
+        self.root_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         proj_form.addRow("根目录:", self.root_label)
         self.ctrl_layout.addWidget(proj_box)
 
         # --- config: permission + connection + bridge
         cfg_box = QGroupBox("服务配置")
         cfg_form = QFormLayout(cfg_box)
+        cfg_form.setContentsMargins(12, 12, 12, 12)
+        cfg_form.setSpacing(8)
         self.permission_combo = QComboBox()
         for _value, label in PERMISSION_MODES:
             self.permission_combo.addItem(label)
         cfg_form.addRow("权限模式:", self.permission_combo)
-
-        self.profile_combo = QComboBox()
-        for _value, label in EXECUTION_PROFILES:
-            self.profile_combo.addItem(label)
-        saved_profile = (self._app_config.execution_profile or "developer").lower()
-        profile_idx = [p[0] for p in EXECUTION_PROFILES].index(saved_profile) if saved_profile in [p[0] for p in EXECUTION_PROFILES] else 0
-        self.profile_combo.setCurrentIndex(profile_idx)
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
-        cfg_form.addRow("命令执行档位:", self.profile_combo)
-        profile_hint = QLabel(
-            "developer：仅允许开发工具（pytest/pyright/ruff/git/npm/uv…），"
-            "并拦截格式化/删盘等危险命令（推荐）。\n"
-            "safe：保留原有项目内命令行为。\n"
-            "full_system：任意命令，启用需一次性风险确认。"
+        perm_hint = QLabel(
+            "只读：安全只读操作。\n"
+            "默认：项目内可写、可执行开发工具与安全命令（pytest/pyright/ruff/git 等）。\n"
+            "完全访问：可读写项目外文件、执行任意命令，首次启动需风险确认。"
         )
-        profile_hint.setStyleSheet("color: gray;")
-        profile_hint.setWordWrap(True)
-        cfg_form.addRow("", profile_hint)
+        perm_hint.setWordWrap(True)
+        perm_hint.setStyleSheet("color: gray;")
+        cfg_form.addRow("", perm_hint)
 
         self.connection_combo = QComboBox()
         for method in CONNECTION_METHODS:
@@ -227,6 +242,8 @@ class MainWindow(QMainWindow):
 
         gemini_box = QGroupBox("Gemini OAuth 配置（静态客户端；不影响 DCR/Bearer）")
         gemini_form = QFormLayout(gemini_box)
+        gemini_form.setContentsMargins(12, 12, 12, 12)
+        gemini_form.setSpacing(8)
         self._gemini_store = SecretsStore()
         self._gemini_secret = ""
         self.gemini_uri_edit = QLineEdit()
@@ -238,19 +255,23 @@ class MainWindow(QMainWindow):
         self.gemini_gen_btn.clicked.connect(self._generate_gemini_credentials)
         gemini_form.addRow("", self.gemini_gen_btn)
 
-        self.gemini_id_label = QLabel("—")
-        self.gemini_id_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.gemini_id_edit = QLineEdit("—")
+        self.gemini_id_edit.setReadOnly(True)
+        self.gemini_id_edit.setToolTip("Client ID：只读，可选中复制")
         self.gemini_id_copy = QPushButton("复制")
         id_row = QHBoxLayout()
-        id_row.addWidget(self.gemini_id_label, 1)
+        id_row.setSpacing(8)
+        id_row.addWidget(self.gemini_id_edit, 1)
         id_row.addWidget(self.gemini_id_copy)
         gemini_form.addRow("Client ID:", id_row)
 
-        self.gemini_secret_label = QLabel("—")
-        self.gemini_secret_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.gemini_secret_edit = QLineEdit("—")
+        self.gemini_secret_edit.setReadOnly(True)
+        self.gemini_secret_edit.setToolTip("Client Secret：掩码显示，仅可复制")
         self.gemini_secret_copy = QPushButton("复制")
         secret_row = QHBoxLayout()
-        secret_row.addWidget(self.gemini_secret_label, 1)
+        secret_row.setSpacing(8)
+        secret_row.addWidget(self.gemini_secret_edit, 1)
         secret_row.addWidget(self.gemini_secret_copy)
         gemini_form.addRow("Client Secret:", secret_row)
 
@@ -262,16 +283,16 @@ class MainWindow(QMainWindow):
         gemini_hint.setStyleSheet("color: gray;")
         gemini_form.addRow("", gemini_hint)
 
-        self.gemini_id_copy.clicked.connect(lambda: self._copy_text(self.gemini_id_label.text()))
+        self.gemini_id_copy.clicked.connect(lambda: self._copy_text(self.gemini_id_edit.text()))
         self.gemini_secret_copy.clicked.connect(lambda: self._copy_text(self._gemini_secret))
         cfg_form.addRow("", gemini_box)
 
         if self.gemini_uri_edit.text():
             try:
                 client_id, secret = get_or_create_gemini_client(self.gemini_uri_edit.text(), rotate_secret=False)
-                self.gemini_id_label.setText(client_id)
+                self.gemini_id_edit.setText(client_id)
                 self._gemini_secret = secret
-                self.gemini_secret_label.setText("•" * 16)
+                self.gemini_secret_edit.setText("•" * 16)
             except ValueError:
                 pass
 
@@ -282,6 +303,8 @@ class MainWindow(QMainWindow):
         # --- git settings (Phase 5)
         git_box = QGroupBox("Git 参数（可空）")
         git_form = QFormLayout(git_box)
+        git_form.setContentsMargins(12, 12, 12, 12)
+        git_form.setSpacing(8)
         self.git_name_edit = QLineEdit()
         self.git_name_edit.setPlaceholderText("例如: johndoe（不含空格，可空）")
         git_form.addRow("user.name:", self.git_name_edit)
@@ -302,6 +325,8 @@ class MainWindow(QMainWindow):
         # --- service control
         ctrl_box = QGroupBox("服务控制")
         ctrl_row = QHBoxLayout(ctrl_box)
+        ctrl_row.setContentsMargins(12, 8, 12, 8)
+        ctrl_row.setSpacing(8)
         self.start_btn = QPushButton("启动服务")
         self.stop_btn = QPushButton("停止服务")
         self.restart_btn = QPushButton("重启服务")
@@ -310,11 +335,14 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self._stop_service)
         self.restart_btn.clicked.connect(self._restart_service)
         self.advanced_btn.clicked.connect(self._open_advanced_settings)
+        for btn in (self.start_btn, self.stop_btn, self.restart_btn, self.advanced_btn):
+            btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            btn.setMinimumHeight(28)
         ctrl_row.addWidget(self.start_btn)
         ctrl_row.addWidget(self.stop_btn)
         ctrl_row.addWidget(self.restart_btn)
-        ctrl_row.addWidget(self.advanced_btn)
         ctrl_row.addStretch(1)
+        ctrl_row.addWidget(self.advanced_btn)
         self.ctrl_layout.addWidget(ctrl_box)
 
         # --- status
@@ -325,13 +353,14 @@ class MainWindow(QMainWindow):
         # --- token / URL
         tok_box = QGroupBox("访问令牌与 MCP 地址（Cloudflare 公网入口）")
         tok_layout = QVBoxLayout(tok_box)
-        self.token_label = QLabel("令牌：未生成")
-        self.token_label.setWordWrap(True)
-        self.token_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.url_label = QLabel("MCP 地址：http://127.0.0.1:8765/mcp（仅本机）")
-        self.url_label.setWordWrap(True)
-        self.url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        tok_layout.setContentsMargins(12, 12, 12, 12)
+        tok_layout.setSpacing(8)
+        self.token_edit = QLineEdit("令牌：未生成（点击“重新生成令牌”）")
+        self.token_edit.setReadOnly(True)
+        self.url_edit = QLineEdit("MCP 地址：http://127.0.0.1:8765/mcp（仅本机）")
+        self.url_edit.setReadOnly(True)
         tok_row = QHBoxLayout()
+        tok_row.setSpacing(8)
         self.token_copy_btn = QPushButton("复制令牌")
         self.token_regenerate_btn = QPushButton("重新生成令牌")
         self.url_copy_btn = QPushButton("复制 MCP 地址")
@@ -342,12 +371,13 @@ class MainWindow(QMainWindow):
         tok_row.addWidget(self.token_regenerate_btn)
         tok_row.addWidget(self.url_copy_btn)
         tok_row.addStretch(1)
-        tok_layout.addWidget(self.token_label)
-        tok_layout.addWidget(self.url_label)
+        tok_layout.addWidget(self.token_edit)
+        tok_layout.addWidget(self.url_edit)
         tok_layout.addLayout(tok_row)
 
         # --- gateway port (Cloudflare 公网入口端口)
         port_row = QHBoxLayout()
+        port_row.setSpacing(8)
         port_row.addWidget(QLabel("公网入口端口（Gateway）:"))
         self.gateway_port_spin = QSpinBox()
         self.gateway_port_spin.setRange(1, 65535)
@@ -364,12 +394,12 @@ class MainWindow(QMainWindow):
         port_row.addStretch(1)
         tok_layout.addLayout(port_row)
 
-        self.service_url_label = QLabel(self._service_url_text())
-        self.service_url_label.setWordWrap(True)
-        self.service_url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.service_url_label.setStyleSheet("color: gray;")
+        self.service_url_edit = QLineEdit(self._service_url_text())
+        self.service_url_edit.setReadOnly(True)
+        self.service_url_edit.setStyleSheet("color: #555555;")
         service_row = QHBoxLayout()
-        service_row.addWidget(self.service_url_label, 1)
+        service_row.setSpacing(8)
+        service_row.addWidget(self.service_url_edit, 1)
         self.service_url_copy_btn = QPushButton("复制 Service URL")
         self.service_url_copy_btn.clicked.connect(lambda: self._copy_text(self._service_url_text()))
         service_row.addWidget(self.service_url_copy_btn)
@@ -386,7 +416,10 @@ class MainWindow(QMainWindow):
         # --- self test
         test_group = QGroupBox("连接自测")
         test_box = QVBoxLayout(test_group)
+        test_box.setContentsMargins(12, 12, 12, 12)
+        test_box.setSpacing(8)
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self.test_btn = QPushButton("运行连接自测")
         self.test_btn.clicked.connect(self._run_selftest)
         self.env_btn = QPushButton("开发环境检测")
@@ -394,25 +427,28 @@ class MainWindow(QMainWindow):
         self.env_btn.clicked.connect(self._run_env_check)
         btn_row.addWidget(self.test_btn)
         btn_row.addWidget(self.env_btn)
+        btn_row.addStretch(1)
         self.test_output = QLabel("（尚未运行）")
         self.test_output.setWordWrap(True)
         self.test_output.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.test_output.setFont(QFont("Consolas", 9))
-        self.test_output.setMinimumHeight(190)
+        self.test_output.setMinimumHeight(120)
         test_box.addLayout(btn_row)
         test_box.addWidget(self.test_output)
         self.ctrl_layout.addWidget(test_group)
 
-# --- log (process tail, moved to its own tab below)
         # --- 最近消息（控制页）
         msg_group = QGroupBox("最近消息")
         msg_v = QVBoxLayout(msg_group)
-        self.log_view = QTableWidget(0, 3)
-        self.log_view.setHorizontalHeaderLabels(["时间", "类型", "内容"])
-        self.log_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.log_view.verticalHeader().setVisible(False)
-        self.log_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        msg_v.addWidget(self.log_view)
+        msg_v.setContentsMargins(12, 12, 12, 12)
+        msg_v.setSpacing(8)
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMinimumHeight(150)
+        self.log_text.setMaximumBlockCount(300)
+        self.log_text.setWordWrapMode(QTextOption.WrapMode.NoWrap)
+        self.log_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        msg_v.addWidget(self.log_text)
         self.ctrl_layout.addWidget(msg_group)
 
         self._build_process_log_tab()
@@ -422,7 +458,10 @@ class MainWindow(QMainWindow):
     def _build_process_log_tab(self) -> None:
         proc_tab = QWidget()
         proc_v = QVBoxLayout(proc_tab)
+        proc_v.setContentsMargins(0, 4, 0, 4)
+        proc_v.setSpacing(8)
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.proc_combo = QComboBox()
         self.proc_combo.addItem("Codex 引擎", "codex")
         self.proc_combo.addItem("Windows 控制桥", "windows")
@@ -444,7 +483,10 @@ class MainWindow(QMainWindow):
     def _build_audit_tab(self) -> None:
         audit_tab = QWidget()
         audit_v = QVBoxLayout(audit_tab)
+        audit_v.setContentsMargins(0, 4, 0, 4)
+        audit_v.setSpacing(8)
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.audit_day_combo = QComboBox()
         self.audit_day_combo.addItems(["全部日期", "今天", "最近 3 天", "最近 7 天"])
         self.audit_tool_combo = QComboBox()
@@ -540,17 +582,8 @@ class MainWindow(QMainWindow):
         return "workspace"
 
     def _selected_execution_profile(self) -> str:
-        idx = self.profile_combo.currentIndex()
-        if 0 <= idx < len(EXECUTION_PROFILES):
-            return EXECUTION_PROFILES[idx][0]
-        return (self._app_config.execution_profile or "developer").lower()
-
-    def _on_profile_changed(self) -> None:
-        profile = self._selected_execution_profile()
-        if profile != self._app_config.execution_profile:
-            self._app_config.execution_profile = profile
-            save_app_config(self._app_config)
-            self._append_log(f"命令执行档位已切换: {profile}")
+        """命令执行档位跟随权限模式（合一设计：只读→safe / 默认→developer / 完全访问→full_system）。"""
+        return PERMISSION_PROFILE.get(self._selected_permission_mode(), "developer")
 
     def _run_env_check(self) -> None:
         """Detect the default shell and probe the toolchain; no server needed."""
@@ -624,9 +657,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "URI 无效", str(exc))
             return
         self._gemini_store.set(GEMINI_LAST_URI_CRED_NAME, uri)
-        self.gemini_id_label.setText(client_id)
+        self.gemini_id_edit.setText(client_id)
         self._gemini_secret = secret
-        self.gemini_secret_label.setText("•" * 16)
+        self.gemini_secret_edit.setText("•" * 16)
 
     @staticmethod
     def _copy_text(text: str) -> None:
@@ -703,28 +736,20 @@ class MainWindow(QMainWindow):
 
     def _require_start_confirmations(self) -> bool:
         """True when the user declined a mandatory warning."""
-        if self._selected_permission_mode() == "system" and not self._app_config.first_system_risk_accepted:
+        if self._selected_permission_mode() == "system" and (
+            not self._app_config.first_system_risk_accepted
+            or not self._app_config.full_system_risk_accepted
+        ):
             answer = QMessageBox.question(
                 self,
-                "系统权限风险确认",
-                "“完全访问”模式允许读写项目目录之外的文件、执行任意命令等高风险操作。\n"
+                "完全访问模式风险确认",
+                "“完全访问”模式下 AI 可读写项目目录之外的文件、执行任意命令（含系统级命令）等高风险操作。\n"
                 "请确认您理解风险后继续（仅首次确认，之后不再提示）。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.No:
                 return True
             self._app_config.first_system_risk_accepted = True
-            save_app_config(self._app_config)
-        if self._selected_execution_profile() == "full_system" and not self._app_config.full_system_risk_accepted:
-            answer = QMessageBox.question(
-                self,
-                "full_system 执行档位风险确认",
-                "命令执行档位 “full_system” 允许 AI 在项目内执行任意命令（不再限定开发工具白名单）。\n"
-                "建议仅在完全受信任的客户端环境使用。确认继续？（仅首次确认，之后不再提示）",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.No:
-                return True
             self._app_config.full_system_risk_accepted = True
             save_app_config(self._app_config)
         if self._selected_connection() == ConnectionMethod.QUICK:
@@ -897,7 +922,7 @@ class MainWindow(QMainWindow):
         self._update_gateway_port_ui()
 
     def _update_gateway_port_ui(self) -> None:
-        self.service_url_label.setText(self._service_url_text())
+        self.service_url_edit.setText(self._service_url_text())
         port = self.gateway_port_spin.value()
         if port != constants.DEFAULT_GATEWAY_PORT:
             self.port_warn_label.setText(
@@ -1004,7 +1029,7 @@ class MainWindow(QMainWindow):
         else:
             url = self._local_url()
             suffix = "（仅本机）"
-        self.url_label.setText(f"MCP 地址：{url} {suffix}")
+        self.url_edit.setText(f"MCP 地址：{url} {suffix}")
 
     def _poll_status(self) -> None:
         state = self.coord.state
@@ -1026,9 +1051,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------ token helpers
     def _sync_token_ui(self) -> None:
         if self._current_token:
-            self.token_label.setText(f"令牌（Bearer）：{self._current_token}")
+            self.token_edit.setText(f"令牌（Bearer）：{self._current_token}")
         else:
-            self.token_label.setText("令牌：未生成（点击“重新生成令牌”）")
+            self.token_edit.setText("令牌：未生成（点击“重新生成令牌”）")
 
     def _copy_to_clipboard(self, text: str) -> None:
         if not text:
@@ -1079,15 +1104,10 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- log
     def _append_log(self, text: str) -> None:
-        self.log_view.insertRow(0)
         now = datetime.datetime.now().strftime("%H:%M:%S")
-        self.log_view.setItem(0, 0, QTableWidgetItem(now))
-        self.log_view.setItem(0, 1, QTableWidgetItem("信息"))
-        self.log_view.setItem(0, 2, QTableWidgetItem(text))
-        self.log_view.setColumnWidth(0, 90)
-        self.log_view.setColumnWidth(1, 70)
-        if self.log_view.rowCount() > 300:
-            self.log_view.removeRow(self.log_view.rowCount() - 1)
+        self.log_text.appendPlainText(f"[{now}] {text}")
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     # ------------------------------------------------- logs: process tail
     def _engine_log_source(self) -> list[str]:
@@ -1169,6 +1189,16 @@ class MainWindow(QMainWindow):
 def main() -> int:
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     app = QApplication(sys.argv)
+    font = QFont(app.font())
+    font.setPointSize(10)
+    app.setFont(font)
+    app.setStyleSheet(
+        """
+        QGroupBox { font-size: 14px; font-weight: 600; }
+        QLabel { font-size: 12px; }
+        QLineEdit, QComboBox, QSpinBox, QPushButton, QPlainTextEdit, QCheckBox, QTableWidget { font-size: 12px; }
+        """
+    )
     window = MainWindow()
     window.show()
     return app.exec()

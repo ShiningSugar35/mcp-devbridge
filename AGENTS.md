@@ -140,6 +140,17 @@ Phase 8 MCP OAuth（Gemini）      (代码完成：oauth_provider + gateway，te
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-09 · **桌面 UI 响应式重构 + 权限模式合一（v0.2.0）**：
+  - 布局：`QMainWindow → QScrollArea`（垂直 AsNeeded / 水平 AlwaysOff）→ 内容 widget；
+    默认 1200×850、最小 900×650；自测 1366×768 / 1920×1080 / 900×650 滚动与压缩行为正常，无横向滚动。
+  - 长文本改只读 QLineEdit（Token、MCP 地址、Cloudflare Service URL、Gemini Client ID/Secret）；
+    最近消息改 QPlainTextEdit（≥150px、自动滚底、上限 300 行、NoWrap 横向滚动）。
+  - 服务控制按钮区：启动/停止/重启居左、高级设置居右，按钮最小策略防挤压；字体标题 14px/正文 12px；
+    控件间距 8px、GroupBox 内边距 12px。
+  - **权限模式与命令执行档位合一（仅 UI）**：只读=read_only+safe / 默认=workspace+developer /
+    完全访问=system+full_system；移除独立档位下拉；风险确认合并为一次（`full_system_risk_accepted`
+    随系统确认一并置位，兼容旧配置旧账号）。`--execution-profile` CLI 与引擎映射保持不变。
+  - 只改 `desktop_main.py`（UI 层），后端/工具/配置结构未动；全量 239 全绿；ruff/pyright 0 错误。
 - 2026-08-09 · **Shell 执行档位（safe / developer / full_system）+ Shell 管理**：
   - 新模块 `execution_profile.py`：`check_execution(command, profile)` 纯策略判定；
     - developer（默认）：首命令 ∈ 开发工具白名单（pytest/pyright/ruff/git/npm/uv/python/…）；

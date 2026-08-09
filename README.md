@@ -348,9 +348,9 @@ MCP DevBridge
 
 不允许直接修改项目。
 
-## 项目工作区
+## 项目工作区（默认模式）
 
-**推荐日常开发使用。**
+**推荐日常开发使用**（权限模式「默认」）。
 
 允许在当前选中的项目范围内：
 
@@ -358,13 +358,14 @@ MCP DevBridge
 - 写文件；
 - Edit / Patch；
 - Git；
-- 受控命令执行；
+- 受控命令执行 —— 命令首词限定为开发工具白名单
+  （pytest / pyright / ruff / mypy / git（完整子命令）/ npm / uv / python 等，危险命令硬拦截）；
 - 测试和构建；
 - 本地开发进程管理。
 
-## 系统权限
+## 系统权限（完全访问模式）
 
-允许更高风险的系统级能力。
+允许更高风险的系统级能力（对应命令档位 `full_system`：任意命令，首次启用需风险确认）。
 
 如果启用了 Windows-MCP，AI 还可能获得：
 
@@ -376,22 +377,27 @@ MCP DevBridge
 - Windows UI 自动化等能力。
 
 > [!NOTE]
-> Windows 桥接工具按权限档位过滤：`项目工作区 / 只读` 下只放行
+> 桌面端「权限模式」已与命令执行档位合一：
+> **只读** = read_only + safe、**默认** = workspace + developer、**完全访问** = system + full_system；
+> 无独立档位选择（`--execution-profile` CLI 参数与引擎映射仍独立保留）。
+
+> [!NOTE]
+> Windows 桥接工具按权限模式过滤：`默认 / 只读` 下只放行
 > `desktop_ui` 白名单（点击、输入、快照、应用等 UI 操作），
 > PowerShell / 注册表 / 文件系统等系统级工具会被拒绝；
-> 仅 `系统权限` 模式放行全部工具（`system_full`）。
+> 仅 `完全访问` 模式放行全部工具（`system_full`）。
 > 每次调用还会与桥端实时工具清单（inventory）交叉校验。
 
 > [!CAUTION]
-> 系统权限意味着远程 AI 工具可能影响项目目录之外的电脑状态。  
-> 除非确实需要，否则优先使用“项目工作区”。
+> 完全访问意味着远程 AI 工具可能影响项目目录之外的电脑状态。  
+> 除非确实需要，否则优先使用“默认”模式。
 
 ---
 
-# 命令执行档位（Shell Execution Profile）
+# 命令执行档位（Shell Execution Profile，内部模型）
 
-执行档位与权限模式正交：权限模式决定**能触碰的范围**，执行档位决定**命令如何跑**。
-对 `run_command / run_program / start_process`（本机工具）与 Codex 引擎的 bash 工具同时生效：
+桌面端 UI 已与权限模式合一（见上），此处为后端/CLI 的档位定义；
+对 `run_command / run_program / start_process`（本机工具）与 Codex 引擎的 bash 工具生效：
 
 | 档位 | 行为 | 适用场景 |
 |---|---|---|
