@@ -1005,7 +1005,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "完全访问模式风险确认",
-                "“完全访问”模式下 AI 可读写项目目录之外的文件、执行任意命令（含系统级命令）等高风险操作。\n"
+                "\"完全访问\"模式下 AI 可读写项目目录之外的文件、执行任意命令（含系统级命令）等高风险操作。\n"
                 "请确认您理解风险后继续（仅首次确认，之后不再提示）。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -1014,16 +1014,6 @@ class MainWindow(QMainWindow):
             self._app_config.first_system_risk_accepted = True
             self._app_config.full_system_risk_accepted = True
             save_app_config(self._app_config)
-        if self._selected_connection() == ConnectionMethod.QUICK:
-            answer = QMessageBox.question(
-                self,
-                "Quick Tunnel 临时测试",
-                "Quick Tunnel 的公开地址每次启动都会变化，仅适合临时调试。\n"
-                "正式使用请选择 Cloudflare 固定地址或 ngrok 固定地址。\n\n是否继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.No:
-                return True
         return False
 
     def _save_git_settings(self) -> None:
