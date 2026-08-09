@@ -157,6 +157,10 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_status)
         self._build_ui()
+        # Default permission = fully open, connection = Cloudflare
+        self.permission_combo.setCurrentIndex(2)
+        self.connection_combo.setCurrentIndex(CONNECTION_METHODS.index(ConnectionMethod.CLOUDFLARE))
+        self._sync_connection_fields()
         self._refresh_project_list()
         self._load_active_project()
         self._sync_token_ui()
@@ -212,8 +216,12 @@ class MainWindow(QMainWindow):
         self.add_project_btn.clicked.connect(self._browse_project)
         self.remove_project_btn = QPushButton("删除项目")
         self.remove_project_btn.clicked.connect(self._remove_project)
+        self.start_all_engines_btn = QPushButton("一键启动所有引擎")
+        self.start_all_engines_btn.setToolTip("为所有已启用项目启动引擎（并行），可用于手动恢复")
+        self.start_all_engines_btn.clicked.connect(self._start_all_engines)
         proj_btns.addWidget(self.add_project_btn)
         proj_btns.addWidget(self.remove_project_btn)
+        proj_btns.addWidget(self.start_all_engines_btn)
         proj_btns.addStretch(1)
         proj_v.addLayout(proj_btns)
         proj_hint = QLabel(
@@ -600,7 +608,7 @@ class MainWindow(QMainWindow):
         if project is None:
             return
         modes = [m[0] for m in PERMISSION_MODES]
-        idx = modes.index(project.permission_mode) if project.permission_mode in modes else 0
+        idx = modes.index(project.permission_mode) if project.permission_mode in modes else 2
         self.permission_combo.setCurrentIndex(idx)
         try:
             method = ConnectionMethod(project.connection) if project.connection else None
@@ -609,7 +617,7 @@ class MainWindow(QMainWindow):
         if method and method in CONNECTION_METHODS:
             self.connection_combo.setCurrentIndex(CONNECTION_METHODS.index(method))
         else:
-            self.connection_combo.setCurrentIndex(CONNECTION_METHODS.index(ConnectionMethod.LOCAL))
+            self.connection_combo.setCurrentIndex(CONNECTION_METHODS.index(ConnectionMethod.CLOUDFLARE))
         self.hostname_edit.setText(project.public_hostname or "")
         self.git_name_edit.setText(project.git_user_name or "")
         self.git_email_edit.setText(project.git_user_email or "")
@@ -897,16 +905,40 @@ class MainWindow(QMainWindow):
             self.coord.windows = unit.windows
 
     # -------------------------------------------------- service control
+    def _start_all_engines(self) -> None:
+        """Start engines for all enabled projects (parallel)."""
+        if not self._current_token:
+            self._append_log("尚未生成访问令牌，无法启动引擎。")
+            return
+        enabled = [p for p in self.pm.list() if p.enabled]
+        if not enabled:
+            self._append_log("没有已启用的项目。")
+            return
+        self._append_log(f"正在并行启动 {len(enabled)} 个项目的引擎…")
+        self._auto_restore_enabled_projects()
+
     def _start_service_for(self, project_root: str) -> None:
         """Select a project and start the full service (engine + tunnel + gateway)."""
         if not _same_root(project_root, self._selected_root() or ""):
             self._select_root(project_root)
             self._apply_selected_project()
         if self.coord.running:
-            self._append_log("正在切换项目，先停止当前服务…")
+            current = self._selected_root()
+            if _same_root(project_root, current or ""):
+                self._append_log("该项目服务已在运行中")
+                return
+            answer = QMessageBox.question(
+                self,
+                "切换项目服务",
+                "另一个项目的服务正在运行中。\n是否停止当前服务并切换到此项目？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._append_log("正在停止当前服务…")
             self._set_busy(True)
             def _after_stop() -> None:
-                QTimer.singleShot(300, self._start_service)
+                QTimer.singleShot(500, self._start_service)
             self._stop_service_chained(_after_stop)
         else:
             self._start_service()
@@ -1273,10 +1305,21 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"状态：失败（{self.coord.message or ''}）")
         else:
             self.status_label.setText(f"状态：{state.value}")
-        running = self.coord.running or state == EngineState.STARTING
-        self.start_btn.setEnabled(not running)
+        running = self.coord.running
+        starting = state == EngineState.STARTING
+        self.start_btn.setText("停止服务" if running else "启动服务")
+        self.start_btn.setEnabled(not starting)
+        if running:
+            self.start_btn.clicked.disconnect()
+            self.start_btn.clicked.connect(self._stop_service)
+        else:
+            try:
+                self.start_btn.clicked.disconnect()
+            except TypeError:
+                pass
+            self.start_btn.clicked.connect(self._start_service)
         self.stop_btn.setEnabled(running)
-        self.restart_btn.setEnabled(not running)
+        self.restart_btn.setEnabled(not starting)
         self.test_btn.setEnabled(running)
         # 服务运行期间锁定端口输入（修改需先停止服务）
         editable = not running
