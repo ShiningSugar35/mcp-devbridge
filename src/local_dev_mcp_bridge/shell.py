@@ -62,7 +62,21 @@ def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
 
 def build_powershell_command(command: str, shell: str | None = None) -> list[str]:
     shell_path = shell or find_powershell()
-    return [shell_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]
+    # Force UTF-8 on the console stream so Chinese output / paths survive
+    # cp1252/OEM runners (GitHub Actions windows-latest etc.).
+    prefix = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
+        "[Console]::InputEncoding = [System.Text.Encoding]::UTF8;"
+    )
+    return [
+        shell_path,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        prefix + command,
+    ]
 
 
 def _run_with_tree_kill(
@@ -113,6 +127,8 @@ def run_command(
     environment = dict(os.environ)
     if env:
         environment.update(env)
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
+    environment.setdefault("PYTHONUTF8", "1")
     try:
         exit_code, raw_out, raw_err, timed_out = _run_with_tree_kill(
             args,
@@ -191,6 +207,8 @@ def run_program(
     environment = dict(os.environ)
     if env:
         environment.update(env)
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
+    environment.setdefault("PYTHONUTF8", "1")
     timed_out = False
     try:
         exit_code, raw_out, raw_err, timed_out = _run_with_tree_kill(

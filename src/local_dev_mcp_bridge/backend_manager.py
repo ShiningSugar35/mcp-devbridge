@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -98,6 +99,9 @@ class BackendManager:
         except Exception as exc:
             raise BackendError(f"访问令牌初始化失败: {exc}") from exc
 
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         proc = subprocess.Popen(
             [
                 self.python_exe,
@@ -113,6 +117,7 @@ class BackendManager:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         self._proc = proc

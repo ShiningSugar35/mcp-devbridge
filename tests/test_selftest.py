@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -34,6 +35,9 @@ def backend_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
     config_path.write_text(json.dumps(rc.model_dump(), ensure_ascii=False), encoding="utf-8")
 
     port = _free_port()
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     proc = subprocess.Popen(
         [sys.executable, "-m", "local_dev_mcp_bridge.server_main", "--config", str(config_path), "--port", str(port)],
         stdout=subprocess.PIPE,
@@ -41,6 +45,7 @@ def backend_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:

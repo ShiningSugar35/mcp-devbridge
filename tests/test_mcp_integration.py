@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -45,6 +46,9 @@ class _Backend:
             "--port",
             str(self.port),
         ]
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         self.proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -52,6 +56,7 @@ class _Backend:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:

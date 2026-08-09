@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import socket
 import sys
 
@@ -31,7 +32,19 @@ def port_in_use(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _force_utf8_stdio() -> None:
+    """Windows CI runners default to cp1252; UTF-8 stdio keeps Chinese startup
+    messages and paths from crashing the backend subprocess."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     parser = argparse.ArgumentParser(prog="localdev-mcp-bridge-backend")
     parser.add_argument("--config", default=str(constants.RC_FILE), help="runtime configuration JSON path")
     parser.add_argument("--port", type=int, default=0, help="override local port")
