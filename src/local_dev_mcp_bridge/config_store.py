@@ -115,6 +115,7 @@ def assign_project_ports(
     index: int | None = None,
     base_codex: int = constants.DEFAULT_CODEXPRO_PORT,
     base_windows: int = constants.DEFAULT_WINDOWS_MCP_PORT,
+    base_gateway: int = constants.DEFAULT_GATEWAY_PORT,
 ) -> list[ProjectConfig]:
     """Assign per-project internal ports (0 = unset) without collisions.
 
@@ -126,23 +127,29 @@ def assign_project_ports(
     """
     used_codex = {p.codexpro_port for p in projects if p.codexpro_port}
     used_windows = {p.windows_bridge_port for p in projects if p.windows_bridge_port}
+    used_gateway = {p.gateway_port for p in projects if p.gateway_port}
 
     if index is None:
         for idx, project in enumerate(projects):
-            if not project.codexpro_port or not project.windows_bridge_port:
+            if not project.codexpro_port or not project.windows_bridge_port or not project.gateway_port:
                 index = idx
                 break
         if index is None:
             return projects
     target = projects[index]
+    all_used = used_codex | used_windows | used_gateway
     if not target.codexpro_port:
-        port = find_free(base_codex, used_codex | {p.windows_bridge_port for p in projects})
+        port = find_free(base_codex, all_used)
         target.codexpro_port = port
-        used_codex.add(port)
+        all_used.add(port)
     if not target.windows_bridge_port:
-        port = find_free(base_windows, used_windows | {p.codexpro_port for p in projects})
+        port = find_free(base_windows, all_used)
         target.windows_bridge_port = port
-        used_windows.add(port)
+        all_used.add(port)
+    if not target.gateway_port:
+        port = find_free(base_gateway, all_used)
+        target.gateway_port = port
+        all_used.add(port)
     return projects
 
 

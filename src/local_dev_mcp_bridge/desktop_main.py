@@ -216,9 +216,9 @@ class MainWindow(QMainWindow):
         self.add_project_btn.clicked.connect(self._browse_project)
         self.remove_project_btn = QPushButton("删除项目")
         self.remove_project_btn.clicked.connect(self._remove_project)
-        self.start_all_engines_btn = QPushButton("一键启动所有引擎")
-        self.start_all_engines_btn.setToolTip("为所有已启用项目启动引擎（并行），可用于手动恢复")
-        self.start_all_engines_btn.clicked.connect(self._start_all_engines)
+        self.start_all_engines_btn = QPushButton("启动所有服务")
+        self.start_all_engines_btn.setToolTip("为所有启用项目启动引擎（并行），并为当前选中项目启动公网服务")
+        self.start_all_engines_btn.clicked.connect(self._start_all_services)
         proj_btns.addWidget(self.add_project_btn)
         proj_btns.addWidget(self.remove_project_btn)
         proj_btns.addWidget(self.start_all_engines_btn)
@@ -607,6 +607,7 @@ class MainWindow(QMainWindow):
         project = next((p for p in load_projects() if p.root_path == root), None)
         if project is None:
             return
+        self.pm.ensure_ports(project)
         modes = [m[0] for m in PERMISSION_MODES]
         idx = modes.index(project.permission_mode) if project.permission_mode in modes else 2
         self.permission_combo.setCurrentIndex(idx)
@@ -905,17 +906,18 @@ class MainWindow(QMainWindow):
             self.coord.windows = unit.windows
 
     # -------------------------------------------------- service control
-    def _start_all_engines(self) -> None:
-        """Start engines for all enabled projects (parallel)."""
+    def _start_all_services(self) -> None:
+        """Start all enabled project engines (parallel) + service for selected project."""
         if not self._current_token:
-            self._append_log("尚未生成访问令牌，无法启动引擎。")
+            self._append_log("尚未生成访问令牌，无法启动。")
             return
         enabled = [p for p in self.pm.list() if p.enabled]
         if not enabled:
             self._append_log("没有已启用的项目。")
             return
-        self._append_log(f"正在并行启动 {len(enabled)} 个项目的引擎…")
+        self._append_log(f"正在启动 {len(enabled)} 个项目的引擎与服务…")
         self._auto_restore_enabled_projects()
+        QTimer.singleShot(4000, self._start_service)
 
     def _start_service_for(self, project_root: str) -> None:
         """Select a project and start the full service (engine + tunnel + gateway)."""
@@ -979,7 +981,7 @@ class MainWindow(QMainWindow):
             connection=self._selected_connection(),
             public_hostname=self.hostname_edit.text().strip(),
             tunnel_token=self._tunnel_token_value(),
-            gateway_port=self._app_config.gateway_port,
+            gateway_port=project.gateway_port if project is not None and project.gateway_port else self._app_config.gateway_port,
             codexpro_port=codexpro_port,
             windows_mcp_port=windows_mcp_port,
         )

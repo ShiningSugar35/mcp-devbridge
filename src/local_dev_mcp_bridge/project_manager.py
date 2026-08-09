@@ -52,6 +52,7 @@ class ProjectView:
     root_path: str
     codexpro_port: int
     windows_bridge_port: int
+    gateway_port: int
     enabled: bool
     windows_enabled: bool
     state: str
@@ -368,6 +369,7 @@ class ProjectManager:
             root_path=project.root_path,
             codexpro_port=project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT,
             windows_bridge_port=project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT,
+            gateway_port=project.gateway_port or constants.DEFAULT_GATEWAY_PORT,
             enabled=project.enabled,
             windows_enabled=project.windows_enabled,
             state=state.value,
