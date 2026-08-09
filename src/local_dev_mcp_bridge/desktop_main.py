@@ -83,8 +83,6 @@ PERMISSION_PROFILE = {"read_only": "safe", "workspace": "developer", "system": "
 CONNECTION_METHODS = [
     ConnectionMethod.LOCAL,
     ConnectionMethod.CLOUDFLARE,
-    ConnectionMethod.NGROK,
-    ConnectionMethod.QUICK,
 ]
 BRIDGE_TOKEN_CRED_NAME = "LocalDevMCPBridge/WindowsBridgeToken"
 TUNNEL_TOKEN_CRED_NAME = "LocalDevMCPBridge/CloudflareTunnelToken"
