@@ -195,8 +195,8 @@ class MainWindow(QMainWindow):
         proj_v = QVBoxLayout(proj_box)
         proj_v.setContentsMargins(12, 12, 12, 12)
         proj_v.setSpacing(8)
-        self.project_table = QTableWidget(0, 6)
-        self.project_table.setHorizontalHeaderLabels(["名称", "路径", "状态", "CodexPro端口", "启用", "入口"])
+        self.project_table = QTableWidget(0, 7)
+        self.project_table.setHorizontalHeaderLabels(["名称", "路径", "状态", "端口", "启用", "入口", "操作"])
         self.project_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.project_table.verticalHeader().setVisible(False)
         self.project_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -212,20 +212,13 @@ class MainWindow(QMainWindow):
         self.add_project_btn.clicked.connect(self._browse_project)
         self.remove_project_btn = QPushButton("删除项目")
         self.remove_project_btn.clicked.connect(self._remove_project)
-        self.start_project_btn = QPushButton("启动项目（引擎）")
-        self.start_project_btn.setToolTip("仅启动该项目 CodexPro 引擎（本机回环端口），不影响其他项目")
-        self.start_project_btn.clicked.connect(self._start_project_engine)
-        self.stop_project_btn = QPushButton("停止项目")
-        self.stop_project_btn.clicked.connect(self._stop_project_engine)
         proj_btns.addWidget(self.add_project_btn)
         proj_btns.addWidget(self.remove_project_btn)
-        proj_btns.addWidget(self.start_project_btn)
-        proj_btns.addWidget(self.stop_project_btn)
         proj_btns.addStretch(1)
         proj_v.addLayout(proj_btns)
         proj_hint = QLabel(
-            "「启动公网服务」使用选中项目；「启动项目（引擎）」可让多个项目引擎同时在 127.0.0.1 各自端口运行，"
-            "彼此独立。表中勾选「启用」后，桌面启动会自动恢复该项目引擎。"
+            "表中勾选「启用」后，桌面启动会自动恢复该项目引擎（并行）。"
+            "点击项目行的「启动服务」将选中该项目并启动 Cloudflare 隧道 + 公网 MCP 入口。"
         )
         proj_hint.setWordWrap(True)
         proj_hint.setStyleSheet("color: gray;")
@@ -569,11 +562,16 @@ class MainWindow(QMainWindow):
             enable_box.setToolTip("启用后，桌面启动时自动恢复该项目引擎")
             enable_box.stateChanged.connect(lambda _state, root=view.root_path: self._toggle_project_enabled(root))
             table.setCellWidget(row, 4, enable_box)
+            svc_btn = QPushButton("启动服务")
+            svc_btn.setToolTip(f"为 {view.name} 启动 Cloudflare 隧道 + 公网 MCP 入口")
+            svc_btn.clicked.connect(lambda checked, root=view.root_path: self._start_service_for(root))
+            table.setCellWidget(row, 6, svc_btn)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         if views:
             active_root = self._app_config.active_workspace or ""
             table.selectRow(max(self._row_of_root(active_root), 0))
@@ -899,6 +897,33 @@ class MainWindow(QMainWindow):
             self.coord.windows = unit.windows
 
     # -------------------------------------------------- service control
+    def _start_service_for(self, project_root: str) -> None:
+        """Select a project and start the full service (engine + tunnel + gateway)."""
+        if not _same_root(project_root, self._selected_root() or ""):
+            self._select_root(project_root)
+            self._apply_selected_project()
+        if self.coord.running:
+            self._append_log("正在切换项目，先停止当前服务…")
+            self._set_busy(True)
+            def _after_stop() -> None:
+                QTimer.singleShot(300, self._start_service)
+            self._stop_service_chained(_after_stop)
+        else:
+            self._start_service()
+
+    def _stop_service_chained(self, on_done: Any) -> None:
+        """Stop the current service and call on_done after it's fully stopped."""
+        self._bind_coord_engines()
+        self._append_log("正在停止服务…")
+        def run() -> str:
+            self.coord.stop()
+            return "服务已停止"
+        def done(result: Any) -> None:
+            self._set_busy(False)
+            self._poll_status()
+            on_done()
+        _run_async(run, done)
+
     def _current_options(self) -> StartOptions:
         project = self._project_config()
         codexpro_port = (

@@ -318,21 +318,30 @@ class ProjectManager:
             self.stop(project_id)
 
     def start_enabled(self, *, codex_token: str, windows_token: str | None = None) -> list[ProjectView]:
-        """Auto-restore: start engines of every enabled project (best effort)."""
+        """Auto-restore: start engines of every enabled project in parallel."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        enabled_projects = [p for p in self.list() if p.enabled]
+        if not enabled_projects:
+            return []
+
         started: list[ProjectView] = []
-        for project in self.list():
-            if not project.enabled:
-                continue
-            try:
-                started.append(
-                    self.start(
-                        project.id,
-                        codex_token=codex_token,
-                        windows_token=windows_token,
-                    )
-                )
-            except (SpawnError, ValueError):
-                continue
+        max_workers = min(len(enabled_projects), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    self.start,
+                    p.id,
+                    codex_token=codex_token,
+                    windows_token=windows_token,
+                ): p
+                for p in enabled_projects
+            }
+            for future in as_completed(futures):
+                try:
+                    started.append(future.result())
+                except (SpawnError, ValueError):
+                    continue
         return started
 
     # --------------------------------------------------------------- views
