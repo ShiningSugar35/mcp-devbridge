@@ -18,6 +18,7 @@ export interface CodexProConfig {
   widgetDomain: string;
   authToken?: string;
   requireHttpToken: boolean;
+  shell?: string;
   bashMode: BashMode;
   bashTranscript: BashTranscriptMode;
   bashSessionId?: string;
@@ -313,6 +314,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     requireHttpToken,
     bashMode: bashModeFrom(bashArg ?? process.env.CODEXPRO_BASH_MODE),
     bashTranscript: bashTranscriptFrom(bashTranscriptArg ?? process.env.CODEXPRO_BASH_TRANSCRIPT),
+    shell: process.env.CODEXPRO_SHELL?.trim() || undefined,
     bashSessionId,
     requireBashSession,
     codexSessions: codexSessionsFrom(codexSessionsArg ?? process.env.CODEXPRO_CODEX_SESSIONS),

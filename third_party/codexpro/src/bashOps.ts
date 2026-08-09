@@ -226,7 +226,7 @@ function assertBashSession(config: CodexProConfig, sessionId?: string): string |
 }
 
 function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
-  if (config.inheritEnv) {
+  if (config.inheritEnv || process.platform === "win32") {
     return { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" };
   }
   return {
@@ -241,8 +241,24 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   };
 }
 
-function bashExecutable(): string {
-  return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
+function shellInfo(config: CodexProConfig): { executable: string; shellArgs: string[] } {
+  const customShell = config.shell?.trim().toLowerCase();
+  if (customShell) {
+    if (customShell === "powershell" || customShell === "pwsh" || customShell === "windows_powershell") {
+      return { executable: "powershell.exe", shellArgs: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"] };
+    }
+    if (customShell === "cmd") {
+      return { executable: "cmd.exe", shellArgs: ["/c"] };
+    }
+    if (customShell === "bash" || customShell === "git-bash") {
+      return { executable: "bash", shellArgs: ["-lc"] };
+    }
+    return { executable: customShell, shellArgs: ["-c"] };
+  }
+  if (process.platform === "win32") {
+    return { executable: "powershell.exe", shellArgs: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"] };
+  }
+  return { executable: fs.existsSync("/bin/bash") ? "/bin/bash" : "bash", shellArgs: ["-lc"] };
 }
 
 function trimOutput(value: string, maxBytes: number): { value: string; truncated: boolean } {
@@ -286,7 +302,8 @@ export async function runBash(
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
-    const child = spawn(bashExecutable(), ["-lc", command], {
+    const { executable, shellArgs } = shellInfo(config);
+    const child = spawn(executable, [...shellArgs, command], {
       cwd,
       env: makeEnv(config),
       stdio: ["ignore", "pipe", "pipe"],

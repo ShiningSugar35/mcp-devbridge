@@ -135,6 +135,7 @@ class ProjectUnit:
             extra_env=extra_env,
         )
         if windows_enabled:
+            assert windows_token is not None, "windows_enabled requires a windows token"
             self.windows.start(windows_token)
         else:
             if self.windows.is_running:

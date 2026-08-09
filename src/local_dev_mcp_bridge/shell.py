@@ -54,7 +54,12 @@ class ShellInfo:
     @property
     def is_wsl(self) -> bool:
         """True when this shell runs inside the Windows Subsystem for Linux."""
-        return self.kind == "wsl" or self.kind == "bash" and self.path and Path(self.path).resolve() == _WINDOWS_BASH.resolve()
+        is_windows_bash = (
+            bool(self.path)
+            and self.kind == "bash"
+            and Path(self.path).resolve() == _WINDOWS_BASH.resolve()
+        )
+        return self.kind == "wsl" or is_windows_bash
 
     @property
     def version(self) -> str:

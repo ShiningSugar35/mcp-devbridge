@@ -268,6 +268,13 @@ def build_codex_env(
     }
     if windows_token:
         env["CODEXPRO_WINDOWS_BRIDGE_TOKEN"] = windows_token
+    # Detect best Windows shell for CodexPro command execution
+    from .shell import default_shell
+    try:
+        default = default_shell()
+        env["CODEXPRO_SHELL"] = default.kind
+    except Exception:
+        env["CODEXPRO_SHELL"] = "powershell"
     if extra:
         env.update(extra)
     return env

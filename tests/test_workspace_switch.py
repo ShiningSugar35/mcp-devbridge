@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ PROJ_A_ID = "aaaa1111"
 PROJ_B_ID = "bbbb2222"
 
 
-def _ctx(session_id: str | None) -> SimpleNamespace:
+def _ctx(session_id: str | None) -> Any:
     headers: dict[str, str] = {}
     if session_id is not None:
         headers["mcp-session-id"] = session_id
@@ -81,7 +82,7 @@ def test_switch_changes_only_calling_session(tools: tuple[LocalDevTools, Path, P
     assert "marker_A.txt" in dev.list_directory("")
     # 项目工作区根必须随 session 切换（相对路径解析到新根）
     assert "marker_B.txt" in dev.read_file("marker_B.txt", ctx=ctx_a)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="文件不存在"):
         dev.read_file("marker_A.txt", ctx=ctx_a)
 
 

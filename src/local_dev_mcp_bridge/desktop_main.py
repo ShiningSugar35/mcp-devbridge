@@ -575,7 +575,8 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         if views:
-            table.selectRow(max(self._row_of_root(self._app_config.active_workspace), 0))
+            active_root = self._app_config.active_workspace or ""
+            table.selectRow(max(self._row_of_root(active_root), 0))
 
     def _row_of_root(self, root: str) -> int:
         for row in range(self.project_table.rowCount()):

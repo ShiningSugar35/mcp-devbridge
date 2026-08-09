@@ -228,7 +228,7 @@ class LocalDevTools:
     ) -> None:
         # 多项目：编目优先；未提供时按单项目语义构造（兼容既有调用/测试）。
         if projects and default_project_id is None:
-            match = next((p for p in projects if _norm_eq(p.root_path, workspace)), None)
+            match = next((p for p in projects if _norm_eq(Path(p.root_path), workspace)), None)
             default_project_id = match.id if match is not None else projects[0].id
         if not projects or not all(p.id for p in projects):
             projects = [
@@ -245,7 +245,9 @@ class LocalDevTools:
                 )
             ]
         self._catalog = WorkspaceCatalog(projects, default_id=default_project_id)
-        self.workspace = Path(self._catalog.default.root_path).resolve()
+        default_project = self._catalog.default
+        assert default_project is not None, "LocalDevTools 总是至少有一个项目"  # noqa: S101
+        self.workspace = Path(default_project.root_path).resolve()
         self.policy = PermissionPolicy(permission_mode, self.workspace)
         self.test_command = test_command
         self.lint_command = lint_command
@@ -392,11 +394,14 @@ class LocalDevTools:
         self._require("info", ctx)
         workspace = self._workspace(ctx)
         key = WorkspaceCatalog.session_key(ctx)
-        bound_id = self._catalog.project(key).id
+        current = self._catalog.project(key)
+        bound_id = current.id if current is not None else ""
+        default_project = self._catalog.default
+        default_id = default_project.id if default_project is not None else ""
         rows = [f"项目列表（会话 {key}）:", f"{'名称':<24} {'路径':<48} {'状态':<6} {'CodexPro端口':<12} 备注"]
         for project in self._catalog.projects():
             running = "运行中" if port_listening(project.codexpro_port or 0) else "未运行"
-            mark = "← 当前绑定" if project.id == bound_id else ("默认" if project.id == self._catalog.default.id else "")
+            mark = "← 当前绑定" if project.id == bound_id else ("默认" if project.id == default_id else "")
             rows.append(
                 f"{project.display_name or Path(project.root_path).name:<24} "
                 f"{project.root_path:<48} {running:<6} {project.codexpro_port or 0:<12} {mark}"
@@ -429,6 +434,7 @@ class LocalDevTools:
         self._require("info", ctx)
         workspace = self._workspace(ctx)
         project = self._catalog.project(WorkspaceCatalog.session_key(ctx))
+        project_name = project.display_name if project is not None else workspace.name
         branch = ""
         is_git = (workspace / ".git").exists()
         if is_git:
@@ -442,7 +448,7 @@ class LocalDevTools:
         versions = detect_binaries()
         return "\n".join(
             [
-                f"项目: {project.display_name or workspace.name}",
+                f"项目: {project_name}",
                 f"项目根目录: {workspace}",
                 f"权限模式: {self._policy(ctx).describe()}",
                 f"是否 Git 仓库: {'是' if is_git else '否'}",

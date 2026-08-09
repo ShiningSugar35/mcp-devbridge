@@ -10,6 +10,7 @@ import os
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -146,7 +147,7 @@ def test_start_single_project(manager: tuple[ProjectManager, Path]) -> None:
     proj = pm.add(str(tmp / "projA"))
     view = pm.start(proj.id, codex_token=TOKEN)
     assert view.state == EngineState.READY.value
-    unit = pm.unit(proj.id)
+    unit: Any = pm.unit(proj.id)
     assert unit is not None
     assert unit.calls[0]["permission_mode"] == "workspace"
     assert unit.calls[0]["windows_enabled"] is False
@@ -156,7 +157,7 @@ def test_start_uses_project_permission(manager: tuple[ProjectManager, Path]) -> 
     pm, tmp = manager
     proj = pm.add(str(tmp / "projA"), permission_mode="system")
     pm.start(proj.id, codex_token=TOKEN, execution_profile="full_system")
-    unit = pm.unit(proj.id)
+    unit: Any = pm.unit(proj.id)
     assert unit is not None
     assert unit.calls[0]["permission_mode"] == "system"
     assert unit.windows.started is False
@@ -168,7 +169,7 @@ def test_windows_starts_only_when_enabled_and_token(manager: tuple[ProjectManage
     proj.windows_enabled = True
     pm.update(proj)
     pm.start(proj.id, codex_token=TOKEN, windows_token="w" * 32)
-    unit = pm.unit(proj.id)
+    unit: Any = pm.unit(proj.id)
     assert unit is not None
     assert unit.calls[0]["windows_enabled"] is True
     assert unit.windows.started is True
@@ -184,7 +185,8 @@ def test_parallel_lifecycle_isolation(manager: tuple[ProjectManager, Path]) -> N
     assert view_b.state == EngineState.READY.value
     assert view_a.codexpro_port != view_b.codexpro_port
     pm.stop(proj_a.id)
-    unit_a, unit_b = pm.unit(proj_a.id), pm.unit(proj_b.id)
+    unit_a: Any = pm.unit(proj_a.id)
+    unit_b: Any = pm.unit(proj_b.id)
     assert unit_a is not None and unit_b is not None
     assert unit_a.state == EngineState.IDLE
     assert unit_b.state == EngineState.READY

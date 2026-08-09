@@ -26,6 +26,7 @@ import threading
 import time
 from collections.abc import Callable
 from email.utils import formatdate
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -46,6 +47,47 @@ from starlette.routing import Route
 from . import constants
 from .oauth_provider import ConsentExpired, LocalOAuthProvider
 from .secrets import SecretsStore
+from .shell import detect_binaries, get_shell_info, run_command, run_program
+
+_LOCAL_TOOL_NAMES = frozenset({"run_command", "run_program", "shell_self_test"})
+
+_PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
+    {
+        "name": "run_command",
+        "description": "在项目的 PowerShell (Windows) 中执行命令。返回 shell、退出码与 stdout/stderr。WSL 不会被默认调用。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的命令"},
+                "cwd": {"type": "string", "description": "工作目录（相对项目根目录的相对路径，默认使用项目根目录）"},
+                "timeout_seconds": {"type": "integer", "description": "超时秒数，默认 600（10 分钟）"},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "run_program",
+        "description": "直接运行程序（参数数组，不经 shell 解析，避免注入风险）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "executable": {"type": "string", "description": "程序路径或名称"},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "参数列表"},
+                "cwd": {"type": "string", "description": "工作目录（相对项目根目录的相对路径，默认使用项目根目录）"},
+                "timeout_seconds": {"type": "integer", "description": "超时秒数，默认 600（10 分钟）"},
+            },
+            "required": ["executable"],
+        },
+    },
+    {
+        "name": "shell_self_test",
+        "description": "检测默认 Shell 是否可执行以及 python/git/pytest/pyright 是否可调用，返回逐项 ✓/✗ 结果。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+]
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -129,6 +171,56 @@ def _rewrite_server_identity(payload: bytes) -> bytes:
     return payload
 
 
+def _inject_tools(payload: bytes) -> bytes:
+    """Add Python tool definitions to the tools/list response.
+    
+    Handles both SSE (``data: {...}`` lines) and plain JSON bodies.
+    """
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return payload
+
+    def _patch(obj: Any) -> Any:
+        if isinstance(obj, dict) and isinstance(obj.get("result"), dict):
+            tools = obj["result"].get("tools")
+            if isinstance(tools, list):
+                tools.extend(_PYTHON_TOOL_DEFS)
+        return obj
+
+    if text.lstrip().startswith("data:") or "\ndata:" in text:
+        out_lines = []
+        for line in text.splitlines(keepends=True):
+            if line.startswith("data:"):
+                body_line = line[5:].lstrip()
+                if body_line.strip() == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(body_line.strip())
+                    out_lines.append(f"data: {json.dumps(_patch(obj), ensure_ascii=False)}\n")
+                    continue
+                except json.JSONDecodeError:
+                    pass
+            out_lines.append(line)
+        return "".join(out_lines).encode("utf-8")
+
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and isinstance(obj.get("result"), dict) and "tools" in obj["result"]:
+            return json.dumps(_patch(obj), ensure_ascii=False).encode("utf-8")
+    except json.JSONDecodeError:
+        pass
+    return payload
+
+
+def _jsonrpc_result(rpc_id: Any, result: Any) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
+
+
+def _jsonrpc_error(rpc_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
+
+
 def _is_loopback(request: Request) -> bool:
     for header in ("cf-connecting-ip", "x-forwarded-for"):
         value = request.headers.get(header)
@@ -171,6 +263,7 @@ class OAuthGateway:
             lambda: SecretsStore().get(constants.ACCESS_TOKEN_CRED_NAME)
         )
         self.allow_local_anonymous = allow_local_anonymous
+        self._workspace = Path(workspace) if workspace else None
         self._provider = provider or LocalOAuthProvider(
             issuer_url=self.public_base,
             resource_url=self.resource_url,
@@ -257,31 +350,50 @@ class OAuthGateway:
 
     # ------------------------------------------------------------- /mcp
     async def _mcp_endpoint(self, request: Request) -> Response:
+        body = await request.body()
         auth_header = request.headers.get("authorization", "")
         bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
         engine_token = self.upstream_token_source()
 
+        # --- resolve proxy token (same as before) ---
+        proxy_token: str | None = None
         if bearer:
             if _constant_time_eq(bearer, engine_token):
-                # Legacy ChatGPT flow: passthrough; the engine re-validates.
-                return await self._proxy(request, bearer)
-            record = await self._provider.load_access_token(bearer)
-            if record is not None:
-                if record.resource and record.resource.rstrip("/") != self.resource_url:
+                proxy_token = bearer
+            else:
+                record = await self._provider.load_access_token(bearer)
+                if record is not None:
+                    if record.resource and record.resource.rstrip("/") != self.resource_url:
+                        return self._unauthorized()
+                    if engine_token:
+                        proxy_token = engine_token
+                    else:
+                        return self._unauthorized()
+                else:
                     return self._unauthorized()
-                if not engine_token:
-                    return self._unauthorized()
-                return await self._proxy(request, engine_token)
+        elif self.allow_local_anonymous and _is_loopback(request):
+            proxy_token = None
+        else:
             return self._unauthorized()
-        if self.allow_local_anonymous and _is_loopback(request):
-            return await self._proxy(request, None)
-        return self._unauthorized()
 
-    async def _proxy(self, request: Request, authorization: str | None) -> Response:
+        # --- intercept local Python tool calls ---
+        if request.method == "POST":
+            try:
+                rpc = json.loads(body)
+            except json.JSONDecodeError:
+                rpc = None
+            if isinstance(rpc, dict) and rpc.get("method") == "tools/call":
+                params = rpc.get("params") or {}
+                name = params.get("name", "")
+                if name in _LOCAL_TOOL_NAMES:
+                    return await self._exec_local_tool(name, rpc, params)
+
+        return await self._proxy(request, body, proxy_token)
+
+    async def _proxy(self, request: Request, body: bytes, authorization: str | None) -> Response:
         target = f"{self.upstream_url}{request.url.path}"
         if request.url.query:
             target = f"{target}?{request.url.query}"
-        body = await request.body()
         headers = {
             key: value for key, value in request.headers.items() if key.lower() not in _HOP_HEADERS
         }
@@ -300,15 +412,93 @@ class OAuthGateway:
             for key, value in upstream.headers.items()
             if key.lower() not in _HOP_HEADERS
         }
-        if request.method == "POST" and b"initialize" in body:
-            await upstream.aread()
-            rewritten = _rewrite_server_identity(upstream.content)
-            return Response(content=rewritten, status_code=upstream.status_code, headers=filtered)
+        if request.method == "POST":
+            if b'"tools/list"' in body:
+                await upstream.aread()
+                rewritten = _inject_tools(upstream.content)
+                return Response(content=rewritten, status_code=upstream.status_code, headers=filtered)
+            if b"initialize" in body:
+                await upstream.aread()
+                rewritten = _rewrite_server_identity(upstream.content)
+                return Response(content=rewritten, status_code=upstream.status_code, headers=filtered)
         return StreamingResponse(
             upstream.aiter_raw(),
             status_code=upstream.status_code,
             headers=filtered,
         )
+
+    # ---------------------------------------------------- local tools
+    async def _exec_local_tool(self, name: str, rpc: dict[str, Any], params: dict[str, Any]) -> JSONResponse:
+        rpc_id = rpc.get("id")
+        workspace = self._workspace or Path.cwd()
+        try:
+            if name == "run_command":
+                command = str(params.get("command", ""))
+                if not command.strip():
+                    raise ValueError("command 不能为空。")
+                cwd_rel = str(params.get("cwd", "")).strip()
+                cwd = (workspace / cwd_rel).resolve() if cwd_rel else workspace
+                timeout = max(1, min(int(params.get("timeout_seconds") or 600), 1800))
+                res = run_command(command, cwd=cwd, timeout_seconds=timeout)
+                text = (
+                    f"shell: {res.shell}\n"
+                    f"exit_code: {res.exit_code}\n"
+                    f"duration: {res.duration_seconds:.2f}s\n"
+                    f"{'*** TIMED OUT ***' if res.timed_out else ''}\n"
+                    f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]}))
+            elif name == "run_program":
+                executable = str(params.get("executable", ""))
+                if not executable.strip():
+                    raise ValueError("executable 不能为空。")
+                args = [str(a) for a in (params.get("args") or [])]
+                cwd_rel = str(params.get("cwd", "")).strip()
+                cwd = (workspace / cwd_rel).resolve() if cwd_rel else workspace
+                timeout = max(1, min(int(params.get("timeout_seconds") or 600), 1800))
+                res = run_program(executable, args, cwd=cwd, timeout_seconds=timeout)
+                text = (
+                    f"command: {res.command}\n"
+                    f"exit_code: {res.exit_code}\n"
+                    f"duration: {res.duration_seconds:.2f}s\n"
+                    f"{'*** TIMED OUT ***' if res.timed_out else ''}\n"
+                    f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]}))
+            elif name == "shell_self_test":
+                lines: list[str] = []
+                info = get_shell_info()
+                default = info.get("default") or {}
+                if isinstance(default, dict):
+                    if default.get("executable"):
+                        lines.append(f"[✓] shell: {default.get('name', '?')} ({default.get('path', '?')})")
+                    else:
+                        lines.append(f"[✗] shell: 不可执行 ({default.get('path', '?')})")
+                bin_versions = detect_binaries()
+                for tool in ("python", "git", "node", "npm"):
+                    ver = bin_versions.get(tool, "")
+                    symbol = "[✓]" if ver else "[✗]"
+                    lines.append(f"{symbol} {tool}: {ver or '未安装'}")
+                for tool in ("pytest", "pyright"):
+                    import subprocess as _sp
+                    try:
+                        r = _sp.run(
+                            ["python", "-m", tool, "--version"],
+                            capture_output=True,
+                            timeout=30,
+                            creationflags=0x08000000 if hasattr(_sp, "CREATE_NO_WINDOW") else 0,
+                        )
+                        out = r.stdout.decode("utf-8", errors="replace").strip().splitlines()
+                        lines.append(f"[✓] {tool}: {out[0] if out else 'ok'} (python -m {tool})")
+                    except Exception:
+                        lines.append(f"[✗] {tool}: 未安装或不可调用")
+                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": "\n".join(lines)}]}))
+            else:
+                raise ValueError(f"未知的本地工具: {name}")
+        except ValueError as exc:
+            return JSONResponse(_jsonrpc_error(rpc_id, -32602, str(exc)))
+        except Exception as exc:
+            return JSONResponse(_jsonrpc_error(rpc_id, -32603, f"工具执行失败: {exc}"))
 
     # ----------------------------------------------------------- helper
     def _unauthorized(self) -> Response:

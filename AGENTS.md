@@ -78,7 +78,8 @@ mcp-devBridge/
 │       ├── processes.py        # 受管进程注册（dev server 等）
 │       ├── permissions.py      # 权限：read_only / workspace / system
 │       ├── execution_profile.py # Shell 执行档位：safe / developer（默认）/ full_system + 危险命令拦截
-│       ├── tools.py            # 34 个 MCP 工具实现（含 shell_self_test）
+│       ├── project_manager.py   # 多项目：ProjectUnit（每项目引擎对）+ ProjectManager（编目/端口/自动恢复）
+│       ├── tools.py            # 37 个 MCP 工具实现（含 list_projects / switch_workspace / shell_info / shell_self_test）
 │       ├── server_factory.py   # MCPServer + Starlette app + 认证/审计/限速中间件
 │       ├── server_main.py      # 后端 CLI（--config / --port），被桌面进程拉起
 │       ├── standalone_server.py# 简化 CLI 单进程入口
@@ -90,12 +91,14 @@ mcp-devBridge/
 │       ├── app_state.py        # 服务协调状态机 ServiceCoordinator（顺序、URL 固定性、故障清理；无 Qt）
 │       ├── backend_manager.py  # 后端子进程管理 /health 轮询（已归档，桌面改走 ServiceCoordinator）
 │       └── desktop_main.py     # Phase 3 桌面 UI（PySide6 单窗口，已接线 ServiceCoordinator）
-├── tests/                      # pytest 测试（当前 239 项全绿）
+├── tests/                      # pytest 测试（当前 258 项全绿）
 │   ├── conftest.py
 │   ├── test_fs.py · test_commands.py · test_git.py · test_config.py
 │   ├── test_mcp_integration.py · test_selftest.py
 │   ├── test_engines.py · test_tunnel_manager.py · test_app_state.py
 │   ├── test_oauth.py           # OAuth 2.1 发现/注册/PKCE/刷新/撤销/网关代理（27 项）
+│   ├── test_project_manager.py # 多项目：编目/端口唯一/并行启停/自动恢复/真机双引擎
+│   └── test_workspace_switch.py# 会话级 switch_workspace 隔离 + shell_info
 ├── .test-workspace/            # 测试用临时工作区
 └── .tools/                     # cloudflared.exe（2026.7.3）等二进制
 ```
@@ -125,6 +128,8 @@ Phase 6 日志浏览页 + 自动清理      (完成：三 Tab 页 + 轮转 + 脱
 Phase 7 打包（PyInstaller onedir + Inno Setup）+ 全文档   (完成：安装器编译+静默安装+启动冒烟通过；GUI 自测闭环待用户)
 Phase 8 MCP OAuth（Gemini）      (代码完成：oauth_provider + gateway，test_oauth 27 项，全量 181 全绿；
                                   待用户切换 CF 路由 8787↓8786 + Gemini 真机接入)
+Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + 会话级 switch_workspace +
+                                  shell_info + 桌面项目表格，全量 258 全绿；真机双项目待用户验收)
 ```
 
 ## 八、当前已知问题（重要）
@@ -139,6 +144,26 @@ Phase 8 MCP OAuth（Gemini）      (代码完成：oauth_provider + gateway，te
 ---
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
+
+- 2026-08-09 · **多项目并行（v0.3.0）**：
+  - 新模块 `project_manager.py`：每项目一个 `ProjectUnit`（自己的 CodexPro + Windows 桥管理器，
+    自己的端口，`CODEXPRO_ROOT/ALLOWED_ROOTS` 指向各自目录，互不干扰、可同时运行）；
+    `ProjectManager` 维护 `projects.json` 编目（项目 id、每项目端口分配、增删、自动恢复）。
+  - `ProjectConfig` 新增 `id / codexpro_port / windows_bridge_port / windows_enabled / enabled`；
+    `RuntimeConfig.project_catalog_enabled`（后端是否加载项目编目）；旧配置自动迁移（id 补发、
+    端口补齐）。`engines.CodexProManager/WindowsBridgeManager.wait_ready` 现在把自身状态置
+    READY（此前只有协调层置 READY，多项目视图卡在“启动中”）。
+  - 会话级工作区绑定（不改协议层）：`tools.py` 新增 `WorkspaceCatalog`，按请求上下文
+    （`ctx.session_id` / `mcp-session-id` 请求头，兼容 Starlette Headers 非 dict 结构）绑定
+    项目；`switch_workspace(project_id)` 只影响调用它的 MCP session；新增工具
+    `list_projects / switch_workspace / shell_info`（默认 Shell 优先 pwsh>powershell>cmd>Git
+    Bash，WSL 永不默认）。
+  - 桌面：项目下拉 → 项目表格（名称/路径/状态/CodexPro端口/启用勾选/入口标记）+「添加项目…
+    /删除项目/启动项目（引擎）/停止项目」；启动桌面自动恢复「启用」项目引擎；「启动公网服务」
+    复用选中项目的引擎实例（`_bind_coord_engines`，不重复 spawn）；启动预检对已运行引擎放行。
+  - 测试：新增 tests/test_project_manager.py（19 项，含双引擎真机并行 spawn）、
+    tests/test_workspace_switch.py（9 项）、test_mcp_integration 新增双会话隔离真实链路；
+    全量 **258 全绿**；ruff/pyright 0 错误；offscreen UI 冒烟通过。
 
 - 2026-08-09 · **桌面 UI 响应式重构 + 权限模式合一（v0.2.0）**：
   - 布局：`QMainWindow → QScrollArea`（垂直 AsNeeded / 水平 AlwaysOff）→ 内容 widget；
