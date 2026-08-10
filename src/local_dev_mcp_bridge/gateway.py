@@ -19,6 +19,7 @@ host. No second tunnel, no second URL, tokens never written to logs.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import html
 import json
@@ -45,74 +46,75 @@ from starlette.responses import (
 from starlette.routing import Route
 
 from . import constants
+from .constants import LOG_DIR as _LOG_DIR
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
 from .secrets import SecretsStore
 from .shell import detect_binaries, get_shell_info, run_command, run_program
 
 _LOCAL_TOOL_NAMES = frozenset({
     "run_command", "run_program", "shell_self_test",
-    "list_workspaces", "get_current_workspace", "switch_workspace",
+    "devbridge_list_workspaces", "devbridge_get_current_workspace", "devbridge_switch_workspace",
 })
 
 _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     {
         "name": "run_command",
-        "description": "在项目的 PowerShell (Windows) 中执行命令。返回 shell、退出码与 stdout/stderr。WSL 不会被默认调用。",
+        "description": "Execute a command in the project's PowerShell shell. Returns shell type, exit code, stdout, and stderr. WSL is never auto-selected.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "要执行的命令"},
-                "cwd": {"type": "string", "description": "工作目录（相对项目根目录的相对路径，默认使用项目根目录）"},
-                "timeout_seconds": {"type": "integer", "description": "超时秒数，默认 600（10 分钟）"},
+                "command": {"type": "string", "description": "Command to execute"},
+                "cwd": {"type": "string", "description": "Working directory relative to project root. Defaults to project root."},
+                "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 600, max 1800)"},
             },
             "required": ["command"],
         },
     },
     {
         "name": "run_program",
-        "description": "直接运行程序（参数数组，不经 shell 解析，避免注入风险）。",
+        "description": "Run a program directly with an argument array, bypassing shell parsing (prevents injection).",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "executable": {"type": "string", "description": "程序路径或名称"},
-                "args": {"type": "array", "items": {"type": "string"}, "description": "参数列表"},
-                "cwd": {"type": "string", "description": "工作目录（相对项目根目录的相对路径，默认使用项目根目录）"},
-                "timeout_seconds": {"type": "integer", "description": "超时秒数，默认 600（10 分钟）"},
+                "executable": {"type": "string", "description": "Program path or name"},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "Argument list"},
+                "cwd": {"type": "string", "description": "Working directory relative to project root. Defaults to project root."},
+                "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 600, max 1800)"},
             },
             "required": ["executable"],
         },
     },
     {
         "name": "shell_self_test",
-        "description": "检测默认 Shell 是否可执行以及 python/git/pytest/pyright 是否可调用，返回逐项 ✓/✗ 结果。",
+        "description": "Check whether the default shell is executable and whether python/git/pytest/pyright are available. Returns per-line checkmarks.",
         "inputSchema": {
             "type": "object",
             "properties": {},
         },
     },
     {
-        "name": "list_workspaces",
-        "description": "列出所有已注册的项目工作区，包含路径、状态和 CodexPro 端口。",
+        "name": "devbridge_list_workspaces",
+        "description": "List all registered project workspaces with path, status, and CodexPro port.",
         "inputSchema": {
             "type": "object",
             "properties": {},
         },
     },
     {
-        "name": "get_current_workspace",
-        "description": "返回当前 MCP 会话绑定的工作区项目信息。",
+        "name": "devbridge_get_current_workspace",
+        "description": "Return the workspace project bound to the current MCP session.",
         "inputSchema": {
             "type": "object",
             "properties": {},
         },
     },
     {
-        "name": "switch_workspace",
-        "description": "将当前 MCP 会话切换到指定项目工作区（仅影响当前客户端，不影响其他 GPT/Gemini 会话）。",
+        "name": "devbridge_switch_workspace",
+        "description": "Switch the current MCP session to a different project workspace. Only affects the calling client, not other GPT/Gemini sessions.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project_id": {"type": "string", "description": "项目 ID（来自 list_workspaces 返回的 id）"},
+                "project_id": {"type": "string", "description": "Project ID from devbridge_list_workspaces output"},
             },
             "required": ["project_id"],
         },
@@ -138,16 +140,72 @@ button{{font-size:15px;padding:8px 22px;border-radius:6px;cursor:pointer}}
 <body><h1>MCP DevBridge - 工作区授权</h1>
 <p>AI 客户端正在请求访问你的本地开发环境。请选择要绑定的项目工作区。</p>
 <dl>{rows}</dl>
+<form method="post" action="/consent">
+<input type="hidden" name="id" value="{cid}">
 <div class="workspace-label">选择工作区：</div>
 <select name="workspace_id">{workspace_options}</select>
 <p style="color:#57606a;font-size:13px">所选工作区将绑定到此客户端的 OAuth 授权中。不同客户端可以绑定不同工作区。</p>
-<form method="post" action="/consent">
-<input type="hidden" name="id" value="{cid}">
 <button type="submit" name="decision" value="allow" class="allow">允许访问</button>
 <button type="submit" name="decision" value="deny" class="cancel">取消</button>
 </form></body></html>"""
 
 _HOP_HEADERS = frozenset({"host", "connection", "content-length", "transfer-encoding", "authorization"})
+
+# --------------------------------------------------------- diagnostic logging
+_DIAG_SENSITIVE_KEYS = frozenset({
+    "command", "code", "access_token", "refresh_token", "client_secret",
+    "token", "authorization", "bearer", "code_verifier",
+})
+_DIAG_SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "x-api-key"})
+_DIAG_BODY_MAX = 2048
+_DIAG_LOG_FILE: str = ""
+
+
+def _diag_log_path() -> Path:
+    log_dir = _LOG_DIR
+    if not log_dir.exists():
+        log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / f"gateway-{time.strftime('%Y-%m-%d')}.jsonl"
+
+
+def _diag_short_hash(value: str) -> str:
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode()).hexdigest()[:8]
+
+
+def _diag_redact_body(body: bytes | str) -> str:
+    if not body:
+        return ""
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return text[:_DIAG_BODY_MAX]
+    if isinstance(data, dict):
+        data = dict(data)
+        for key in list(data):
+            if key.lower() in _DIAG_SENSITIVE_KEYS:
+                data[key] = "***REDACTED***"
+    return json.dumps(data, ensure_ascii=False, default=str)[:_DIAG_BODY_MAX]
+
+
+def _diag_redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {
+        k: "***" if k.lower() in _DIAG_SENSITIVE_HEADERS else v
+        for k, v in headers.items()
+    }
+
+
+def _write_diag_entry(**fields: Any) -> None:
+    entry = {**fields, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    line = json.dumps(entry, ensure_ascii=False, default=str) + "\n"
+    try:
+        p = _diag_log_path()
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
 
 
 def _row(label: str, value: str) -> str:
@@ -204,6 +262,28 @@ def _rewrite_server_identity(payload: bytes) -> bytes:
     except json.JSONDecodeError:
         pass
     return payload
+
+
+def _analyze_tools(payload: bytes) -> tuple[int, list[str]]:
+    """Return (total_tool_count, list_of_duplicate_names) from a tools/list response."""
+    count = 0
+    dupes: list[str] = []
+    try:
+        text = payload.decode("utf-8")
+        data = json.loads(text)
+        if isinstance(data, dict) and isinstance(data.get("result"), dict):
+            tools = data["result"].get("tools") or []
+            if isinstance(tools, list):
+                names = [t.get("name", "") for t in tools if isinstance(t, dict)]
+                count = len(names)
+                seen: set[str] = set()
+                for n in names:
+                    if n in seen:
+                        dupes.append(n)
+                    seen.add(n)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    return count, dupes
 
 
 def _inject_tools(payload: bytes) -> bytes:
@@ -265,6 +345,60 @@ def _is_loopback(request: Request) -> bool:
                 return first.startswith("127.")
     client = request.client
     return bool(client and (client.host in ("127.0.0.1", "::1", "localhost") or client.host.startswith("127.")))
+
+
+class _DiagnosticMiddleware:
+    """Pure ASGI middleware that logs every request/response to gateway JSONL.
+
+    Uses pure ASGI (not BaseHTTPMiddleware) to safely wrap SSE streaming responses.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start_ns = time.monotonic_ns()
+        method: str = scope.get("method", "")
+        path: str = scope.get("path", "")
+        status: list[int] = [0]
+        resp_content_type: list[str] = [""]
+        resp_bytes: list[int] = [0]
+
+        async def _send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                status[0] = message.get("status", 0)
+                for h in message.get("headers") or []:
+                    if h[0].decode("latin-1").lower() == "content-type":
+                        resp_content_type[0] = h[1].decode("latin-1")
+            elif message["type"] == "http.response.body":
+                body = message.get("body") or b""
+                resp_bytes[0] += len(body)
+            await send(message)
+
+        exc_type: str = ""
+        exc_msg: str = ""
+        try:
+            await self.app(scope, receive, _send)
+        except Exception as exc:
+            exc_type = type(exc).__name__
+            exc_msg = _diag_redact_body(str(exc)[:500])
+            raise
+        finally:
+            duration_ms = int((time.monotonic_ns() - start_ns) / 1_000_000)
+            _write_diag_entry(
+                path=path,
+                method=method,
+                status=status[0],
+                content_type=resp_content_type[0],
+                resp_bytes=resp_bytes[0],
+                duration_ms=duration_ms,
+                exc_type=exc_type,
+                exc_msg=exc_msg,
+            )
 
 
 class OAuthGateway:
@@ -353,7 +487,8 @@ class OAuthGateway:
         routes.append(Route("/consent", self._consent_page, methods=["GET"]))
         routes.append(Route("/consent", self._consent_submit, methods=["POST"]))
         routes.append(Route("/health", self._health))
-        return Starlette(routes=routes)
+        app = Starlette(routes=routes)
+        return _DiagnosticMiddleware(app)
 
     # ---------------------------------------------------------- consent
     async def _consent_page(self, request: Request) -> Response:
@@ -404,14 +539,37 @@ class OAuthGateway:
         consent_id = str(form.get("id", ""))
         decision = str(form.get("decision", "deny"))
         workspace_id = str(form.get("workspace_id", ""))
+        _write_diag_entry(
+            path="/consent", method="POST",
+            decision=decision,
+            workspace_hash=_diag_short_hash(workspace_id),
+        )
         try:
             if decision == "allow":
+                if not workspace_id:
+                    _write_diag_entry(
+                        path="/consent", method="POST",
+                        event="consent_missing_workspace",
+                        error="workspace_id is empty - no workspace selected",
+                    )
+                    # Fall back to provider workspace (legacy behavior, will have empty binding)
+                elif self._workspace_registry and not self._workspace_registry(workspace_id):
+                    _write_diag_entry(
+                        path="/consent", method="POST",
+                        event="consent_workspace_not_ready",
+                        workspace_hash=_diag_short_hash(workspace_id),
+                        error="Selected workspace CodexPro is not running",
+                    )
                 if workspace_id:
                     self._provider.bind_workspace(consent_id, workspace_id)
                 target = self._provider.approve(consent_id)
             else:
                 target = self._provider.deny(consent_id)
         except ConsentExpired:
+            _write_diag_entry(
+                path="/consent", method="POST",
+                error="consent_expired",
+            )
             return HTMLResponse(
                 "<html><body><p>授权已过期或不存在，请重新发起连接。</p></body></html>",
                 status_code=410,
@@ -464,20 +622,41 @@ class OAuthGateway:
             return self._unauthorized()
 
         # --- intercept local Python tool calls ---
+        jsonrpc_method: str = ""
+        tool_name: str = ""
+        rpc = None  # type: ignore[assignment]
         if request.method == "POST":
             try:
                 rpc = json.loads(body)
+                if isinstance(rpc, dict):
+                    jsonrpc_method = str(rpc.get("method", ""))
             except json.JSONDecodeError:
                 rpc = None
             if isinstance(rpc, dict) and rpc.get("method") == "tools/call":
                 params = rpc.get("params") or {}
                 name = params.get("name", "")
+                tool_name = name
                 if name in _LOCAL_TOOL_NAMES:
-                    return await self._exec_local_tool(name, rpc, params, workspace_id, session_id)
+                    result = await self._exec_local_tool(name, rpc, params, workspace_id, session_id)
+                    _write_diag_entry(
+                        path=request.url.path,
+                        method=request.method,
+                        local_tool=name,
+                        workspace_hash=_diag_short_hash(workspace_id),
+                        session_id=session_id[:16],
+                    )
+                    return result
 
-        return await self._proxy(request, body, proxy_token, upstream_target=upstream_target)
+        return await self._proxy(request, body, proxy_token, upstream_target=upstream_target,
+                                   jsonrpc_method=jsonrpc_method, tool_name=tool_name,
+                                   workspace_id=workspace_id, session_id=session_id)
 
-    async def _proxy(self, request: Request, body: bytes, authorization: str | None, *, upstream_target: str | None = None) -> Response:
+    async def _proxy(
+        self, request: Request, body: bytes, authorization: str | None, *,
+        upstream_target: str | None = None,
+        jsonrpc_method: str = "", tool_name: str = "",
+        workspace_id: str = "", session_id: str = "",
+    ) -> Response:
         base = upstream_target or self.upstream_url
         target = f"{base}{request.url.path}"
         if request.url.query:
@@ -504,10 +683,27 @@ class OAuthGateway:
             if b'"tools/list"' in body:
                 await upstream.aread()
                 rewritten = _inject_tools(upstream.content)
+                tool_count, dupes = _analyze_tools(rewritten)
+                _write_diag_entry(
+                    path=request.url.path, method=request.method,
+                    jsonrpc_method="tools/list",
+                    upstream_status=upstream.status_code,
+                    upstream_target=target,
+                    injected_tool_count=len(_PYTHON_TOOL_DEFS),
+                    total_tool_count=tool_count,
+                    duplicate_tools=dupes,
+                    workspace_hash=_diag_short_hash(workspace_id),
+                )
                 return Response(content=rewritten, status_code=upstream.status_code, headers=filtered)
             if b"initialize" in body:
                 await upstream.aread()
                 rewritten = _rewrite_server_identity(upstream.content)
+                _write_diag_entry(
+                    path=request.url.path, method=request.method,
+                    jsonrpc_method="initialize",
+                    upstream_status=upstream.status_code,
+                    upstream_target=target,
+                )
                 return Response(content=rewritten, status_code=upstream.status_code, headers=filtered)
         return StreamingResponse(
             upstream.aiter_raw(),
@@ -584,13 +780,13 @@ class OAuthGateway:
                     except Exception:
                         lines.append(f"[✗] {tool}: 未安装或不可调用")
                 return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": "\n".join(lines)}]}))
-            elif name == "list_workspaces":
+            elif name == "devbridge_list_workspaces":
                 result = self._list_workspaces()
                 return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
-            elif name == "get_current_workspace":
+            elif name == "devbridge_get_current_workspace":
                 result = self._get_current_workspace(workspace_id, session_id)
                 return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
-            elif name == "switch_workspace":
+            elif name == "devbridge_switch_workspace":
                 args = params.get("arguments", {}) if isinstance(params, dict) else {}
                 target_id = str(args.get("project_id", ""))
                 if not target_id:
@@ -673,7 +869,7 @@ class OAuthGateway:
             projects = load_projects()
             match = next((p for p in projects if p.id == project_id), None)
             if match is None:
-                raise ValueError(f"未找到项目：{project_id}。可用 list_workspaces 查看。")
+                raise ValueError(f"未找到项目：{project_id}。可用 devbridge_list_workspaces 查看。")
         except Exception:
             pass
         if not session_id:

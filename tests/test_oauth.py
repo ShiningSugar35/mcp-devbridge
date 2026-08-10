@@ -724,7 +724,7 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
-        "params": {"name": "switch_workspace", "arguments": {"project_id": WORKSPACE_B_ID}},
+        "params": {"name": "devbridge_switch_workspace", "arguments": {"project_id": WORKSPACE_B_ID}},
     })
     # Session "sess-gpt" switches
     r = mw_env.client.post(
@@ -743,7 +743,7 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
-        "params": {"name": "get_current_workspace", "arguments": {}},
+        "params": {"name": "devbridge_get_current_workspace", "arguments": {}},
     })
     r2 = mw_env.client.post(
         "/mcp",
@@ -783,7 +783,7 @@ def test_switch_workspace_unknown_project_returns_error(mw_env: _MultiWorkspaceE
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
-        "params": {"name": "switch_workspace", "arguments": {"project_id": "no-such-project"}},
+        "params": {"name": "devbridge_switch_workspace", "arguments": {"project_id": "no-such-project"}},
     })
     r = mw_env.client.post(
         "/mcp",
@@ -824,3 +824,104 @@ def test_backward_compat_legacy_bearer_still_works(env: _Env) -> None:
     r = env.client.get("/mcp", headers={"Authorization": f"Bearer {PUB_TOKEN}"})
     assert r.status_code == 200
     assert env.calls[-1]["authorization"] == f"Bearer {PUB_TOKEN}"
+
+
+# =========================================================================
+# Tool catalog integrity tests
+# =========================================================================
+
+
+def test_tool_names_unique() -> None:
+    from local_dev_mcp_bridge.gateway import _PYTHON_TOOL_DEFS
+
+    names = [t["name"] for t in _PYTHON_TOOL_DEFS]
+    assert len(names) == len(set(names)), f"Duplicate: {[n for n in names if names.count(n) > 1]}"
+
+
+def test_tool_names_use_devbridge_prefix() -> None:
+    from local_dev_mcp_bridge.gateway import _PYTHON_TOOL_DEFS
+
+    ws_tools = [
+        t for t in _PYTHON_TOOL_DEFS
+        if t["name"] in ("devbridge_list_workspaces", "devbridge_get_current_workspace", "devbridge_switch_workspace")
+    ]
+    assert len(ws_tools) == 3
+
+
+def test_all_tools_have_valid_json_schema() -> None:
+    from local_dev_mcp_bridge.gateway import _PYTHON_TOOL_DEFS
+
+    for tool in _PYTHON_TOOL_DEFS:
+        name = tool["name"]
+        s = tool.get("inputSchema")
+        assert s is not None, f"{name}: no inputSchema"
+        assert isinstance(s, dict), f"{name}: inputSchema not dict"
+        assert s.get("type") == "object", f"{name}: type not object"
+        props = s.get("properties")
+        if props:
+            assert isinstance(props, dict)
+        req = s.get("required")
+        if req:
+            assert isinstance(req, list)
+            for r in req:
+                if props:
+                    assert r in props, f"{name}: required '{r}' not in properties"
+
+
+def test_tool_descriptions_are_english() -> None:
+    from local_dev_mcp_bridge.gateway import _PYTHON_TOOL_DEFS
+
+    for tool in _PYTHON_TOOL_DEFS:
+        desc = tool.get("description", "")
+        assert isinstance(desc, str) and len(desc) > 0, f"{tool['name']}: missing desc"
+        assert not any(ord(c) > 127 for c in desc), f"{tool['name']}: non-ASCII in desc"
+
+
+def test_tool_analyze_function() -> None:
+    from local_dev_mcp_bridge.gateway import _analyze_tools
+
+    c, d = _analyze_tools(json.dumps({"result": {"tools": []}}).encode())
+    assert c == 0 and d == []
+
+    c, d = _analyze_tools(json.dumps({"result": {"tools": [
+        {"name": "read"}, {"name": "write"}, {"name": "devbridge_list_workspaces"},
+    ]}}).encode())
+    assert c == 3 and d == []
+
+    c, d = _analyze_tools(json.dumps({"result": {"tools": [
+        {"name": "read"}, {"name": "read"}, {"name": "write"},
+    ]}}).encode())
+    assert c == 3 and d == ["read"]
+
+
+def test_gateway_merge_no_duplicates() -> None:
+    from local_dev_mcp_bridge.gateway import _analyze_tools, _inject_tools
+
+    codexpro = json.dumps({"result": {"tools": [
+        {"name": "read_file"}, {"name": "write_file"},
+        {"name": "list_workspaces"}, {"name": "switch_workspace"},
+    ]}}).encode()
+    injected = _inject_tools(codexpro)
+    count, dupes = _analyze_tools(injected)
+    assert dupes == [], f"Collisions: {dupes}"
+    assert count == 10
+
+
+def test_diag_redact_body() -> None:
+    from local_dev_mcp_bridge.gateway import _diag_redact_body
+
+    body = json.dumps({"grant_type": "authorization_code", "code": "secret-123"})
+    r = _diag_redact_body(body)
+    assert "***REDACTED***" in r and "secret-123" not in r
+
+    body2 = json.dumps({"client_secret": "s3cret"})
+    r2 = _diag_redact_body(body2)
+    assert "***REDACTED***" in r2 and "s3cret" not in r2
+
+
+def test_diag_short_hash() -> None:
+    from local_dev_mcp_bridge.gateway import _diag_short_hash
+
+    h = _diag_short_hash("test")
+    assert h == _diag_short_hash("test") and len(h) == 8
+    assert _diag_short_hash("") == ""

@@ -483,6 +483,7 @@ class MainWindow(QMainWindow):
 
         self._build_process_log_tab()
         self._build_audit_tab()
+        self._build_gateway_log_tab()
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _build_process_log_tab(self) -> None:
@@ -548,8 +549,79 @@ class MainWindow(QMainWindow):
         elif index == 2:
             self._refresh_audit_tool_combo()
             self._refresh_audit_log()
+        elif index == 3:
+            self._refresh_gateway_log()
 
-# ---------------------------------------------------------- helpers
+    def _refresh_gateway_log(self) -> None:
+        """Read today's gateway JSONL and display it incrementally."""
+        from datetime import date as _date
+        path = constants.LOG_DIR / f"gateway-{_date.today().isoformat()}.jsonl"
+        self.gw_log_path_label.setText(str(path))
+        if not path.exists():
+            self.gw_log_view.setPlainText("尚未收到 Gateway 请求")
+            self.gw_log_path_label.setText(f"{path}（文件不存在）")
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return
+        if not hasattr(self, "_gw_log_last_size"):
+            self._gw_log_last_size = 0
+        size = len(text)
+        if size <= self._gw_log_last_size:
+            return
+        new_text = text[self._gw_log_last_size:]
+        self._gw_log_last_size = size
+        if not new_text.strip():
+            return
+        current = self.gw_log_view.toPlainText()
+        if "尚未收到" in current:
+            self.gw_log_view.setPlainText("")
+        self.gw_log_view.appendPlainText(new_text.rstrip())
+        sb = self.gw_log_view.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
+
+    def _copy_gateway_log(self) -> None:
+        text = self.gw_log_view.toPlainText()
+        if text and "尚未收到" not in text:
+            QApplication.clipboard().setText(text)
+
+    def _open_gateway_log_dir(self) -> None:
+        d = constants.LOG_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(d))
+
+    def _build_gateway_log_tab(self) -> None:
+        gw_tab = QWidget()
+        gw_v = QVBoxLayout(gw_tab)
+        gw_v.setContentsMargins(0, 4, 0, 4)
+        gw_v.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.gw_log_path_label = QLabel("")
+        self.gw_log_path_label.setStyleSheet("color: #555555; font-size: 11px;")
+        row.addWidget(self.gw_log_path_label, 1)
+        gw_refresh = QPushButton("刷新")
+        gw_refresh.clicked.connect(self._refresh_gateway_log)
+        gw_copy = QPushButton("复制")
+        gw_copy.clicked.connect(self._copy_gateway_log)
+        gw_open_dir = QPushButton("打开目录")
+        gw_open_dir.clicked.connect(self._open_gateway_log_dir)
+        row.addWidget(gw_refresh)
+        row.addWidget(gw_copy)
+        row.addWidget(gw_open_dir)
+        gw_v.addLayout(row)
+        self.gw_log_view = QPlainTextEdit()
+        self.gw_log_view.setReadOnly(True)
+        self.gw_log_view.setMinimumHeight(300)
+        self.gw_log_view.setMaximumBlockCount(2000)
+        self.gw_log_view.setWordWrapMode(QTextOption.WrapMode.NoWrap)
+        self.gw_log_view.setFont(QFont("Consolas", 9))
+        gw_v.addWidget(self.gw_log_view)
+        self.tabs.addTab(gw_tab, "Gateway 日志")
+
     def _refresh_project_list(self) -> None:
         table = self.project_table
         table.setRowCount(0)
@@ -1327,6 +1399,15 @@ class MainWindow(QMainWindow):
         self.gateway_port_spin.setEnabled(editable)
         self.advanced_btn.setEnabled(editable)
         self._refresh_url_ui()
+        self._poll_gateway_log()
+
+    def _poll_gateway_log(self) -> None:
+        """Auto-refresh gateway log every ~5 seconds (timer every 3s, refresh every 2nd call)."""
+        if not hasattr(self, "_gw_poll_count"):
+            self._gw_poll_count = 0
+        self._gw_poll_count += 1
+        if self._gw_poll_count % 2 == 0 and self.tabs.currentIndex() == 3:
+            self._refresh_gateway_log()
 
     # ------------------------------------------------------ token helpers
     def _sync_token_ui(self) -> None:
