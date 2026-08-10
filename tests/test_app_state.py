@@ -26,6 +26,7 @@ class FakeEngine:
     last_hostname: str = ""
     last_kind: ConnectionMethod | None = None
     stop_order: list[str] = field(default_factory=list)
+    port: int = 0
 
     @property
     def is_running(self) -> bool:
@@ -80,6 +81,15 @@ def make_rig(windows_wait_fails: bool = False) -> Rig:
     coordinator = ServiceCoordinator(
         tunnel=tunnel, codex=codex, windows=windows  # type: ignore[arg-type]
     )
+
+    class _FakeGateway:
+        def stop(self) -> None:
+            return None
+
+    def fake_start_gateway(options: StartOptions) -> None:  # noqa: ARG001
+        coordinator.gateway = _FakeGateway()  # type: ignore[assignment]
+
+    coordinator._start_gateway = fake_start_gateway  # type: ignore[method-assign]
     return Rig(coordinator, tunnel, codex, windows)
 
 
@@ -90,6 +100,9 @@ def base_options(tmp_path: Path, **overrides: object) -> StartOptions:
         "windows_enabled": False,
         "windows_token": "w" * 32,
         "connection": ConnectionMethod.LOCAL,
+        "gateway_port": 19886,
+        "codexpro_port": 19887,
+        "windows_mcp_port": 29831,
     }
     values.update(overrides)
     return StartOptions(**values)  # type: ignore[arg-type]
@@ -169,6 +182,18 @@ class TestTunnelStart:
         rig.coordinator.start(base_options(tmp_path, connection=ConnectionMethod.QUICK))
         assert rig.coordinator.public_url == "https://quick-abc123.trycloudflare.com/mcp"
         assert rig.coordinator.url_mutable is True
+
+    def test_public_tunnel_targets_gateway_port(self, tmp_path: Path) -> None:
+        rig = make_rig()
+        options = base_options(tmp_path, connection=ConnectionMethod.QUICK)
+        rig.coordinator.start(options)
+        assert rig.tunnel.port == options.gateway_port
+
+    def test_local_mode_uses_codex_port(self, tmp_path: Path) -> None:
+        rig = make_rig()
+        options = base_options(tmp_path, connection=ConnectionMethod.LOCAL)
+        rig.coordinator.start(options)
+        assert rig.tunnel.port == options.codexpro_port
 
     def test_tunnel_failure_takes_service_to_error(self, tmp_path: Path) -> None:
         rig = make_rig()

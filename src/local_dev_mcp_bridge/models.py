@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from . import constants
 
 type PermissionMode = Literal["read_only", "workspace", "system"]
+type ClientTarget = Literal["chatgpt", "gemini"]
 type TunnelMode = Literal["named", "quick", "none"]
 type AuthMode = Literal["bearer", "anonymous"]
 
@@ -61,7 +62,9 @@ class ProjectConfig(BaseModel):
     id: str = ""  # 多项目唯一标识（add 时自动分配）；空串视为未初始化
     display_name: str = ""
     root_path: str
-    permission_mode: PermissionMode = "workspace"
+    permission_mode: PermissionMode = "system"
+    client_target: ClientTarget = "chatgpt"
+    gemini_redirect_uri: str = ""
     test_command: str = "uv run pytest"
     lint_command: str = "uv run ruff check ."
     typecheck_command: str = "uv run pyright"
@@ -82,8 +85,8 @@ class ProjectConfig(BaseModel):
     windows_bridge_port: int = 0
     gateway_port: int = 0
     windows_enabled: bool = False
-    # 启用 = 桌面启动后自动恢复该项目的引擎进程。
-    enabled: bool = True
+    # v0.4 及更早用于“桌面启动自动恢复”。v0.5 桌面不再自动恢复；保留字段仅兼容旧 projects.json。
+    enabled: bool = False
 
     @model_validator(mode="before")
     @classmethod

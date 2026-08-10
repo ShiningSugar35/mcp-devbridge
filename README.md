@@ -76,11 +76,17 @@ MCP DevBridge 解决的就是中间这一层：
 - **OAuth + Bearer 认证**  
   公网入口支持 MCP OAuth 流程，同时保留 Bearer Token 兼容路径。
 
+- **按项目独立配置**
+  每个项目独立记忆权限、客户端类型、连接方式、端口、Git 参数、访问令牌、Cloudflare Token 与 Gemini Redirect URI；切换项目不会互相覆盖。
+
+- **四种连接方式**
+  Cloudflare Named Tunnel、ngrok 固定域名、Quick Tunnel 临时地址、仅本机均可直接在桌面选择。
+
 - **权限模式**  
-  支持：
-  - 只读
-  - 项目工作区
-  - 系统级权限
+  支持只读、项目工作区、完全访问。桌面端默认选择 **完全访问（危险）**（`system + full_system`），首次实际启动仍需要一次性风险确认。
+
+- **状态与诊断**
+  项目表 1 秒级刷新真实状态；控制区展示 Codex / Gateway / Tunnel / Windows 桥组件状态，并提供一键连接诊断和真实 MCP 自测。
 
 - **可选 Windows 控制能力**  
   可通过 Windows-MCP 扩展桌面操作、应用控制、PowerShell、文件系统等能力。
@@ -90,6 +96,18 @@ MCP DevBridge 解决的就是中间这一层：
 
 - **桌面化运行**  
   PySide6 单窗口界面，一键启动 / 停止本地引擎、OAuth Gateway 和 Tunnel。
+
+---
+
+
+## v0.5.0 桌面交互要点
+
+- 项目表操作列即服务开关：停止时显示“启动服务”，运行时显示“停止服务”；状态 1 秒级刷新。
+- “权限模式 / 客户端 / 连接方式”下拉框忽略鼠标滚轮，页面滚动不会误改配置。
+- 选择“Gemini Spark”才显示 Gemini OAuth 配置；选择“ChatGPT 网页端”时自动隐藏。
+- “服务控制”只保留一个动态启停按钮和“高级设置”；独立“停止 / 重启”按钮已移除。
+- “连接诊断”页会检查项目、令牌、域名/隧道、端口、Gemini URI、ngrok 环境和引擎状态；项目已连接时会继续执行真实 MCP self-test。
+- 关闭窗口时，子进程清理在后台线程完成，GUI 不再同步卡住。
 
 ---
 
@@ -129,19 +147,19 @@ MCP DevBridge
 D:\Projects\my-project
 ```
 
-建议第一次使用时选择：
+桌面端默认选择：
 
 ```text
-项目工作区
+完全访问（危险）
 ```
 
-权限模式。
+即 `system + full_system`。这是本项目当前的产品默认值；第一次实际启动完全访问模式时仍会弹出一次风险确认。需要缩小权限范围时，可主动切换为“项目工作区”或“只读”。
 
 ### 4. 选择连接方式
 
-如果只是本机调试，可以使用本地模式。
+可选择四种连接方式：`Cloudflare 固定地址`、`ngrok 固定地址`、`Quick Tunnel 临时测试`、`仅本机`。
 
-如果希望 ChatGPT / Gemini 网页端长期连接，推荐：
+如果只是本机调试，可以使用“仅本机”；Quick Tunnel 适合临时验证；如果希望 ChatGPT / Gemini 网页端长期连接，推荐：
 
 ```text
 Cloudflare 固定地址
@@ -229,12 +247,10 @@ https://mcp.example.com/mcp
 
 ## 端口配置
 
-- **公网入口端口（Gateway）**：默认 `8786`。在桌面主界面的
-  “访问令牌与 MCP 地址”区域可以修改、检测占用、恢复默认；
+- **公网入口端口（Gateway）**：第一个项目通常从 `8786` 开始分配，后续项目自动避让。当前项目可在桌面“访问令牌与 MCP 地址”区域修改、检测占用、恢复默认；
   修改后**必须同步**将 Cloudflare Tunnel 的 Service URL 改为
   `http://localhost:<新端口>`，否则公网连接会失败（界面会醒目提示）。
-- **内部组件端口**：CodexPro `8787`、Windows-MCP `28731`、Legacy backend `8765`。
-  通过主界面「高级设置…」可改，默认无需操作；设置永久保存，服务运行期间锁定。
+- **项目内部端口**：CodexPro 从 `8787`、Windows-MCP 从 `28731`、Gateway 从 `8786` 起为每个项目独立分配；「高级设置…」只修改当前项目。Legacy backend `8765` 仍是全局兼容端口。服务运行期间锁定端口编辑。
 - 所有端口仅监听 `127.0.0.1`；启动前会检查端口占用，被占用时提示处理，
   不会偷偷改端口。
 - 端口默认值集中在 `src/local_dev_mcp_bridge/constants.py` 的 `DEFAULT_*_PORT`。
@@ -337,14 +353,14 @@ MCP DevBridge
 
 MCP DevBridge 支持同时管理多个项目：
 
-1. 在 "项目列表" 区域点击「添加项目」选择多个本地项目
-2. 每个项目拥有**独立的 CodexPro 引擎**（不同端口）和**独立的 Windows 桥接**
-3. 勾选「启用」的项目在桌面启动时自动恢复引擎
-4. **GPT 和 Gemini 可以同时操作不同项目**，互不影响
-5. 通过 MCP 工具 `switch_workspace` 可切换当前会话的操作项目
-6. 使用 `list_projects` 查看所有已注册项目及运行状态
+1. 在“项目列表”点击「添加项目」注册多个本地目录；项目表只保留“名称 / 路径 / 状态 / 端口 / 入口 / 操作”六列。
+2. 每个项目拥有**独立的 CodexPro 引擎、Windows 桥、Gateway 端口与配置**；项目的 Bearer/Cloudflare Token 也独立加密保存。
+3. 不再使用“启用”勾选和桌面启动自动恢复；需要哪个项目，直接点击该行“启动服务”。状态会实时更新为“启动中 / 已连接 / 停止中 / 失败”。
+4. 同一时刻可有一个完整公网入口（Tunnel + Gateway），其它项目的 CodexPro 引擎仍可并行运行；Gateway 按 MCP session/workspace 将请求路由到目标项目。
+5. **ChatGPT 和 Gemini 可以同时操作不同项目**；通过 `switch_workspace` 只切换当前 MCP session，`list_projects` 查看全部项目与运行状态。
+6. 服务配置、Git 参数、端口、客户端类型、MCP 地址和自测结果均跟随当前项目；切换回来会恢复原值。
 
-项目数据持久化于 `projects.json`，重启程序后自动恢复。
+项目非敏感配置持久化于 `projects.json`；敏感值只进入 Windows Credential Manager / DPAPI SecretsStore，不以明文写入 JSON。
 
 ## Shell 与命令执行
 
@@ -374,9 +390,9 @@ Windows 上 Shell 默认优先级：
 
 不允许直接修改项目。
 
-## 项目工作区（默认模式）
+## 项目工作区
 
-**推荐日常开发使用**（权限模式「默认」）。
+适合希望把文件访问和命令范围限制在当前项目目录内的场景。
 
 允许在当前选中的项目范围内：
 
@@ -389,7 +405,7 @@ Windows 上 Shell 默认优先级：
 - 测试和构建；
 - 本地开发进程管理。
 
-## 系统权限（完全访问模式）
+## 系统权限（完全访问模式，桌面默认）
 
 允许更高风险的系统级能力（对应命令档位 `full_system`：任意命令，首次启用需风险确认）。
 
@@ -404,7 +420,7 @@ Windows 上 Shell 默认优先级：
 
 > [!NOTE]
 > 桌面端「权限模式」已与命令执行档位合一：
-> **只读** = read_only + safe、**默认** = workspace + developer、**完全访问** = system + full_system；
+> **只读** = read_only + safe、**项目工作区** = workspace + developer、**完全访问（桌面默认）** = system + full_system；
 > 无独立档位选择（`--execution-profile` CLI 参数与引擎映射仍独立保留）。
 
 > [!NOTE]
@@ -416,7 +432,7 @@ Windows 上 Shell 默认优先级：
 
 > [!CAUTION]
 > 完全访问意味着远程 AI 工具可能影响项目目录之外的电脑状态。  
-> 除非确实需要，否则优先使用“默认”模式。
+> 桌面端当前按产品设计默认使用“完全访问（危险）”；首次实际启动仍要求一次性风险确认。若不需要系统级能力，可主动降级到“项目工作区”或“只读”。
 
 ---
 
@@ -599,9 +615,9 @@ MCP DevBridge 的目标就是让远程 AI 能够操作本地开发环境，因�
 当前设计包括：
 
 - MCP 引擎只监听 `127.0.0.1`；
-- 公网入口经过 Cloudflare Tunnel；
+- 公网入口可经过 Cloudflare Named / ngrok / Quick Tunnel，三者统一终止在本机 Gateway；
 - 公网请求需要 OAuth 或有效 Bearer；
-- Token 使用 Windows Credential Manager / DPAPI 保存；
+- Bearer 与 Cloudflare Tunnel Token 按项目使用 Windows Credential Manager / DPAPI 加密保存；
 - 认证比较使用 constant-time comparison；
 - 失败认证有限速；
 - 日志对 Token / Secret / Password / Cookie 等字段脱敏；
@@ -614,7 +630,7 @@ MCP DevBridge 的目标就是让远程 AI 能够操作本地开发环境，因�
 
 1. 不使用时停止 MCP DevBridge；
 2. 不公开分享 MCP URL + 凭据；
-3. 默认使用“项目工作区”；
+3. 桌面默认“完全访问（危险）”；如不需要系统级能力，可主动降级到“项目工作区”或“只读”；
 4. 定期轮换 Bearer / OAuth 凭据；
 5. 不要把 `.env`、SSH Key、Cookie、Tunnel Token 提交到 Git。
 

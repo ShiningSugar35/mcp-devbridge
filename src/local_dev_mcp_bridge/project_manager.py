@@ -176,12 +176,18 @@ class ProjectManager:
 
     # ------------------------------------------------------------- catalog
     def list(self) -> list[ProjectConfig]:
-        """Loaded projects with ids/ports backfilled and persisted."""
+        """Loaded projects with ids/all per-project ports backfilled and persisted."""
         projects = load_projects()
-        for project in projects:
+        changed = False
+        for index, project in enumerate(projects):
+            before_id = project.id
             migrate_project_id(project)
-        if any(not p.codexpro_port or not p.windows_bridge_port for p in projects):
-            assign_project_ports(projects, index=0)
+            if project.id != before_id:
+                changed = True
+            if not project.codexpro_port or not project.windows_bridge_port or not project.gateway_port:
+                assign_project_ports(projects, index=index)
+                changed = True
+        if changed:
             save_projects(projects)
         return projects
 
@@ -193,7 +199,7 @@ class ProjectManager:
 
         return get_project(root)
 
-    def add(self, root: str, *, display_name: str = "", permission_mode: str = "workspace") -> ProjectConfig:
+    def add(self, root: str, *, display_name: str = "", permission_mode: str = "system") -> ProjectConfig:
         """Register a new project (assign id + ports, persist)."""
         from .config_store import suggest_commands
 
@@ -234,6 +240,21 @@ class ProjectManager:
     def update(self, project: ProjectConfig) -> None:
         upsert_project(project)
 
+    def reconfigure(self, project: ProjectConfig) -> None:
+        """Persist config and rebuild the cached unit when its fixed ports changed.
+
+        ProjectUnit managers bind their ports at construction time.  An idle
+        unit can therefore be dropped safely after an advanced-port edit so the
+        next start uses the new persisted values.  Running units must be stopped
+        first; silently rebinding a live process would make status misleading.
+        """
+        with self._lock:
+            unit = self._units.get(project.id)
+            if unit is not None and unit.is_running:
+                raise SpawnError("项目服务正在运行，请先停止后再修改内部端口。")
+            self._units.pop(project.id, None)
+        upsert_project(project)
+
     def ensure_ports(self, project: ProjectConfig) -> None:
         """Backfill unassigned per-project ports on an existing config."""
         projects = load_projects()
@@ -243,12 +264,13 @@ class ProjectManager:
         )
         if idx is None:
             return
-        if not project.codexpro_port or not project.windows_bridge_port:
+        if not project.codexpro_port or not project.windows_bridge_port or not project.gateway_port:
             assign_project_ports(projects, index=idx)
             save_projects(projects)
             migrated = projects[idx]
             project.codexpro_port = migrated.codexpro_port
             project.windows_bridge_port = migrated.windows_bridge_port
+            project.gateway_port = migrated.gateway_port
 
     # --------------------------------------------------------------- units
     def unit(self, project_id: str) -> ProjectUnit | None:

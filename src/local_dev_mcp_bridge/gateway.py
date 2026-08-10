@@ -416,6 +416,7 @@ class OAuthGateway:
         provider: LocalOAuthProvider | None = None,
         transport: Any | None = None,
         workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
+        workspace_credential_registry: Callable[[str], str | None] | None = None,
     ) -> None:
         hostname = (public_hostname or "").strip().rstrip("/")
         base = hostname if hostname.lower().startswith(("http://", "https://")) else f"https://{hostname}"
@@ -435,6 +436,7 @@ class OAuthGateway:
         self.allow_local_anonymous = allow_local_anonymous
         self._workspace = Path(workspace) if workspace else None
         self._workspace_registry = workspace_registry
+        self._workspace_credential_registry = workspace_credential_registry
         self._provider = provider or LocalOAuthProvider(
             issuer_url=self.public_base,
             resource_url=self.resource_url,
@@ -457,7 +459,7 @@ class OAuthGateway:
     def provider(self) -> LocalOAuthProvider:
         return self._provider
 
-    def _build_app(self) -> Starlette:
+    def _build_app(self) -> Any:
         registration = ClientRegistrationOptions(
             enabled=True,
             valid_scopes=[constants.OAUTH_SCOPE],
@@ -512,7 +514,10 @@ class OAuthGateway:
 
     def _build_workspace_options(self) -> str:
         """Build <option> tags for available projects (for consent page dropdown)."""
-        options = ['<option value="">（当前激活项目）</option>']
+        if self._workspace_registry is None:
+            options = ['<option value="">（当前激活项目）</option>']
+        else:
+            options = ['<option value="" selected disabled>（请选择一个运行中的项目）</option>']
         if self._workspace_registry is not None:
             try:
                 from .config_store import load_projects
@@ -546,20 +551,30 @@ class OAuthGateway:
         )
         try:
             if decision == "allow":
-                if not workspace_id:
-                    _write_diag_entry(
-                        path="/consent", method="POST",
-                        event="consent_missing_workspace",
-                        error="workspace_id is empty - no workspace selected",
-                    )
-                    # Fall back to provider workspace (legacy behavior, will have empty binding)
-                elif self._workspace_registry and not self._workspace_registry(workspace_id):
-                    _write_diag_entry(
-                        path="/consent", method="POST",
-                        event="consent_workspace_not_ready",
-                        workspace_hash=_diag_short_hash(workspace_id),
-                        error="Selected workspace CodexPro is not running",
-                    )
+                if self._workspace_registry is not None:
+                    if not workspace_id:
+                        _write_diag_entry(
+                            path="/consent", method="POST",
+                            event="consent_missing_workspace",
+                            error="workspace_id is empty - no workspace selected",
+                        )
+                        return HTMLResponse(
+                            "<html><body><p>请选择一个正在运行的项目后再授权。</p>"
+                            "<p>请返回 MCP DevBridge 启动目标项目，然后重新发起连接。</p></body></html>",
+                            status_code=400,
+                        )
+                    if not self._workspace_registry(workspace_id):
+                        _write_diag_entry(
+                            path="/consent", method="POST",
+                            event="consent_workspace_not_ready",
+                            workspace_hash=_diag_short_hash(workspace_id),
+                            error="Selected workspace CodexPro is not running",
+                        )
+                        return HTMLResponse(
+                            "<html><body><p>所选项目尚未运行，授权已阻止。</p>"
+                            "<p>请先在 MCP DevBridge 中启动该项目服务，再重新发起连接。</p></body></html>",
+                            status_code=409,
+                        )
                 if workspace_id:
                     self._provider.bind_workspace(consent_id, workspace_id)
                 target = self._provider.approve(consent_id)
@@ -581,7 +596,7 @@ class OAuthGateway:
         body = await request.body()
         auth_header = request.headers.get("authorization", "")
         bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-        engine_token = self.upstream_token_source()
+        engine_credential = self.upstream_token_source()
 
         # --- resolve proxy token and workspace ---
         proxy_token: str | None = None
@@ -590,30 +605,48 @@ class OAuthGateway:
         session_id = self._extract_session_id(request)
 
         if bearer:
-            if _constant_time_eq(bearer, engine_token):
-                proxy_token = bearer
+            direct_workspace = self._workspace_for_credential(bearer)
+            if _constant_time_eq(bearer, engine_credential) or direct_workspace:
+                workspace_id = direct_workspace
+                with self._session_lock:
+                    if session_id and session_id in self._session_workspaces:
+                        workspace_id = self._session_workspaces[session_id]
+                if workspace_id:
+                    upstream_target = self._resolve_upstream(workspace_id)
+                    if not upstream_target:
+                        return JSONResponse(
+                            _jsonrpc_error(
+                                None,
+                                -32000,
+                                "工作区未就绪。请先在桌面启动对应项目的 CodexPro 引擎。",
+                            ),
+                            status_code=502,
+                        )
+                proxy_token = self._credential_for_workspace(
+                    workspace_id, engine_credential or bearer
+                )
             else:
                 record = await self._provider.load_access_token(bearer)
                 if record is not None:
                     if record.resource and record.resource.rstrip("/") != self.resource_url:
                         return self._unauthorized()
-                    if engine_token:
-                        proxy_token = engine_token
-                    else:
-                        return self._unauthorized()
-                    workspace_id = _workspace_from_subject(record.subject)
-                    # Session override: if user called switch_workspace, use that instead
+                    workspace_id = _workspace_from_subject(record.subject or "")
                     with self._session_lock:
                         if session_id and session_id in self._session_workspaces:
                             workspace_id = self._session_workspaces[session_id]
-                    # Resolve upstream for this workspace
                     upstream_target = self._resolve_upstream(workspace_id)
                     if not upstream_target:
                         return JSONResponse(
-                            _jsonrpc_error(None, -32000,
-                                "工作区未就绪。请先在桌面启动对应项目的 CodexPro 引擎。"),
+                            _jsonrpc_error(
+                                None,
+                                -32000,
+                                "工作区未就绪。请先在桌面启动对应项目的 CodexPro 引擎。",
+                            ),
                             status_code=502,
                         )
+                    proxy_token = self._credential_for_workspace(workspace_id, engine_credential)
+                    if not proxy_token:
+                        return self._unauthorized()
                 else:
                     return self._unauthorized()
         elif self.allow_local_anonymous and _is_loopback(request):
@@ -801,6 +834,29 @@ class OAuthGateway:
             return JSONResponse(_jsonrpc_error(rpc_id, -32603, f"工具执行失败: {exc}"))
 
     # -------------------------------------------------------- workspace helpers
+    def _credential_for_workspace(self, workspace_id: str, fallback: str | None) -> str | None:
+        if workspace_id and self._workspace_credential_registry is not None:
+            value = self._workspace_credential_registry(workspace_id)
+            if value:
+                return value
+        return fallback
+
+    def _workspace_for_credential(self, value: str) -> str:
+        if not value or self._workspace_credential_registry is None:
+            return ""
+        try:
+            from .config_store import load_projects
+
+            for project in load_projects():
+                if not project.id:
+                    continue
+                candidate = self._workspace_credential_registry(project.id)
+                if candidate and _constant_time_eq(value, candidate):
+                    return project.id
+        except Exception:
+            return ""
+        return ""
+
     def _resolve_upstream(self, workspace_id: str) -> str | None:
         """Return the upstream target URL for a workspace, or None if not running."""
         if not workspace_id:
@@ -910,6 +966,15 @@ class OAuthGateway:
 
     async def _health(self, request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok", "app": "oauth-gateway", "resource": self.resource_url})
+
+    @property
+    def is_running(self) -> bool:
+        return bool(
+            self._thread is not None
+            and self._thread.is_alive()
+            and self._server is not None
+            and not self._server.should_exit
+        )
 
     # ---------------------------------------------------------- runtime
     def start(self, port: int = constants.GATEWAY_PORT) -> None:

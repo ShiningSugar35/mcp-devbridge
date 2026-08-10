@@ -4,49 +4,26 @@
 
 | Item | Requirement |
 |---|---|
-| OS | Windows 10/11 (x64) — PowerShell 5.1+ |
-| Python | 3.12 (locked: 3.12.10) |
+| OS | Windows 10/11 x64, PowerShell 5.1+ |
+| Python | 3.12 (development baseline 3.12.10) |
 | UI | PySide6 6.11.1 |
-| Node engine | Node.js ≥ 18 (used by the CodexPro engine) |
-| MCP SDK | mcp 2.0.0 (streamable HTTP) |
-| Tunnels | `cloudflared` ≥ 2024.x (tested 2026.7.3) or `ngrok` v3 |
+| Node engine | Node.js 18+ |
+| MCP SDK | mcp 2.0.0, Streamable HTTP |
+| Public tunnels | cloudflared (tested 2026.7.3) or ngrok v3 |
 
-## MCP client compatibility
+## Desktop client modes
 
-- Works with any client implementing the **Streamable HTTP** transport over
-  HTTPS + Bearer: ChatGPT Codex/GPT custom MCP, Gemini (MCP), Cursor, Claude Desktop (JSON config), IDE plugins.
-- Endpoint shape: `POST https://mcp.<domain>/mcp`.
+Each project selects either **ChatGPT web** or **Gemini Spark**. The Gemini OAuth panel is only visible for Gemini projects. ChatGPT/Bearer behavior remains available without Gemini static-client configuration.
 
-## Cloudflare requirements
+## Connection methods
 
-- Zone active on your domain (e.g. `shiningsugar.shop`).
-- A Named Tunnel (token-based) with a public hostname route to
-  `http://localhost:8786` (the OAuth Gateway port; adjust it when you change
-  the configured Gateway port).
-- DNS record auto-provisioned by the dashboard route (**CNAME** to
-  `*.cfargotunnel.com`).
+1. Cloudflare Named Tunnel — stable hostname, recommended for a long-lived public URL.
+2. ngrok reserved/fixed domain — stable ngrok hostname; `ngrok` must be installed in PATH.
+3. Quick Tunnel — temporary `trycloudflare.com` URL; it changes between runs.
+4. Local — loopback only and does not require cloudflared.
 
-## Verified end-to-end (2026-08-08)
+All public modes end at the selected project's Gateway and expose `/mcp`; Local connects directly to CodexPro.
 
-`https://mcp.shiningsugar.shop/mcp` — without tokens returns **HTTP 401**
-(chain: Cloudflare edge → tunnel → local gateway → auth layer).
+## Ports
 
-## Notes
-
-- Quick Tunnel URLs are temporary; for production use a named tunnel so the
-  URL stays identical across restarts.
-- If a corporate proxy interferes with `cloudflared`, configure it
-  explicitly; the app does not yet proxy tunnel traffic.
-
-## Ports (unified since 0.1.0)
-
-| Component | Default |
-|---|---|
-| Gateway (Cloudflare Service URL target) | 8786 |
-| CodexPro engine | 8787 |
-| Windows-MCP bridge | 28731 |
-| Legacy backend | 8765 |
-
-All loopback-only; defaults centralized in `constants.DEFAULT_*_PORT`,
-configurable in the desktop UI (「高级设置…」), persisted in `AppConfig` and
-auto-migrated from v0.1 `local_port` fields.
+Gateway/CodexPro/Windows-MCP ports are allocated per project from the defaults 8786/8787/28731 while avoiding catalog collisions. Legacy backend 8765 remains a global compatibility port. Advanced Settings edits the selected project's three primary ports and locks them while that project is running.

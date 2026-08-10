@@ -1,6 +1,19 @@
 # Changelog
 
-All dates 2026-08-06 … 2026-08-09 unless noted.
+All dates are local development dates.
+
+## 0.5.0 (2026-08-10) — per-project desktop configuration and live-upgrade safety
+
+- Six-column project table; removed the `enabled` column/desktop auto-restore behavior; 1-second real state refresh and dynamic row start/stop action.
+- Permission/client/connection combos ignore wheel input; service control is a single dynamic start/stop button.
+- New projects default to `system + full_system` (“full access / dangerous”); the one-time first-use risk acknowledgement remains.
+- Per-project client target, connection, hostname, Git settings, Gateway/Codex/Windows ports, Gemini redirect URI, Bearer and Cloudflare tunnel values.
+- Gemini OAuth panel is conditional on the Gemini client target. Consent now blocks missing/stopped workspaces instead of issuing a code.
+- Restored Cloudflare Named, ngrok fixed, Quick Tunnel and Local modes. Public tunnels target the Gateway; Local requires no cloudflared; Quick/ngrok URLs normalize to `/mcp`.
+- Gateway routes direct project Bearers and OAuth workspace sessions to the correct running engine and swaps in that project's upstream credential.
+- Added component status, one-click connection diagnostics, project-specific real self-test results, background window shutdown and upgrade-resume handling.
+- Builds use versioned staging directories, allowing 0.5.0 to be built while 0.4.0 is still running from the old dist tree; the staging package includes `cloudflared.exe` beside the frozen executable and frozen lookup prefers that packaged copy.
+- Verification: 289 pytest cases, Ruff clean, Pyright 0/0, Qt offscreen smoke, PyInstaller staging build and Inno Setup installer build.
 
 ## 0.2.0-dev (2026-08-09) — port config + bridge hardening
 
@@ -120,6 +133,5 @@ All dates 2026-08-06 … 2026-08-09 unless noted.
   tokens on disk. Full suite: **181 tests green**.
 
 ## Known issues
-- Default port mismatch (`8765` vs `2865`) — unification pending.
 - Real-device Smoke Test results apply to the verified Cloudflare setup
   (mcp.shiningsugar.shop); other zones require the same route steps.

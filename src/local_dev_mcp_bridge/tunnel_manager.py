@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 import time
 from enum import StrEnum
 from pathlib import Path
@@ -43,6 +44,10 @@ class ConnectionMethod(StrEnum):
 
 
 def default_cloudflared() -> str:
+    if getattr(sys, "frozen", False):
+        packaged = Path(sys.executable).resolve().parent / "cloudflared.exe"
+        if packaged.is_file():
+            return str(packaged)
     project_root = Path(__file__).resolve().parents[2]
     local = project_root / ".tools" / "cloudflared.exe"
     return str(local) if local.is_file() else (shutil.which("cloudflared") or "")
@@ -96,17 +101,17 @@ class TunnelManager(EngineManager):
             return
         self.kind = kind
         self.public_hostname = hostname.strip().rstrip("/")
-        self._apply_executable()
         self._set_state(EngineState.STARTING)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         secrets = tuple(s for s in (tunnel_token,) if s)
 
         if kind == ConnectionMethod.LOCAL:
-            # no tunnel process; the public URL is "local only"
+            # No external executable is required for loopback-only operation.
             self._set_state(EngineState.READY)
             self.public_url = ""
             return
 
+        self._apply_executable()
         if kind == ConnectionMethod.CLOUDFLARE:
             if tunnel_token:
                 # 注意：`--no-autoupdate` 不可放在 `run` 子命令后（2026.7.3 解析失败会直接打印 help），故不带。
@@ -159,12 +164,12 @@ class TunnelManager(EngineManager):
     def _parse_public_url(self, tail: str) -> str:
         if self.kind == ConnectionMethod.QUICK:
             match = QUICK_TUNNEL_URL_RE.findall(tail)
-            return match[-1] if match else ""
+            return f"{match[-1].rstrip('/')}/mcp" if match else ""
         if self.kind == ConnectionMethod.NGROK and self.public_hostname:
             match = NGROK_URL_RE.search(tail)
             if match:
-                return match.group(0)
-            return f"https://{self.public_hostname}" if "started tunnel" in tail else ""
+                return f"{match.group(0).rstrip('/')}/mcp"
+            return f"https://{self.public_hostname.rstrip('/')}/mcp" if "started tunnel" in tail else ""
         if self.kind == ConnectionMethod.CLOUDFLARE and self.public_hostname:
             # 固定域名：配置预先写好 hostname，log 出现连接确认即视为可用
             if "registered tunnel connection" in tail.lower() or "starting tunnel server" in tail.lower() or "clientconnectorregistered" in tail.lower():

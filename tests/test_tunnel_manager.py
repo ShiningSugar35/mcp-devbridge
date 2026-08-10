@@ -28,7 +28,7 @@ class TestUrlParsing:
         mgr = TunnelManager(cloudflared_exe="cloudflared", port=8787)
         mgr.kind = ConnectionMethod.QUICK
         tail = "[INF] Registered tunnel connection https://abc-123.trycloudflare.com"
-        assert mgr._parse_public_url(tail) == "https://abc-123.trycloudflare.com"
+        assert mgr._parse_public_url(tail) == "https://abc-123.trycloudflare.com/mcp"
 
     def test_quick_parse_no_url_yet(self) -> None:
         mgr = TunnelManager(cloudflared_exe="cloudflared", port=8787)
@@ -40,7 +40,7 @@ class TestUrlParsing:
         mgr.kind = ConnectionMethod.NGROK
         mgr.public_hostname = "my-dev.ngrok.app"
         tail = 't=2026-08-08T00:00:00 msg="started tunnel" url=https://my-dev.ngrok.app'
-        assert mgr._parse_public_url(tail) == "https://my-dev.ngrok.app"
+        assert mgr._parse_public_url(tail) == "https://my-dev.ngrok.app/mcp"
 
     def test_ngrok_waits_for_started(self) -> None:
         mgr = TunnelManager(ngrok_exe="ngrok", port=8787)
@@ -65,6 +65,13 @@ class TestUrlParsing:
 class TestLifecycle:
     def test_local_ready_without_process(self, tmp_path: Path) -> None:
         mgr = TunnelManager(port=8787, cloudflared_exe="cloudflared", log_dir=tmp_path)
+        mgr.start(kind=ConnectionMethod.LOCAL, hostname="")
+        assert mgr.state.value == "已连接"
+        assert mgr.public_url == ""
+
+    def test_local_does_not_require_cloudflared(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("local_dev_mcp_bridge.tunnel_manager.default_cloudflared", lambda: "")
+        mgr = TunnelManager(port=8787, cloudflared_exe="", log_dir=tmp_path)
         mgr.start(kind=ConnectionMethod.LOCAL, hostname="")
         assert mgr.state.value == "已连接"
         assert mgr.public_url == ""
@@ -110,6 +117,18 @@ class TestLifecycle:
 class TestDefaults:
     def test_cloudflared_default_looks_at_local_tools_dir(self) -> None:
         assert isinstance(default_cloudflared(), str)
+
+    def test_cloudflared_default_uses_packaged_exe_when_frozen(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        packaged = tmp_path / "cloudflared.exe"
+        packaged.write_bytes(b"stub")
+        monkeypatch.setattr("local_dev_mcp_bridge.tunnel_manager.sys.frozen", True, raising=False)
+        monkeypatch.setattr(
+            "local_dev_mcp_bridge.tunnel_manager.sys.executable",
+            str(tmp_path / "MCPDevBridge.exe"),
+        )
+        assert default_cloudflared() == str(packaged)
 
     def test_ngrok_default_is_path_probe(self) -> None:
         assert isinstance(default_ngrok(), str)

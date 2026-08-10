@@ -85,12 +85,14 @@ class ServiceCoordinator:
         windows: WindowsBridgeManager | None = None,
         tunnel: TunnelManager | None = None,
         workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
+        workspace_credential_registry: Callable[[str], str | None] | None = None,
     ) -> None:
         self.codex = codex or CodexProManager()
         self.windows = windows or WindowsBridgeManager()
         self.tunnel = tunnel or TunnelManager()
         self.gateway: OAuthGateway | None = None
         self._workspace_registry = workspace_registry
+        self._workspace_credential_registry = workspace_credential_registry
         self._lock = threading.Lock()
         self._state = EngineState.IDLE
         self._message: str | None = None
@@ -139,7 +141,7 @@ class ServiceCoordinator:
             "windows": self.windows.state,
         }
         if self.gateway is not None:
-            states["gateway"] = EngineState.READY if self.gateway is not None else EngineState.ERROR
+            states["gateway"] = EngineState.READY if self.gateway.is_running else EngineState.ERROR
         return states
 
     def _start_gateway(self, options: StartOptions) -> None:
@@ -158,6 +160,7 @@ class ServiceCoordinator:
             upstream_url=f"http://127.0.0.1:{options.codexpro_port}",
             upstream_legacy_token=lambda: SecretsStore().get(ACCESS_TOKEN_CRED_NAME),
             workspace_registry=self._workspace_registry,
+            workspace_credential_registry=self._workspace_credential_registry,
         )
         self.gateway.start(port=options.gateway_port)
         if not self._wait_gateway_ready(options.gateway_port):
@@ -204,7 +207,11 @@ class ServiceCoordinator:
         try:
             self.codex.port = options.codexpro_port
             self.windows.port = options.windows_mcp_port
-            self.tunnel.port = options.codexpro_port
+            self.tunnel.port = (
+                options.gateway_port
+                if options.connection != ConnectionMethod.LOCAL
+                else options.codexpro_port
+            )
             if options.connection != ConnectionMethod.LOCAL:
                 self.tunnel.start(
                     kind=options.connection,

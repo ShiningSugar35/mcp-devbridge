@@ -20,11 +20,9 @@ param(
 $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 
-$script:root    = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$script:py      = Join-Path $script:root ".venv\Scripts\python.exe"
-$script:distDir = Join-Path $script:root "dist\MCPDevBridge"
-$script:appExe  = Join-Path $script:distDir "MCPDevBridge.exe"
-$script:iscc    = $env:ISCC
+$script:root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$script:py = Join-Path $script:root ".venv\Scripts\python.exe"
+$script:iscc = $env:ISCC
 
 function Step([string]$msg) { Write-Host "== $msg ==" -ForegroundColor Cyan }
 
@@ -41,7 +39,12 @@ if (-not (Test-Path $script:py)) {
     throw "Missing $script:py - create the venv first:  python -m venv .venv"
 }
 $script:version = if ($Version) { $Version } else { Get-PyProjectVersion }
+$script:distRoot = Join-Path $script:root ("dist\staging-" + $script:version)
+$script:distDir = Join-Path $script:distRoot "MCPDevBridge"
+$script:workDir = Join-Path $script:root ("build\staging-" + $script:version)
+$script:appExe = Join-Path $script:distDir "MCPDevBridge.exe"
 Write-Host "Building version: $script:version"
+Write-Host "Staging output: $script:distDir"
 
 if (-not $SkipVersionCheck) {
     $spec = Get-Content (Join-Path $script:root "packaging\local-dev-mcp-bridge.spec") -Raw
@@ -82,7 +85,11 @@ if ($LASTEXITCODE -ne 0) {
     else { & uv pip install --python $script:py "pyinstaller>=6.11" }
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller install failed" }
 }
-& $script:py -m PyInstaller packaging\local-dev-mcp-bridge.spec --noconfirm --clean
+& $script:py -m PyInstaller packaging\local-dev-mcp-bridge.spec `
+    --noconfirm `
+    --clean `
+    --distpath $script:distRoot `
+    --workpath $script:workDir
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 if (-not (Test-Path $script:appExe)) { throw "Build artifact missing: $script:appExe" }
 
@@ -102,7 +109,8 @@ if (-not $SkipInstaller) {
     }
     $script:setupExe = Join-Path $script:root "release\MCPDevBridge-Setup-$script:version.exe"
     if (Test-Path $script:setupExe) { Remove-Item -LiteralPath $script:setupExe -Force }
-    & $script:iscc (Join-Path $script:root "scripts\installer.iss") /Qp
+    $sourceDefine = "/DMySourceDir=$script:distDir"
+    & $script:iscc (Join-Path $script:root "scripts\installer.iss") $sourceDefine /Qp
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
     if (-not (Test-Path $script:setupExe)) { throw "Installer artifact missing: $script:setupExe" }
 }

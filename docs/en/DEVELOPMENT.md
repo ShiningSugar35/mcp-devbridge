@@ -4,49 +4,34 @@
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\activate
-uv pip install -e ".[dev,package]"
+uv pip install --python .venv\Scripts\python.exe -e ".[dev,package]"
 ```
 
-## Commands
+Pyright is explicitly configured with `venvPath = "."` / `venv = ".venv"` so analysis uses the same environment as pytest.
+
+## Verification
 
 ```powershell
-# tests (run at the project root)
-$env:PYTHONIOENCODING="utf-8"; .venv\Scripts\python.exe -m pytest tests/ -q
-
-# lint
+$env:PYTHONIOENCODING="utf-8"
+.venv\Scripts\python.exe -m pytest tests -q
 .venv\Scripts\python.exe -m ruff check src tests
-
-# run the desktop
-.venv\Scripts\python.exe -m local_dev_mcp_bridge.desktop_main
+.venv\Scripts\python.exe -m pyright
 ```
 
-## Conventions
+Phase 10 verification baseline: **289 passed**, Ruff clean, Pyright 0 errors / 0 warnings, plus a Qt offscreen smoke covering the six-column table, no-wheel combos, ChatGPT/Gemini visibility, per-project persistence and upgrade-resume consumption.
 
-- Do **not** modify external projects or directories other than this repo
-  (test scaffolding lives in `.test-workspace`).
-- Never commit secrets; tokens only via SecretsStore; logs are redacted.
-- Chinese UI strings and messages; doc updates are part of every phase
-  (进度验收.md first, then code).
-- New tests must pass before a phase is marked complete. Current suite:
-  154 tests.
-
-## Adding an MCP tool
-
-1. Implement in `tools.py` following existing decorators/patterns.
-2. `mcp_integration` tests exercise tool registration + permission gates.
-3. Update docs (Chinese & English COMPATIBILITY) and the test count in docs.
-
-## Packaging
+## Packaging while an older bridge is running
 
 ```powershell
-.\scripts\build.ps1              # pytest + ruff + PyInstaller onedir
-ISCC scripts\installer.iss       # Inno Setup installer → release\
+.\scripts\build.ps1 -Version 0.5.0
 ```
 
-## Verification checklist (smoke)
+The build no longer reuses `dist/MCPDevBridge`. It writes to `dist/staging-<version>/MCPDevBridge` and uses that directory as the Inno Setup source, so an older live executable cannot lock the new build. The installer is emitted as `release/MCPDevBridge-Setup-<version>.exe`; `cloudflared.exe` is copied beside the staging executable and the frozen runtime resolves that packaged copy first.
 
-1. Start the desktop, add a project, generate token.
-2. `LOCAL` mode → self-test should pass (`127.0.0.1:<port>/mcp`).
-3. Cloudflare mode with token → status "已连接"; `curl https://host/mcp`
-   gets 401 without Bearer, 200/SSE with Bearer.
+Before replacing a live bridge, use the detached updater so the process hosting the current MCP session can be replaced safely:
+
+```powershell
+.\scripts\live_upgrade.ps1 -InstallerPath .\release\MCPDevBridge-Setup-0.5.0.exe -ProjectRoot D:\path\to\project -OldPid <running-pid> -FallbackExe .\dist\staging-0.5.0\MCPDevBridge\MCPDevBridge.exe
+```
+
+The updater writes only non-secret `upgrade-resume.json` metadata, stops only the named old process tree, installs silently, replaces the desktop shortcut, launches the new executable, and waits for the selected project's loopback service to become ready. Use `-DryRun` first to verify the scheduled-task relay without stopping or installing anything.

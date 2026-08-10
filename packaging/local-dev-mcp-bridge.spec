@@ -7,7 +7,7 @@ Output: dist/MCPDevBridge/
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.3.0"
+PROJECT_VERSION = "0.5.0"
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry_desktop.py")],
@@ -22,6 +22,7 @@ datas=[
         "local_dev_mcp_bridge.models",
         "local_dev_mcp_bridge.config_store",
         "local_dev_mcp_bridge.secrets",
+        "local_dev_mcp_bridge.project_secrets",
         "local_dev_mcp_bridge.audit",
         "local_dev_mcp_bridge.shell",
         "local_dev_mcp_bridge.processes",
@@ -77,4 +78,4 @@ from shutil import copy2
 
 TOOLS = ROOT / ".tools"
 if (TOOLS / "cloudflared.exe").is_file():
-    copy2(TOOLS / "cloudflared.exe", str(ROOT / "dist" / "MCPDevBridge" / "cloudflared.exe"))
+    copy2(TOOLS / "cloudflared.exe", str(Path(DISTPATH) / "MCPDevBridge" / "cloudflared.exe"))

@@ -29,7 +29,7 @@
 - **公网必须 Bearer**：经 Cloudflare 转发（Host 为公网域名）的请求必须携带有效 Bearer；
   默认 MCP SDK 2.0.0 的 `streamable_http_app()` 会自动加 DNS rebinding 防护，只放行 localhost，
   公网隧道接入时需显式禁用/调整 rebinding（见 项目架构.md「安全模型」）。
-- **写操作无逐次确认**：权限默认“项目全权限”，不弹逐次确认；高风险系统命令一次性风险确认后再放开。
+- **桌面默认完全访问**：桌面新项目默认 `system + full_system`（“完全访问（危险）”）；不做逐次写操作确认，但第一次实际启动完全访问模式仍需要一次性风险确认。后端/CLI 的兼容默认值不等同于桌面产品默认值。
 - **不泄漏密钥**：日志必须脱敏（文件名/参数含 KEY/TOKEN/SECRET/PASSWORD/COOKIE/AUTH 时整值遮罩）。
 
 ## 四、环境与依赖（复现命令）
@@ -78,7 +78,7 @@ mcp-devBridge/
 │       ├── processes.py        # 受管进程注册（dev server 等）
 │       ├── permissions.py      # 权限：read_only / workspace / system
 │       ├── execution_profile.py # Shell 执行档位：safe / developer（默认）/ full_system + 危险命令拦截
-│       ├── project_manager.py   # 多项目：ProjectUnit（每项目引擎对）+ ProjectManager（编目/端口/自动恢复）
+│       ├── project_manager.py   # 多项目：ProjectUnit（每项目引擎对）+ ProjectManager（编目/独立端口/生命周期；enabled 仅兼容旧配置）
 │       ├── tools.py            # 37 个 MCP 工具实现（含 list_projects / switch_workspace / shell_info / shell_self_test）
 │       ├── server_factory.py   # MCPServer + Starlette app + 认证/审计/限速中间件
 │       ├── server_main.py      # 后端 CLI（--config / --port），被桌面进程拉起
@@ -91,7 +91,7 @@ mcp-devBridge/
 │       ├── app_state.py        # 服务协调状态机 ServiceCoordinator（顺序、URL 固定性、故障清理；无 Qt）
 │       ├── backend_manager.py  # 后端子进程管理 /health 轮询（已归档，桌面改走 ServiceCoordinator）
 │       └── desktop_main.py     # Phase 3 桌面 UI（PySide6 单窗口，已接线 ServiceCoordinator）
-├── tests/                      # pytest 测试（当前 258 项全绿）
+├── tests/                      # pytest 测试（Phase 10 当前 287 项全绿，以实际 pytest 输出为准）
 │   ├── conftest.py
 │   ├── test_fs.py · test_commands.py · test_git.py · test_config.py
 │   ├── test_mcp_integration.py · test_selftest.py
@@ -136,7 +136,7 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 | 项 | 说明 |
 |---|---|
-| **端口默认值（已统一）** | 端口配置集中维护在 `constants.py` 的 `DEFAULT_GATEWAY_PORT=8786 / DEFAULT_CODEXPRO_PORT=8787 / DEFAULT_WINDOWS_MCP_PORT=28731 / DEFAULT_LEGACY_BACKEND_PORT=8765`（旧 `local_port`/`2865` 已废弃，`RuntimeConfig.local_port` 为兼容属性）。桌面「访问令牌与 MCP 地址」区可改 Gateway 端口（含检测/恢复默认/复制 Service URL），「高级设置…」改内部端口；服务运行期间锁定。旧配置自动迁移。 |
+| **端口默认值（已统一）** | 端口配置集中维护在 `constants.py` 的 `DEFAULT_GATEWAY_PORT=8786 / DEFAULT_CODEXPRO_PORT=8787 / DEFAULT_WINDOWS_MCP_PORT=28731 / DEFAULT_LEGACY_BACKEND_PORT=8765`（旧 `local_port`/`2865` 已废弃，`RuntimeConfig.local_port` 为兼容属性）。桌面「访问令牌与 MCP 地址」区修改当前项目 Gateway 端口（含检测/恢复默认/复制 Gateway 地址），「高级设置…」修改当前项目 Codex/Windows/Gateway 端口；服务运行期间锁定。旧配置批量迁移补齐独立端口。 |
 | **DNS rebinding 防护** | 已落地（2026-08-08）：`server_factory.build_transport_security(rc.public_hostname)` 方案 B（防护保持开启，allowed_hosts 追加公网域名）；`RuntimeConfig.public_hostname` 经 config/`standalone --public-hostname` 注入；测试 12 项。剩余：真机公网验证（需 Cloudflare 账号）。 |
 | **standalone_server / desktop_main** | `standalone_server.py` 已存在但为 CLI；`desktop_main.py` 已实现并接线 `ServiceCoordinator`（引擎/隧道协调，见 app_state.py；backend_manager.py 已归档）。 |
 | **MCP 2.0.0 兼容注意** | `streamable_http_app` 返回的是 Starlette app；追加路由用 `app.add_route`，**不要**用 `Mount` 包裹（lifespan 失效）；中间件必须用纯 ASGI（`BaseHTTPMiddleware` 会缓冲 SSE 导致 500）。 |
@@ -144,6 +144,15 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 ---
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
+
+- 2026-08-10 · **桌面交互与按项目独立配置（v0.5.0）**：
+  - 项目表改为六列并移除 `enabled` UI/自动恢复；状态 1 秒刷新，操作列与服务控制均为动态“启动/停止”单按钮。
+  - `ProjectConfig` 新增 `client_target / gemini_redirect_uri / gateway_port` 等按项目配置；桌面默认权限改为 `system + full_system`，首次风险确认保留。
+  - 新增 `project_secrets.py`：Bearer 与 Cloudflare Tunnel Token 按项目加密保存；旧共享访问令牌只迁移给首个兼容项目，避免 Bearer 路由歧义。
+  - Gateway 支持按项目 Bearer / OAuth workspace 路由并使用目标项目对应上游凭据；Gemini consent 未选项目返回 400、未运行返回 409，不再静默授权。
+  - 四种连接方式全部恢复；所有公网 Tunnel 均终止在 Gateway，Local 不依赖 cloudflared；Quick/ngrok URL 统一带 `/mcp`。
+  - 新增组件状态、一键连接诊断、项目级 self-test 缓存、无滚轮下拉框、异步窗口退出与 `upgrade-resume.json` 升级接力。
+  - 构建改为 `dist/staging-<version>`，可在旧版 EXE 正占用历史 dist 时在线构建新版；0.5.0 PyInstaller + Inno Setup 已成功产出。
 
 - 2026-08-09 · **多项目并行（v0.3.0）**：
   - 新模块 `project_manager.py`：每项目一个 `ProjectUnit`（自己的 CodexPro + Windows 桥管理器，

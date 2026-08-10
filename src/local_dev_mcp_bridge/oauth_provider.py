@@ -62,7 +62,7 @@ def _redirect_uri(redirect_uri: str | None, **query: str | None) -> str:
     return f"{uri}{sep}{urlencode(pairs)}"
 
 
-def _workspace_from_subject(subject: str) -> str:
+def _workspace_from_subject(subject: str | None) -> str:
     """Extract workspace_id from token subject ('local-user:{id}' → '{id}', 'local-user' → '')."""
     if subject and subject.startswith("local-user:"):
         return subject.split(":", 1)[1]

@@ -4,9 +4,12 @@
 
 #define MyAppName "MCP DevBridge"
 #define MyAppId "1A2B3C4D-5E6F-4A8B-9C0D-1E2F3A4B5C6D"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.5.0"
 #define MyAppPublisher "MCP DevBridge"
 #define MyAppExeName "MCPDevBridge.exe"
+#ifndef MySourceDir
+#define MySourceDir "..\dist\MCPDevBridge"
+#endif
 
 [Setup]
 AppId={{1A2B3C4D-5E6F-4A8B-9C0D-1E2F3A4B5C6D}
@@ -33,7 +36,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "..\dist\MCPDevBridge\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

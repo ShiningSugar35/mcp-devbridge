@@ -1,4 +1,4 @@
-﻿"""ProjectManager / ProjectUnit tests: catalog CRUD, per-project ports,
+"""ProjectManager / ProjectUnit tests: catalog CRUD, per-project ports,
 parallel engine lifecycle (fake units), auto-restore and views.
 Real dual-engine spawn verification lives in test_parallel_real_engines
 (skipped automatically when node.exe or the CodexPro dist is absent).
@@ -130,6 +130,41 @@ def test_list_backfills_ports_and_ids_for_legacy_configs(tmp_path: Path) -> None
         assert projects[0].id
         assert projects[0].codexpro_port == constants.DEFAULT_CODEXPRO_PORT
         assert projects[0].windows_bridge_port == constants.DEFAULT_WINDOWS_MCP_PORT
+        assert projects[0].gateway_port == constants.DEFAULT_GATEWAY_PORT
+    finally:
+        os.environ.pop("LOCALDEV_MCP_CONFIG_DIR", None)
+
+
+def test_list_backfills_all_legacy_gateway_ports(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config-many"
+    os.environ["LOCALDEV_MCP_CONFIG_DIR"] = str(config_dir)
+    try:
+        first = ProjectConfig(
+            id="legacy-a",
+            display_name="legacy-a",
+            root_path=str(tmp_path / "legacy-a"),
+            codexpro_port=18787,
+            windows_bridge_port=28731,
+            gateway_port=0,
+        )
+        second = ProjectConfig(
+            id="legacy-b",
+            display_name="legacy-b",
+            root_path=str(tmp_path / "legacy-b"),
+            codexpro_port=18788,
+            windows_bridge_port=28732,
+            gateway_port=0,
+        )
+        save_projects([first, second])
+        projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
+        assert all(project.gateway_port for project in projects)
+        assert projects[0].gateway_port != projects[1].gateway_port
+        claimed = {
+            *(project.codexpro_port for project in projects),
+            *(project.windows_bridge_port for project in projects),
+            *(project.gateway_port for project in projects),
+        }
+        assert len(claimed) == 6
     finally:
         os.environ.pop("LOCALDEV_MCP_CONFIG_DIR", None)
 
@@ -149,7 +184,7 @@ def test_start_single_project(manager: tuple[ProjectManager, Path]) -> None:
     assert view.state == EngineState.READY.value
     unit: Any = pm.unit(proj.id)
     assert unit is not None
-    assert unit.calls[0]["permission_mode"] == "workspace"
+    assert unit.calls[0]["permission_mode"] == "system"
     assert unit.calls[0]["windows_enabled"] is False
 
 
@@ -245,6 +280,16 @@ def test_parallel_real_engines(real_manager: tuple[ProjectManager, Path]) -> Non
 
     proj_a = pm.add(str(tmp / "projA"))
     proj_b = pm.add(str(tmp / "projB"))
+    # The desktop bridge may be running on production ports while tests execute.
+    # Use isolated test ports so the suite never interferes with the active MCP session.
+    proj_a.codexpro_port = 19787
+    proj_b.codexpro_port = 19788
+    proj_a.windows_bridge_port = 29731
+    proj_b.windows_bridge_port = 29732
+    proj_a.gateway_port = 19786
+    proj_b.gateway_port = 19789
+    pm.reconfigure(proj_a)
+    pm.reconfigure(proj_b)
     try:
         pm.start(proj_a.id, codex_token=TOKEN)
         pm.start(proj_b.id, codex_token=TOKEN)
