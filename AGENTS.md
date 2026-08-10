@@ -91,7 +91,7 @@ mcp-devBridge/
 │       ├── app_state.py        # 服务协调状态机 ServiceCoordinator（顺序、URL 固定性、故障清理；无 Qt）
 │       ├── backend_manager.py  # 后端子进程管理 /health 轮询（已归档，桌面改走 ServiceCoordinator）
 │       └── desktop_main.py     # Phase 3 桌面 UI（PySide6 单窗口，已接线 ServiceCoordinator）
-├── tests/                      # pytest 测试（Phase 10 当前 287 项全绿，以实际 pytest 输出为准）
+├── tests/                      # pytest 测试（Phase 10 当前 289 项全绿，以实际 pytest 输出为准）
 │   ├── conftest.py
 │   ├── test_fs.py · test_commands.py · test_git.py · test_config.py
 │   ├── test_mcp_integration.py · test_selftest.py
@@ -152,7 +152,7 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
   - Gateway 支持按项目 Bearer / OAuth workspace 路由并使用目标项目对应上游凭据；Gemini consent 未选项目返回 400、未运行返回 409，不再静默授权。
   - 四种连接方式全部恢复；所有公网 Tunnel 均终止在 Gateway，Local 不依赖 cloudflared；Quick/ngrok URL 统一带 `/mcp`。
   - 新增组件状态、一键连接诊断、项目级 self-test 缓存、无滚轮下拉框、异步窗口退出与 `upgrade-resume.json` 升级接力。
-  - 构建改为 `dist/staging-<version>`，可在旧版 EXE 正占用历史 dist 时在线构建新版；0.5.0 PyInstaller + Inno Setup 已成功产出。
+  - 构建改为 `dist/staging-<version>`，可在旧版 EXE 正占用历史 dist 时在线构建新版；0.5.0 PyInstaller + Inno Setup 已成功产出，289 项测试全绿，`v0.5.0` Release 已发布，本机 detached 接力安装/快捷方式替换/`D:\` 公网入口恢复已真机验收。
 
 - 2026-08-09 · **多项目并行（v0.3.0）**：
   - 新模块 `project_manager.py`：每项目一个 `ProjectUnit`（自己的 CodexPro + Windows 桥管理器，
