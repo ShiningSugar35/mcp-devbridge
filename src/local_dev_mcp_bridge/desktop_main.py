@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QFont, QTextOption
+from PySide6.QtGui import QAction, QFont, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -37,12 +37,15 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStyle,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -53,7 +56,7 @@ from PySide6.QtWidgets import (
 from . import APP_NAME, __version__, constants
 from .app_state import ServiceCoordinator, StartOptions
 from .audit import AuditQuery, available_tool_names, query_logs
-from .backend_manager import current_access_token, port_in_use
+from .backend_manager import port_in_use
 from .config_store import (
     load_app_config,
     load_projects,
@@ -170,19 +173,22 @@ class MainWindow(QMainWindow):
         self.coord.listen(self._emit_coord_event)
         self._app_config = load_app_config()
         self._projects = load_projects()
-        self._current_token = current_access_token() or ""
+        self._current_token = ""
         self._bridge_token = _bridge_token()
         self._loading_project = False
         self._loaded_project_root = ""
         self._service_root = ""
-        self._busy = False
+        self._busy_project_ids: set[str] = set()
         self._closing = False
+        self._force_exit = False
+        self._tray_hint_shown = False
         self._test_outputs: dict[str, str] = {}
         self._diag_outputs: dict[str, str] = {}
-        self._tunnel_token_default = _tunnel_token_default()
+        self._tunnel_token_default = ""
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_status)
         self._build_ui()
+        self._setup_tray()
         # New projects default to fully open; persisted per-project settings override this.
         self.permission_combo.setCurrentIndex(2)
         self._refresh_project_list()
@@ -207,19 +213,36 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(scroll)
 
         root = QVBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(20, 18, 20, 20)
+        root.setSpacing(14)
+
+        header = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title = QLabel("MCP DevBridge")
+        title.setObjectName("PageTitle")
+        subtitle = QLabel("把本地开发项目连接到 ChatGPT 或 Gemini")
+        subtitle.setObjectName("PageSubtitle")
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        header.addLayout(title_col, 1)
+        version = QLabel(f"v{__version__}")
+        version.setObjectName("VersionBadge")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(version)
+        root.addLayout(header)
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         root.addWidget(self.tabs)
         self.ctrl_tab = QWidget()
         self.ctrl_layout = QVBoxLayout(self.ctrl_tab)
         self.ctrl_layout.setContentsMargins(0, 4, 0, 4)
         self.ctrl_layout.setSpacing(8)
-        self.tabs.addTab(self.ctrl_tab, "控制")
+        self.tabs.addTab(self.ctrl_tab, "工作台")
 
         # --- project list (多项目并行)
-        proj_box = QGroupBox("项目列表（多项目并行；选中行 = 启动公网服务的项目）")
+        proj_box = QGroupBox("项目")
         proj_v = QVBoxLayout(proj_box)
         proj_v.setContentsMargins(12, 12, 12, 12)
         proj_v.setSpacing(8)
@@ -235,26 +258,21 @@ class MainWindow(QMainWindow):
 
         proj_btns = QHBoxLayout()
         proj_btns.setSpacing(8)
-        self.add_project_btn = QPushButton("添加项目…")
+        self.add_project_btn = QPushButton("添加项目")
+        self.add_project_btn.setProperty("role", "primary")
         self.add_project_btn.setFixedWidth(110)
         self.add_project_btn.clicked.connect(self._browse_project)
-        self.remove_project_btn = QPushButton("删除项目")
+        self.remove_project_btn = QPushButton("移除项目")
         self.remove_project_btn.clicked.connect(self._remove_project)
         proj_btns.addWidget(self.add_project_btn)
         proj_btns.addWidget(self.remove_project_btn)
         proj_btns.addStretch(1)
         proj_v.addLayout(proj_btns)
-        proj_hint = QLabel(
-            "每个项目的配置、令牌和连接参数独立保存。点击操作列即可启动/停止该项目服务；"
-            "★ 表示当前公网入口项目。"
-        )
-        proj_hint.setWordWrap(True)
-        proj_hint.setStyleSheet("color: gray;")
-        proj_v.addWidget(proj_hint)
+        self.project_table.setToolTip("★ 表示当前承担公网入口的项目")
         self.ctrl_layout.addWidget(proj_box)
 
         # --- config: permission + connection + bridge
-        cfg_box = QGroupBox("服务配置")
+        cfg_box = QGroupBox("连接与权限")
         cfg_form = QFormLayout(cfg_box)
         cfg_form.setContentsMargins(12, 12, 12, 12)
         cfg_form.setSpacing(8)
@@ -263,55 +281,49 @@ class MainWindow(QMainWindow):
             self.permission_combo.addItem(label)
         self.permission_combo.currentIndexChanged.connect(self._autosave_project_settings)
         cfg_form.addRow("权限模式:", self.permission_combo)
-        perm_hint = QLabel(
-            "只读：安全只读操作。\n"
-            "项目工作区：仅在项目范围内读写并执行开发命令。\n"
-            "完全访问（默认）：可读写项目外文件、执行系统级命令；首次实际启动仍需风险确认。"
+        self.permission_combo.setToolTip(
+            "只读：只允许读取；项目工作区：仅操作当前项目；完全访问：允许系统级操作。"
         )
-        perm_hint.setWordWrap(True)
-        perm_hint.setStyleSheet("color: gray;")
-        cfg_form.addRow("", perm_hint)
 
         self.client_combo = NoWheelComboBox()
         for value, label in CLIENT_TARGETS:
             self.client_combo.addItem(label, value)
         self.client_combo.currentIndexChanged.connect(self._on_client_changed)
-        cfg_form.addRow("客户端:", self.client_combo)
+        cfg_form.addRow("连接客户端:", self.client_combo)
 
         self.connection_combo = NoWheelComboBox()
         for method in CONNECTION_METHODS:
             self.connection_combo.addItem(method.label(), method.value)
         self.connection_combo.currentIndexChanged.connect(self._on_connection_changed)
+        self.connection_combo.setToolTip("长期使用建议固定地址；Quick Tunnel 仅适合临时测试。")
         cfg_form.addRow("连接方式:", self.connection_combo)
 
         self.hostname_edit = QLineEdit()
-        self.hostname_edit.setPlaceholderText("例如 bridge.example.com")
+        self.hostname_edit.setPlaceholderText("例如 mcp.example.com")
         self.hostname_edit.editingFinished.connect(self._autosave_project_settings)
         cfg_form.addRow("公网域名:", self.hostname_edit)
 
         self.cf_token_edit = QLineEdit()
         self.cf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.cf_token_edit.setPlaceholderText("（可选）Cloudflare 隧道令牌；留空使用上次保存的令牌")
+        self.cf_token_edit.setPlaceholderText("Cloudflare Tunnel Token")
+        self.cf_token_edit.setToolTip("加密保存到当前项目，不写入项目配置文件。")
         if self._tunnel_token_default:
             self.cf_token_edit.setText(self._tunnel_token_default)
         self.cf_token_edit.textEdited.connect(self._on_tunnel_token_edited)
         cfg_form.addRow("隧道令牌:", self.cf_token_edit)
-        token_hint = QLabel("新令牌输入后自动保存，下次启动自动填入（加密存储）。")
-        token_hint.setStyleSheet("color: gray;")
-        cfg_form.addRow("", token_hint)
 
-        self.gemini_box = QGroupBox("Gemini OAuth 配置（静态客户端；不影响 DCR/Bearer）")
+        self.gemini_box = QGroupBox("Gemini OAuth")
         gemini_form = QFormLayout(self.gemini_box)
         gemini_form.setContentsMargins(12, 12, 12, 12)
         gemini_form.setSpacing(8)
         self._gemini_store = SecretsStore()
         self._gemini_secret = ""
         self.gemini_uri_edit = QLineEdit()
-        self.gemini_uri_edit.setPlaceholderText("从 Gemini「Custom Connected App → Advanced Settings → Copy redirect URI」粘贴到此处")
+        self.gemini_uri_edit.setPlaceholderText("粘贴 Gemini Redirect URI")
         self.gemini_uri_edit.editingFinished.connect(self._on_gemini_uri_edited)
         gemini_form.addRow("Gemini Redirect URI:", self.gemini_uri_edit)
 
-        self.gemini_gen_btn = QPushButton("生成Gemini凭证")
+        self.gemini_gen_btn = QPushButton("生成 / 更新凭证")
         self.gemini_gen_btn.clicked.connect(self._generate_gemini_credentials)
         gemini_form.addRow("", self.gemini_gen_btn)
 
@@ -335,13 +347,6 @@ class MainWindow(QMainWindow):
         secret_row.addWidget(self.gemini_secret_copy)
         gemini_form.addRow("Client Secret:", secret_row)
 
-        gemini_hint = QLabel(
-            "每次点击「生成Gemini凭证」都会更新 client_secret（旧值立即失效）；client_id 复用不变。"
-            "Secret 加密保存、掩码显示，仅「复制」进剪贴板。"
-        )
-        gemini_hint.setWordWrap(True)
-        gemini_hint.setStyleSheet("color: gray;")
-        gemini_form.addRow("", gemini_hint)
 
         self.gemini_id_copy.clicked.connect(lambda: self._copy_text(self.gemini_id_edit.text()))
         self.gemini_secret_copy.clicked.connect(lambda: self._copy_text(self._gemini_secret))
@@ -356,13 +361,14 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
 
-        self.bridge_check = QCheckBox("启用 Windows 控制桥接（uvx 子进程，令牌自动生成并加密保存）")
+        self.bridge_check = QCheckBox("启用 Windows 控制桥接")
+        self.bridge_check.setToolTip("启用后提供额外的 Windows 桌面控制工具。")
         self.bridge_check.toggled.connect(self._autosave_project_settings)
         cfg_form.addRow("", self.bridge_check)
         self.ctrl_layout.addWidget(cfg_box)
 
         # --- git settings (Phase 5)
-        git_box = QGroupBox("Git 参数（可空）")
+        git_box = QGroupBox("Git（可选）")
         git_form = QFormLayout(git_box)
         git_form.setContentsMargins(12, 12, 12, 12)
         git_form.setSpacing(8)
@@ -386,11 +392,12 @@ class MainWindow(QMainWindow):
         self.ctrl_layout.addWidget(git_box)
 
         # --- service control
-        ctrl_box = QGroupBox("服务控制")
+        ctrl_box = QGroupBox("当前项目")
         ctrl_row = QHBoxLayout(ctrl_box)
         ctrl_row.setContentsMargins(12, 8, 12, 8)
         ctrl_row.setSpacing(8)
         self.start_btn = QPushButton("启动服务")
+        self.start_btn.setProperty("role", "primary")
         self.advanced_btn = QPushButton("高级设置…")
         self.start_btn.clicked.connect(self._toggle_selected_service)
         self.advanced_btn.clicked.connect(self._open_advanced_settings)
@@ -412,19 +419,19 @@ class MainWindow(QMainWindow):
         self.ctrl_layout.addWidget(self.component_status)
 
         # --- token / URL
-        tok_box = QGroupBox("访问令牌与 MCP 地址（当前项目）")
+        tok_box = QGroupBox("连接信息")
         tok_layout = QVBoxLayout(tok_box)
         tok_layout.setContentsMargins(12, 12, 12, 12)
         tok_layout.setSpacing(8)
-        self.token_edit = QLineEdit("令牌：未生成（点击“重新生成令牌”）")
+        self.token_edit = QLineEdit("选择项目后显示")
         self.token_edit.setReadOnly(True)
-        self.url_edit = QLineEdit("MCP 地址：http://127.0.0.1:8765/mcp（仅本机）")
+        self.url_edit = QLineEdit("选择项目后显示")
         self.url_edit.setReadOnly(True)
         tok_row = QHBoxLayout()
         tok_row.setSpacing(8)
         self.token_copy_btn = QPushButton("复制令牌")
-        self.token_regenerate_btn = QPushButton("重新生成令牌")
-        self.url_copy_btn = QPushButton("复制 MCP 地址")
+        self.token_regenerate_btn = QPushButton("重新生成")
+        self.url_copy_btn = QPushButton("复制地址")
         self.token_copy_btn.clicked.connect(lambda: self._copy_to_clipboard(self._current_token))
         self.token_regenerate_btn.clicked.connect(self._regenerate_token)
         self.url_copy_btn.clicked.connect(lambda: self._copy_to_clipboard(self._display_url()))
@@ -499,7 +506,7 @@ class MainWindow(QMainWindow):
         self.ctrl_layout.addWidget(test_group)
 
         # --- 最近消息（控制页）
-        msg_group = QGroupBox("最近消息")
+        msg_group = QGroupBox("运行记录")
         msg_v = QVBoxLayout(msg_group)
         msg_v.setContentsMargins(12, 12, 12, 12)
         msg_v.setSpacing(8)
@@ -516,6 +523,18 @@ class MainWindow(QMainWindow):
         self._build_audit_tab()
         self._build_gateway_log_tab()
         self._build_diagnostics_tab()
+
+        self.project_settings_tab = QWidget()
+        project_settings_v = QVBoxLayout(self.project_settings_tab)
+        project_settings_v.setContentsMargins(0, 8, 0, 4)
+        project_settings_v.setSpacing(12)
+        project_settings_v.addWidget(cfg_box)
+        project_settings_v.addWidget(git_box)
+        project_settings_v.addStretch(1)
+        self.tabs.addTab(self.project_settings_tab, "项目设置")
+
+        self._build_app_settings_tab()
+        self._organize_top_level_tabs()
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
 
@@ -626,6 +645,114 @@ class MainWindow(QMainWindow):
 
         _run_async(work, done)
 
+    def _take_top_tab(self, title: str) -> QWidget:
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == title:
+                widget = self.tabs.widget(index)
+                self.tabs.removeTab(index)
+                assert widget is not None
+                return widget
+        raise RuntimeError(f"找不到标签页：{title}")
+
+    def _organize_top_level_tabs(self) -> None:
+        process_page = self._take_top_tab("进程日志")
+        audit_page = self._take_top_tab("审计日志")
+        gateway_page = self._take_top_tab("Gateway 日志")
+        diagnostics_page = self._take_top_tab("连接诊断")
+        project_settings_page = self._take_top_tab("项目设置")
+        app_settings_page = self._take_top_tab("设置")
+
+        self.logs_tab = QWidget()
+        logs_layout = QVBoxLayout(self.logs_tab)
+        logs_layout.setContentsMargins(0, 8, 0, 4)
+        self.log_tabs = QTabWidget()
+        self.log_tabs.setDocumentMode(True)
+        self.process_log_page = process_page
+        self.audit_log_page = audit_page
+        self.gateway_log_page = gateway_page
+        self.log_tabs.addTab(process_page, "进程")
+        self.log_tabs.addTab(audit_page, "审计")
+        self.log_tabs.addTab(gateway_page, "Gateway")
+        self.log_tabs.currentChanged.connect(self._on_log_tab_changed)
+        logs_layout.addWidget(self.log_tabs)
+
+        self.tabs.insertTab(1, project_settings_page, "项目设置")
+        self.tabs.insertTab(2, diagnostics_page, "诊断")
+        self.tabs.insertTab(3, self.logs_tab, "日志")
+        self.tabs.insertTab(4, app_settings_page, "设置")
+
+    def _on_log_tab_changed(self, _index: int) -> None:
+        current = self.log_tabs.currentWidget()
+        if current is self.process_log_page:
+            self._refresh_process_log()
+        elif current is self.audit_log_page:
+            self._refresh_audit_tool_combo()
+            self._refresh_audit_log()
+        elif current is self.gateway_log_page:
+            self._refresh_gateway_log()
+
+    def _build_app_settings_tab(self) -> None:
+        self.app_settings_tab = QWidget()
+        layout = QVBoxLayout(self.app_settings_tab)
+        layout.setContentsMargins(0, 8, 0, 4)
+        layout.setSpacing(12)
+        box = QGroupBox("窗口行为")
+        form = QFormLayout(box)
+        form.setContentsMargins(14, 16, 14, 14)
+        form.setSpacing(10)
+        self.close_behavior_combo = NoWheelComboBox()
+        self.close_behavior_combo.addItem("最小化到系统托盘", "tray")
+        self.close_behavior_combo.addItem("直接退出程序", "exit")
+        index = self.close_behavior_combo.findData(self._app_config.close_behavior)
+        self.close_behavior_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.close_behavior_combo.currentIndexChanged.connect(self._on_close_behavior_changed)
+        form.addRow("点击 ×", self.close_behavior_combo)
+        note = QLabel("标题栏“—”始终只最小化到任务栏。")
+        note.setObjectName("MutedText")
+        form.addRow("", note)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        self.tabs.addTab(self.app_settings_tab, "设置")
+
+    def _on_close_behavior_changed(self) -> None:
+        value = str(self.close_behavior_combo.currentData() or "tray")
+        self._app_config.close_behavior = "exit" if value == "exit" else "tray"
+        save_app_config(self._app_config)
+
+    def _setup_tray(self) -> None:
+        self.tray_icon = QSystemTrayIcon(self)
+        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        self.setWindowIcon(icon)
+        self.tray_icon.setIcon(icon)
+        self.tray_icon.setToolTip("MCP DevBridge")
+        menu = QMenu(self)
+        show_action = QAction("显示主窗口", self)
+        show_action.triggered.connect(self._show_from_tray)
+        exit_action = QAction("退出 MCP DevBridge", self)
+        exit_action.triggered.connect(self._quit_from_tray)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        menu.addAction(exit_action)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._tray_activated)
+        self.tray_icon.show()
+
+    def _show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Trigger,
+        ):
+            self._show_from_tray()
+
+    def _quit_from_tray(self) -> None:
+        self._force_exit = True
+        self.close()
+
     def _build_process_log_tab(self) -> None:
         proc_tab = QWidget()
         proc_v = QVBoxLayout(proc_tab)
@@ -684,13 +811,9 @@ class MainWindow(QMainWindow):
         self._refresh_audit_tool_combo()
 
     def _on_tab_changed(self, index: int) -> None:
-        if index == 1:
-            self._refresh_process_log()
-        elif index == 2:
-            self._refresh_audit_tool_combo()
-            self._refresh_audit_log()
-        elif index == 3:
-            self._refresh_gateway_log()
+        current = self.tabs.widget(index)
+        if hasattr(self, "logs_tab") and current is self.logs_tab:
+            self._on_log_tab_changed(self.log_tabs.currentIndex())
 
     def _refresh_gateway_log(self) -> None:
         """Read today's gateway JSONL and display it incrementally."""
@@ -770,10 +893,10 @@ class MainWindow(QMainWindow):
         try:
             table.setRowCount(0)
             for row, view in enumerate(views):
-                state = view.state
+                project = self.pm.get(view.id)
+                state_obj = self._project_state(project)
+                state = state_obj.value
                 is_entry = bool(self._service_root and _same_root(view.root_path, self._service_root))
-                if is_entry and self.coord.state != EngineState.IDLE:
-                    state = self.coord.state.value
                 table.insertRow(row)
                 table.setItem(row, 0, QTableWidgetItem(view.name))
                 table.setItem(row, 1, QTableWidgetItem(view.root_path))
@@ -781,19 +904,23 @@ class MainWindow(QMainWindow):
                 table.setItem(row, 3, QTableWidgetItem(str(view.codexpro_port)))
                 table.setItem(row, 4, QTableWidgetItem("★" if is_entry and self.coord.running else ""))
                 svc_btn = QPushButton("启动服务")
-                if state == EngineState.READY.value:
+                busy = self._is_project_busy(view.id)
+                if state_obj == EngineState.READY:
                     svc_btn.setText("停止服务")
-                elif state == EngineState.STARTING.value:
+                elif state_obj == EngineState.STARTING:
                     svc_btn.setText("启动中…")
                     svc_btn.setEnabled(False)
-                elif state == EngineState.STOPPING.value:
+                elif state_obj == EngineState.STOPPING:
                     svc_btn.setText("停止中…")
                     svc_btn.setEnabled(False)
-                elif state == EngineState.ERROR.value:
+                elif state_obj == EngineState.ERROR:
                     svc_btn.setText("重新启动")
-                svc_btn.setEnabled(svc_btn.isEnabled() and not self._busy)
-                svc_btn.setToolTip(f"启动或停止 {view.name} 的服务")
-                svc_btn.clicked.connect(lambda _checked=False, root=view.root_path: self._toggle_service_for(root))
+                if busy:
+                    svc_btn.setEnabled(False)
+                svc_btn.setToolTip(f"启动或停止 {view.name}")
+                svc_btn.clicked.connect(
+                    lambda _checked=False, root=view.root_path: self._toggle_service_for(root)
+                )
                 table.setCellWidget(row, 5, svc_btn)
             table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
@@ -1028,18 +1155,22 @@ class MainWindow(QMainWindow):
         method = self._selected_connection()
         need_domain = method in (ConnectionMethod.CLOUDFLARE, ConnectionMethod.NGROK)
         project = self._project_config()
-        unit = self.pm.unit(project.id) if project is not None else None
-        editable = not self._busy and not self.coord.running and not (unit is not None and unit.is_running)
+        state = self._project_state(project)
+        editable = bool(
+            project is not None
+            and not self._is_project_busy(project.id)
+            and state in (EngineState.IDLE, EngineState.ERROR)
+        )
         self.hostname_edit.setEnabled(need_domain and editable)
         self.cf_token_edit.setEnabled(method == ConnectionMethod.CLOUDFLARE and editable)
         if method == ConnectionMethod.CLOUDFLARE:
-            self.hostname_edit.setPlaceholderText("例如 bridge.example.com（Cloudflare 固定域名）")
+            self.hostname_edit.setPlaceholderText("例如 mcp.example.com")
         elif method == ConnectionMethod.NGROK:
-            self.hostname_edit.setPlaceholderText("已保留的 ngrok 固定域名")
+            self.hostname_edit.setPlaceholderText("已保留的 ngrok 域名")
         elif method == ConnectionMethod.QUICK:
-            self.hostname_edit.setPlaceholderText("Quick Tunnel 启动后自动生成临时地址")
+            self.hostname_edit.setPlaceholderText("启动后自动生成临时地址")
         else:
-            self.hostname_edit.setPlaceholderText("仅本机，不需要公网域名")
+            self.hostname_edit.setPlaceholderText("仅本机，无需填写")
 
     def _sync_client_fields(self) -> None:
         is_gemini = str(self.client_combo.currentData() or "chatgpt") == "gemini"
@@ -1075,7 +1206,7 @@ class MainWindow(QMainWindow):
     def _start_project_engine_for(self, project: ProjectConfig) -> None:
         access = ensure_project_access_token(project.id)
         bridge = _bridge_token(ensure=project.windows_enabled)
-        self._set_busy(True)
+        self._set_project_busy(project.id, True)
         self._append_log(f"正在启动项目引擎（{project.display_name}）…")
 
         def run() -> str:
@@ -1089,7 +1220,7 @@ class MainWindow(QMainWindow):
             return f"项目引擎已连接：{project.display_name} @127.0.0.1:{view.codexpro_port}"
 
         def done(result: Any) -> None:
-            self._set_busy(False)
+            self._set_project_busy(project.id, False)
             if isinstance(result, Exception):
                 self._append_log(f"启动项目引擎失败：{result}")
             else:
@@ -1099,7 +1230,7 @@ class MainWindow(QMainWindow):
         _run_async(run, done)
 
     def _stop_project_engine_for(self, project: ProjectConfig) -> None:
-        self._set_busy(True)
+        self._set_project_busy(project.id, True)
         self._append_log(f"正在停止项目引擎（{project.display_name}）…")
 
         def run() -> str:
@@ -1107,7 +1238,7 @@ class MainWindow(QMainWindow):
             return f"项目引擎已停止：{project.display_name}"
 
         def done(result: Any) -> None:
-            self._set_busy(False)
+            self._set_project_busy(project.id, False)
             self._append_log(str(result) if not isinstance(result, Exception) else f"停止项目引擎出错：{result}")
             self._poll_status()
 
@@ -1323,7 +1454,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "端口被占用", conflict)
             return
         self._service_root = project.root_path
-        self._set_busy(True)
+        self._set_project_busy(project.id, True)
         self.status_label.setText(f"状态：正在启动（{options.connection.label()}）…")
         self._append_log(f"正在启动 {project.display_name}（{options.connection.label()}）…")
 
@@ -1334,7 +1465,7 @@ class MainWindow(QMainWindow):
             return f"服务已连接：{self.coord.public_url or self._local_url()}"
 
         def done(result: Any) -> None:
-            self._set_busy(False)
+            self._set_project_busy(project.id, False)
             if isinstance(result, Exception):
                 self._append_log(f"启动失败：{result}")
             else:
@@ -1347,7 +1478,10 @@ class MainWindow(QMainWindow):
     def _stop_service(self) -> None:
         if not self.coord.running and self.coord.state != EngineState.ERROR:
             return
-        self._set_busy(True)
+        project = self.pm.by_root(self._service_root) if self._service_root else self._project_config()
+        project_id = project.id if project is not None else ""
+        if project_id:
+            self._set_project_busy(project_id, True)
         self.status_label.setText("状态：正在停止…")
         self._append_log("正在停止公网入口服务…")
 
@@ -1356,19 +1490,36 @@ class MainWindow(QMainWindow):
             return "服务已停止"
 
         def done(result: Any) -> None:
-            self._set_busy(False)
-            self._append_log(str(result) if not isinstance(result, Exception) else f"停止服务出错：{result}")
+            if project_id:
+                self._set_project_busy(project_id, False)
+            self._append_log(
+                str(result) if not isinstance(result, Exception) else f"停止服务出错：{result}"
+            )
             self._service_root = ""
             self._poll_status()
 
         _run_async(run, done)
 
+    def _set_project_busy(self, project_id: str, busy: bool) -> None:
+        if not project_id:
+            return
+        if busy:
+            self._busy_project_ids.add(project_id)
+        else:
+            self._busy_project_ids.discard(project_id)
+        self._poll_status()
 
-    def _set_busy(self, busy: bool) -> None:
-        self._busy = busy
-        self.start_btn.setEnabled(not busy)
-        self.add_project_btn.setEnabled(not busy)
-        self.remove_project_btn.setEnabled(not busy)
+    def _is_project_busy(self, project_id: str) -> bool:
+        return bool(project_id and project_id in self._busy_project_ids)
+
+    def _project_state(self, project: ProjectConfig | None) -> EngineState:
+        if project is None:
+            return EngineState.IDLE
+        is_entry = bool(self._service_root and _same_root(project.root_path, self._service_root))
+        if is_entry and self.coord.state != EngineState.IDLE:
+            return self.coord.state
+        unit = self.pm.unit(project.id)
+        return unit.state if unit is not None else EngineState.IDLE
 
     def _service_url_text(self) -> str:
         return f"Gateway 本机地址（Cloudflare Service URL）: {gateway_service_url(self.gateway_port_spin.value())}"
@@ -1419,17 +1570,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "未选择项目", "请先选择项目。")
             return
         unit = self.pm.unit(project.id)
-        if self.coord.running or (unit is not None and unit.is_running):
-            QMessageBox.warning(self, "项目正在运行", "请先停止该项目服务，再修改内部端口。")
+        is_entry = bool(self._service_root and _same_root(project.root_path, self._service_root))
+        if (is_entry and self.coord.running) or (unit is not None and unit.is_running):
+            QMessageBox.warning(self, "项目正在运行", "请先停止这个项目，再修改内部端口。")
             return
         self.pm.ensure_ports(project)
         dialog = QDialog(self)
         dialog.setWindowTitle(f"高级设置 · {project.display_name or Path(project.root_path).name}")
         form = QFormLayout(dialog)
-        hint = QLabel("Gateway、CodexPro、Windows-MCP 端口均按项目独立保存；Legacy backend 是全局兼容端口。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
-        form.addRow(hint)
         gateway_spin = QSpinBox()
         gateway_spin.setRange(1, 65535)
         gateway_spin.setValue(project.gateway_port or constants.DEFAULT_GATEWAY_PORT)
@@ -1520,31 +1668,39 @@ class MainWindow(QMainWindow):
 
     def _refresh_url_ui(self) -> None:
         project = self._project_config()
+        if project is None:
+            self.url_edit.setText("选择项目后显示")
+            self.service_url_edit.setText("选择项目后显示")
+            self.port_warn_label.setVisible(False)
+            return
         url = self._display_url()
-        method = self._selected_connection() if project is not None else ConnectionMethod.LOCAL
-        is_entry = bool(project is not None and self._service_root and _same_root(project.root_path, self._service_root))
+        method = self._selected_connection()
+        is_entry = bool(
+            self._service_root and _same_root(project.root_path, self._service_root)
+        )
         if is_entry and self.coord.public_url:
-            suffix = "（临时地址，重启会变）" if self.coord.url_mutable else "（固定地址，重启不变）"
+            suffix = "临时地址" if self.coord.url_mutable else "固定地址"
         elif method == ConnectionMethod.QUICK:
-            suffix = "（启动后生成临时地址）"
+            suffix = "启动后生成临时地址"
         elif method in (ConnectionMethod.CLOUDFLARE, ConnectionMethod.NGROK):
-            suffix = "（固定配置）"
+            suffix = "固定配置"
         else:
-            suffix = "（仅本机）"
-        self.url_edit.setText(f"MCP 地址：{url} {suffix}")
+            suffix = "仅本机"
+        self.url_edit.setText(f"{url}  ·  {suffix}")
+        self._update_gateway_port_ui()
 
     def _poll_status(self) -> None:
         selected = self._project_config()
         selected_unit = self.pm.unit(selected.id) if selected is not None else None
+        state = self._project_state(selected)
+        busy = self._is_project_busy(selected.id) if selected is not None else False
         is_entry = bool(
             selected is not None
             and self._service_root
             and _same_root(selected.root_path, self._service_root)
         )
-        state = self.coord.state if is_entry else (selected_unit.state if selected_unit is not None else EngineState.IDLE)
         if state == EngineState.ERROR:
-            message = self.coord.message if is_entry else (selected_unit.message if selected_unit else "")
-            self.status_label.setText(f"状态：失败（{message or ''}）")
+            self.status_label.setText("状态：失败")
         else:
             self.status_label.setText(f"状态：{state.value}")
         self.start_btn.setText("停止服务" if state == EngineState.READY else "启动服务")
@@ -1552,15 +1708,28 @@ class MainWindow(QMainWindow):
             self.start_btn.setText("启动中…")
         elif state == EngineState.STOPPING:
             self.start_btn.setText("停止中…")
-        self.start_btn.setEnabled(not self._busy and state not in (EngineState.STARTING, EngineState.STOPPING))
-        self.test_btn.setEnabled(state == EngineState.READY)
-        editable = state in (EngineState.IDLE, EngineState.ERROR) and not self._busy
-        self.gateway_port_spin.setEnabled(editable)
-        self.advanced_btn.setEnabled(editable)
-        self.permission_combo.setEnabled(editable)
-        self.client_combo.setEnabled(editable)
-        self.connection_combo.setEnabled(editable)
-        self.bridge_check.setEnabled(editable)
+        self.start_btn.setEnabled(
+            selected is not None
+            and not busy
+            and state not in (EngineState.STARTING, EngineState.STOPPING)
+        )
+        self.add_project_btn.setEnabled(True)
+        self.remove_project_btn.setEnabled(
+            selected is not None and not busy and state in (EngineState.IDLE, EngineState.ERROR)
+        )
+        self.test_btn.setEnabled(selected is not None and state == EngineState.READY)
+        editable = bool(
+            selected is not None and not busy and state in (EngineState.IDLE, EngineState.ERROR)
+        )
+        for widget in (
+            self.gateway_port_spin,
+            self.advanced_btn,
+            self.permission_combo,
+            self.client_combo,
+            self.connection_combo,
+            self.bridge_check,
+        ):
+            widget.setEnabled(editable)
         self._sync_connection_fields()
         if is_entry:
             components = self.coord.component_states()
@@ -1590,18 +1759,23 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_gw_poll_count"):
             self._gw_poll_count = 0
         self._gw_poll_count += 1
-        if self._gw_poll_count % 2 == 0 and self.tabs.currentIndex() == 3:
+        if (
+            self._gw_poll_count % 2 == 0
+            and hasattr(self, "logs_tab")
+            and self.tabs.currentWidget() is self.logs_tab
+            and self.log_tabs.currentWidget() is self.gateway_log_page
+        ):
             self._refresh_gateway_log()
 
     # ------------------------------------------------------ token helpers
     def _sync_token_ui(self) -> None:
         project = self._project_config()
-        if project is not None:
-            self._current_token = get_project_access_token(project.id) or ""
-        if self._current_token:
-            self.token_edit.setText(f"令牌（Bearer）：{self._current_token}")
-        else:
-            self.token_edit.setText("令牌：未生成（点击“重新生成令牌”）")
+        if project is None:
+            self._current_token = ""
+            self.token_edit.setText("选择项目后显示")
+            return
+        self._current_token = get_project_access_token(project.id) or ""
+        self.token_edit.setText(self._current_token or "尚未生成")
 
     def _copy_to_clipboard(self, text: str) -> None:
         if not text:
@@ -1790,13 +1964,31 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------------- end
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        if (
+            not self._force_exit
+            and self._app_config.close_behavior == "tray"
+            and self.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self.hide()
+            if not self._tray_hint_shown and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "MCP DevBridge",
+                    "程序仍在后台运行。右键托盘图标可退出。",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500,
+                )
+                self._tray_hint_shown = True
+            return
         if self._closing:
-            event.accept()
+            event.ignore()
             return
         units = [self.pm.unit(project.id) for project in self.pm.list()]
         any_running = any(unit is not None and unit.is_running for unit in units)
         if not self.coord.running and not any_running:
+            self.tray_icon.hide()
             event.accept()
+            QTimer.singleShot(0, QApplication.quit)
             return
         event.ignore()
         self._closing = True
@@ -1807,6 +1999,7 @@ class MainWindow(QMainWindow):
             self.pm.stop_all()
 
         def done(_result: Any) -> None:
+            self.tray_icon.hide()
             QApplication.quit()
 
         _run_async(cleanup, done)
@@ -1814,14 +2007,33 @@ class MainWindow(QMainWindow):
 def main() -> int:
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     font = QFont(app.font())
     font.setPointSize(10)
     app.setFont(font)
     app.setStyleSheet(
         """
-        QGroupBox { font-size: 14px; font-weight: 600; }
-        QLabel { font-size: 12px; }
-        QLineEdit, QComboBox, QSpinBox, QPushButton, QPlainTextEdit, QCheckBox, QTableWidget { font-size: 12px; }
+        QMainWindow, QScrollArea { background: #f5f7fa; }
+        QScrollArea { border: none; }
+        QLabel#PageTitle { font-size: 24px; font-weight: 700; color: #111827; }
+        QLabel#PageSubtitle { color: #6b7280; font-size: 12px; }
+        QLabel#VersionBadge { background: #e8eefc; color: #3558a8; border-radius: 10px; padding: 4px 10px; font-weight: 600; }
+        QLabel#MutedText { color: #6b7280; }
+        QTabWidget::pane { border: none; top: -1px; }
+        QTabBar::tab { background: transparent; color: #64748b; padding: 9px 14px; margin-right: 4px; border-bottom: 2px solid transparent; }
+        QTabBar::tab:selected { color: #1d4ed8; border-bottom: 2px solid #2563eb; font-weight: 600; }
+        QGroupBox { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; margin-top: 12px; padding-top: 10px; font-size: 13px; font-weight: 600; color: #111827; }
+        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
+        QLineEdit, QComboBox, QSpinBox, QPlainTextEdit { background: #ffffff; border: 1px solid #d7dde5; border-radius: 7px; padding: 6px 8px; color: #111827; }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border: 1px solid #7aa2f7; }
+        QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background: #f3f4f6; color: #9ca3af; }
+        QPushButton { min-height: 31px; padding: 0 13px; border-radius: 7px; border: 1px solid #d7dde5; background: #ffffff; color: #334155; }
+        QPushButton:hover { background: #f8fafc; border-color: #b8c2cf; }
+        QPushButton[role="primary"] { background: #2563eb; color: white; border: 1px solid #2563eb; font-weight: 600; }
+        QPushButton[role="danger"] { background: #fff7f7; color: #b42318; border: 1px solid #f3c7c3; font-weight: 600; }
+        QPushButton:disabled { background: #f3f4f6; color: #a3aab4; border-color: #e5e7eb; }
+        QTableWidget { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 7px; gridline-color: transparent; alternate-background-color: #f8fafc; selection-background-color: #e8f0fe; selection-color: #111827; }
+        QHeaderView::section { background: #f8fafc; color: #475569; border: none; border-bottom: 1px solid #e5e7eb; padding: 7px 6px; font-weight: 600; }
         """
     )
     window = MainWindow()

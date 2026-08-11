@@ -2,6 +2,16 @@
 
 All dates are local development dates.
 
+## 0.6.0 (2026-08-11) — desktop UX and per-project interaction isolation
+
+- Reworked the top-level information architecture into Workbench / Project Settings / Diagnostics / Logs / Settings; process, audit and Gateway logs now live under one Logs section.
+- Replaced the global desktop busy lock with per-project operation state. A running project no longer disables idle projects; its own stop action remains available while only non-hot settings for that project are locked.
+- Reduced persistent helper copy and moved technical detail into tooltips, diagnostics and advanced settings.
+- Fresh-install UI no longer surfaces any developer-machine project/path/domain/Git/Gemini values; connection fields stay empty until the user adds a project. Existing generic port allocation remains configurable.
+- Added system-tray behavior: title-bar minimize remains a normal taskbar minimize; close defaults to hiding in the tray, with restore/exit tray actions and a persisted close-behavior setting.
+- Added v0.6 regressions for clean defaults, project-isolated controls and tray close behavior.
+- Verification baseline before packaging: 294 pytest cases, Ruff clean and Pyright 0 errors / 0 warnings.
+
 ## 0.5.0 (2026-08-10) — per-project desktop configuration and live-upgrade safety
 
 - Six-column project table; removed the `enabled` column/desktop auto-restore behavior; 1-second real state refresh and dynamic row start/stop action.

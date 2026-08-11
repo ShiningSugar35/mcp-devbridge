@@ -199,7 +199,7 @@ try {
     Write-UpgradeLog "Desktop shortcut replaced: $shortcut"
 
     $newProcess = Start-Process -FilePath $installedExe -PassThru
-    Write-UpgradeLog "Started MCP DevBridge 0.5.0 candidate: PID=$($newProcess.Id)"
+    Write-UpgradeLog "Started new MCP DevBridge candidate: PID=$($newProcess.Id)"
 
     $deadline = (Get-Date).AddSeconds(150)
     $ready = $false

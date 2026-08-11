@@ -27,3 +27,7 @@ All public modes end at the selected project's Gateway and expose `/mcp`; Local 
 ## Ports
 
 Gateway/CodexPro/Windows-MCP ports are allocated per project from the defaults 8786/8787/28731 while avoiding catalog collisions. Legacy backend 8765 remains a global compatibility port. Advanced Settings edits the selected project's three primary ports and locks them while that project is running.
+
+## v0.6 Windows desktop behavior
+
+The packaged desktop uses the Windows system tray. Closing the main window hides it to the tray by default; users can switch the close action to direct exit in Settings. Normal title-bar minimization remains a taskbar minimize.

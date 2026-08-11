@@ -13,6 +13,7 @@ type PermissionMode = Literal["read_only", "workspace", "system"]
 type ClientTarget = Literal["chatgpt", "gemini"]
 type TunnelMode = Literal["named", "quick", "none"]
 type AuthMode = Literal["bearer", "anonymous"]
+type CloseBehavior = Literal["tray", "exit"]
 
 GIT_FIELD_LABELS: dict[str, str] = {
     "git_user_name": "Git 用户名",
@@ -113,6 +114,7 @@ class AppConfig(BaseModel):
     execution_profile: str = "developer"
     full_system_risk_accepted: bool = False
     first_run_version: int = 0
+    close_behavior: CloseBehavior = "tray"
     # 端口配置（集中维护默认值，见 constants.DEFAULT_*_PORT）：
     gateway_port: int = constants.DEFAULT_GATEWAY_PORT
     codexpro_port: int = constants.DEFAULT_CODEXPRO_PORT

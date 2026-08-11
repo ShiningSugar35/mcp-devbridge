@@ -1,4 +1,4 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec: MCP DevBridge desktop (onedir).
 
 Build:  pyinstaller packaging/local-dev-mcp-bridge.spec --noconfirm
@@ -7,7 +7,7 @@ Output: dist/MCPDevBridge/
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.5.0"
+PROJECT_VERSION = "0.6.0"
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry_desktop.py")],

@@ -324,9 +324,10 @@ wheels = [
 
 [[package]]
 name = "local-dev-mcp-bridge"
-version = "0.1.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "mcp" },
     { name = "platformdirs" },
     { name = "psutil" },
@@ -350,6 +351,7 @@ package = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "mcp", specifier = "==2.0.0" },
     { name = "platformdirs", specifier = ">=4.3.0" },

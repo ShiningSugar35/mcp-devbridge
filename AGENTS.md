@@ -91,7 +91,7 @@ mcp-devBridge/
 │       ├── app_state.py        # 服务协调状态机 ServiceCoordinator（顺序、URL 固定性、故障清理；无 Qt）
 │       ├── backend_manager.py  # 后端子进程管理 /health 轮询（已归档，桌面改走 ServiceCoordinator）
 │       └── desktop_main.py     # Phase 3 桌面 UI（PySide6 单窗口，已接线 ServiceCoordinator）
-├── tests/                      # pytest 测试（Phase 10 当前 289 项全绿，以实际 pytest 输出为准）
+├── tests/                      # pytest 测试（Phase 11 当前 294 项全绿，以实际 pytest 输出为准）
 │   ├── conftest.py
 │   ├── test_fs.py · test_commands.py · test_git.py · test_config.py
 │   ├── test_mcp_integration.py · test_selftest.py
@@ -144,6 +144,13 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 ---
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
+
+- 2026-08-11 · **v0.6.0 桌面 UX / 托盘 / 项目级交互隔离**：
+  - 全局 busy 改为 `_busy_project_ids`，一个项目运行不再锁其它项目；READY 项目可停止，IDLE/ERROR 项目可独立启动。
+  - 顶层导航收敛为工作台 / 项目设置 / 诊断 / 日志 / 设置，进程/审计/Gateway 日志收进日志二级页，常驻说明文案精简。
+  - `AppConfig.close_behavior` 默认 `tray`；标题栏“×”隐藏到系统托盘，托盘恢复/退出；设置可改为 `exit`。标题栏“—”保持普通任务栏最小化。
+  - 新用户无项目时不展示机器相关路径或连接数据；未选项目连接信息显示“选择项目后显示”。
+  - 新增 v0.6 回归测试；当前全量 294 passed，Ruff/Pyright 全绿。
 
 - 2026-08-10 · **桌面交互与按项目独立配置（v0.5.0）**：
   - 项目表改为六列并移除 `enabled` UI/自动恢复；状态 1 秒刷新，操作列与服务控制均为动态“启动/停止”单按钮。

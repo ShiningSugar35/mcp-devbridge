@@ -1,5 +1,9 @@
 # Architecture
 
+## v0.6 desktop interaction layer
+
+Desktop operation state is per-project rather than global. Only the project currently transitioning is busy; READY projects retain their stop action and other IDLE/ERROR projects remain selectable and startable. The desktop navigation is Workbench / Project Settings / Diagnostics / Logs / Settings, with log sub-tabs for process, audit and Gateway output. `AppConfig.close_behavior` controls close-to-tray (default) versus direct exit; the normal minimize button still minimizes to the taskbar.
+
 ## v0.5.0 overview
 
 ```text
