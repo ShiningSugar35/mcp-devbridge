@@ -10,7 +10,7 @@ All dates are local development dates.
 - Fresh-install UI no longer surfaces any developer-machine project/path/domain/Git/Gemini values; connection fields stay empty until the user adds a project. Existing generic port allocation remains configurable.
 - Added system-tray behavior: title-bar minimize remains a normal taskbar minimize; close defaults to hiding in the tray, with restore/exit tray actions and a persisted close-behavior setting.
 - Added v0.6 regressions for clean defaults, project-isolated controls and tray close behavior.
-- Verification baseline before packaging: 294 pytest cases, Ruff clean and Pyright 0 errors / 0 warnings.
+- Verification: 294 pytest cases, Ruff clean, Pyright 0 errors / 0 warnings, responsive/offscreen/tray regressions green, frozen staging smoke passed, final Inno installer silent-install returned 0, and detached live upgrade restored the installed build with Gateway 8786 / Codex 8788 ready.
 
 ## 0.5.0 (2026-08-10) — per-project desktop configuration and live-upgrade safety
 
