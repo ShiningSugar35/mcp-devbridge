@@ -46,15 +46,33 @@ from starlette.responses import (
 from starlette.routing import Route
 
 from . import constants
+from .audit import AuditLogger
 from .constants import LOG_DIR as _LOG_DIR
+from .device_hub import DeviceRegistry
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
 from .secrets import SecretsStore
 from .shell import detect_binaries, get_shell_info, run_command, run_program
 
-_LOCAL_TOOL_NAMES = frozenset({
-    "run_command", "run_program", "shell_self_test",
-    "devbridge_list_workspaces", "devbridge_get_current_workspace", "devbridge_switch_workspace",
-})
+_DEVICE_TOOL_NAMES = frozenset(
+    {
+        "devbridge_list_devices",
+        "devbridge_get_current_device",
+        "devbridge_switch_device",
+    }
+)
+_LOCAL_TOOL_NAMES = (
+    frozenset(
+        {
+            "run_command",
+            "run_program",
+            "shell_self_test",
+            "devbridge_list_workspaces",
+            "devbridge_get_current_workspace",
+            "devbridge_switch_workspace",
+        }
+    )
+    | _DEVICE_TOOL_NAMES
+)
 
 _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     {
@@ -64,8 +82,14 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Command to execute"},
-                "cwd": {"type": "string", "description": "Working directory relative to project root. Defaults to project root."},
-                "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 600, max 1800)"},
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory relative to project root. Defaults to project root.",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default 600, max 1800)",
+                },
             },
             "required": ["command"],
         },
@@ -77,9 +101,19 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "executable": {"type": "string", "description": "Program path or name"},
-                "args": {"type": "array", "items": {"type": "string"}, "description": "Argument list"},
-                "cwd": {"type": "string", "description": "Working directory relative to project root. Defaults to project root."},
-                "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 600, max 1800)"},
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Argument list",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory relative to project root. Defaults to project root.",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default 600, max 1800)",
+                },
             },
             "required": ["executable"],
         },
@@ -114,9 +148,36 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project_id": {"type": "string", "description": "Project ID from devbridge_list_workspaces output"},
+                "project_id": {
+                    "type": "string",
+                    "description": "Project ID from devbridge_list_workspaces output",
+                },
             },
             "required": ["project_id"],
+        },
+    },
+    {
+        "name": "devbridge_list_devices",
+        "description": "List computers connected to this MCP DevBridge Hub and whether each one is online.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "devbridge_get_current_device",
+        "description": "Return the computer currently selected for this MCP session.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "devbridge_switch_device",
+        "description": "Switch only the current MCP session to another online computer from devbridge_list_devices.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID from devbridge_list_devices",
+                },
+            },
+            "required": ["device_id"],
         },
     },
 ]
@@ -149,13 +210,24 @@ button{{font-size:15px;padding:8px 22px;border-radius:6px;cursor:pointer}}
 <button type="submit" name="decision" value="deny" class="cancel">取消</button>
 </form></body></html>"""
 
-_HOP_HEADERS = frozenset({"host", "connection", "content-length", "transfer-encoding", "authorization"})
+_HOP_HEADERS = frozenset(
+    {"host", "connection", "content-length", "transfer-encoding", "authorization"}
+)
 
 # --------------------------------------------------------- diagnostic logging
-_DIAG_SENSITIVE_KEYS = frozenset({
-    "command", "code", "access_token", "refresh_token", "client_secret",
-    "token", "authorization", "bearer", "code_verifier",
-})
+_DIAG_SENSITIVE_KEYS = frozenset(
+    {
+        "command",
+        "code",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "token",
+        "authorization",
+        "bearer",
+        "code_verifier",
+    }
+)
 _DIAG_SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "x-api-key"})
 _DIAG_BODY_MAX = 2048
 _DIAG_LOG_FILE: str = ""
@@ -191,10 +263,7 @@ def _diag_redact_body(body: bytes | str) -> str:
 
 
 def _diag_redact_headers(headers: dict[str, str]) -> dict[str, str]:
-    return {
-        k: "***" if k.lower() in _DIAG_SENSITIVE_HEADERS else v
-        for k, v in headers.items()
-    }
+    return {k: "***" if k.lower() in _DIAG_SENSITIVE_HEADERS else v for k, v in headers.items()}
 
 
 def _write_diag_entry(**fields: Any) -> None:
@@ -256,7 +325,8 @@ def _rewrite_server_identity(payload: bytes) -> bytes:
     try:
         obj = json.loads(text)
         if isinstance(obj, dict) and (
-            "serverInfo" in obj or (isinstance(obj.get("result"), dict) and "serverInfo" in obj["result"])
+            "serverInfo" in obj
+            or (isinstance(obj.get("result"), dict) and "serverInfo" in obj["result"])
         ):
             return json.dumps(_patch(obj), ensure_ascii=False).encode("utf-8")
     except json.JSONDecodeError:
@@ -288,7 +358,7 @@ def _analyze_tools(payload: bytes) -> tuple[int, list[str]]:
 
 def _inject_tools(payload: bytes) -> bytes:
     """Add Python tool definitions to the tools/list response.
-    
+
     Handles both SSE (``data: {...}`` lines) and plain JSON bodies.
     """
     try:
@@ -300,7 +370,15 @@ def _inject_tools(payload: bytes) -> bytes:
         if isinstance(obj, dict) and isinstance(obj.get("result"), dict):
             tools = obj["result"].get("tools")
             if isinstance(tools, list):
-                tools.extend(_PYTHON_TOOL_DEFS)
+                names = {
+                    str(item.get("name", ""))
+                    for item in tools
+                    if isinstance(item, dict) and item.get("name")
+                }
+                for tool in _PYTHON_TOOL_DEFS:
+                    if tool["name"] not in names:
+                        tools.append(tool)
+                        names.add(tool["name"])
         return obj
 
     if text.lstrip().startswith("data:") or "\ndata:" in text:
@@ -321,7 +399,11 @@ def _inject_tools(payload: bytes) -> bytes:
 
     try:
         obj = json.loads(text)
-        if isinstance(obj, dict) and isinstance(obj.get("result"), dict) and "tools" in obj["result"]:
+        if (
+            isinstance(obj, dict)
+            and isinstance(obj.get("result"), dict)
+            and "tools" in obj["result"]
+        ):
             return json.dumps(_patch(obj), ensure_ascii=False).encode("utf-8")
     except json.JSONDecodeError:
         pass
@@ -344,7 +426,10 @@ def _is_loopback(request: Request) -> bool:
             if first:
                 return first.startswith("127.")
     client = request.client
-    return bool(client and (client.host in ("127.0.0.1", "::1", "localhost") or client.host.startswith("127.")))
+    return bool(
+        client
+        and (client.host in ("127.0.0.1", "::1", "localhost") or client.host.startswith("127."))
+    )
 
 
 class _DiagnosticMiddleware:
@@ -417,9 +502,15 @@ class OAuthGateway:
         transport: Any | None = None,
         workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
         workspace_credential_registry: Callable[[str], str | None] | None = None,
+        device_registry: DeviceRegistry | None = None,
+        local_device_id: str = "",
     ) -> None:
         hostname = (public_hostname or "").strip().rstrip("/")
-        base = hostname if hostname.lower().startswith(("http://", "https://")) else f"https://{hostname}"
+        base = (
+            hostname
+            if hostname.lower().startswith(("http://", "https://"))
+            else f"https://{hostname}"
+        )
         self.public_base = base.rstrip("/")
         self.resource_url = f"{self.public_base}{constants.DEFAULT_MCP_PATH}"
         if upstream_url:
@@ -437,6 +528,11 @@ class OAuthGateway:
         self._workspace = Path(workspace) if workspace else None
         self._workspace_registry = workspace_registry
         self._workspace_credential_registry = workspace_credential_registry
+        self._device_registry = device_registry
+        self._local_device_id = local_device_id or (
+            device_registry.local_device_id if device_registry else ""
+        )
+        self._audit = AuditLogger()
         self._provider = provider or LocalOAuthProvider(
             issuer_url=self.public_base,
             resource_url=self.resource_url,
@@ -450,8 +546,9 @@ class OAuthGateway:
             timeout=httpx.Timeout(900.0, connect=30.0),
             transport=transport,
         )
-        # Session → workspace_id mapping for switch_workspace tool
+        # Per-session routing: device selection is independent from workspace selection.
         self._session_workspaces: dict[str, str] = {}
+        self._session_devices: dict[str, str] = {}
         self._session_lock = threading.Lock()
 
     # ------------------------------------------------------------ build
@@ -485,9 +582,13 @@ class OAuthGateway:
                 methods=["GET", "OPTIONS"],
             )
         )
-        routes.append(Route(constants.DEFAULT_MCP_PATH, self._mcp_endpoint, methods=["GET", "POST"]))
+        routes.append(
+            Route(constants.DEFAULT_MCP_PATH, self._mcp_endpoint, methods=["GET", "POST"])
+        )
         routes.append(Route("/consent", self._consent_page, methods=["GET"]))
         routes.append(Route("/consent", self._consent_submit, methods=["POST"]))
+        routes.append(Route("/device/register", self._device_register, methods=["POST"]))
+        routes.append(Route("/device/heartbeat", self._device_heartbeat, methods=["POST"]))
         routes.append(Route("/health", self._health))
         app = Starlette(routes=routes)
         return _DiagnosticMiddleware(app)
@@ -521,6 +622,7 @@ class OAuthGateway:
         if self._workspace_registry is not None:
             try:
                 from .config_store import load_projects
+
                 projects = load_projects()
                 for p in projects:
                     if p.id:
@@ -545,7 +647,8 @@ class OAuthGateway:
         decision = str(form.get("decision", "deny"))
         workspace_id = str(form.get("workspace_id", ""))
         _write_diag_entry(
-            path="/consent", method="POST",
+            path="/consent",
+            method="POST",
             decision=decision,
             workspace_hash=_diag_short_hash(workspace_id),
         )
@@ -554,7 +657,8 @@ class OAuthGateway:
                 if self._workspace_registry is not None:
                     if not workspace_id:
                         _write_diag_entry(
-                            path="/consent", method="POST",
+                            path="/consent",
+                            method="POST",
                             event="consent_missing_workspace",
                             error="workspace_id is empty - no workspace selected",
                         )
@@ -565,7 +669,8 @@ class OAuthGateway:
                         )
                     if not self._workspace_registry(workspace_id):
                         _write_diag_entry(
-                            path="/consent", method="POST",
+                            path="/consent",
+                            method="POST",
                             event="consent_workspace_not_ready",
                             workspace_hash=_diag_short_hash(workspace_id),
                             error="Selected workspace CodexPro is not running",
@@ -582,7 +687,8 @@ class OAuthGateway:
                 target = self._provider.deny(consent_id)
         except ConsentExpired:
             _write_diag_entry(
-                path="/consent", method="POST",
+                path="/consent",
+                method="POST",
                 error="consent_expired",
             )
             return HTMLResponse(
@@ -591,104 +697,166 @@ class OAuthGateway:
             )
         return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
 
+    # ------------------------------------------------------ device pairing
+    async def _device_register(self, request: Request) -> Response:
+        if self._device_registry is None:
+            return JSONResponse(
+                {"ok": False, "message": "当前 Hub 未启用多设备功能。"}, status_code=404
+            )
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("请求格式不正确。")
+            peer_value = self._device_registry.register_remote(
+                pair_code=str(payload.get("pair_code", "")),
+                device_id=str(payload.get("device_id", "")),
+                name=str(payload.get("name", "")),
+                endpoint_url=str(payload.get("mcp_url", "")),
+                bearer=str(payload.get("bearer", "")),
+            )
+            _write_diag_entry(path="/device/register", method="POST", event="device_paired")
+            return JSONResponse({"ok": True, "peer_secret": peer_value, "heartbeat_seconds": 15})
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+
+    async def _device_heartbeat(self, request: Request) -> Response:
+        if self._device_registry is None:
+            return JSONResponse(
+                {"ok": False, "message": "当前 Hub 未启用多设备功能。"}, status_code=404
+            )
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("请求格式不正确。")
+            device = self._device_registry.heartbeat(
+                device_id=str(payload.get("device_id", "")),
+                peer_secret=str(payload.get("peer_secret", "")),
+                endpoint_url=str(payload.get("mcp_url", "")),
+                name=str(payload.get("name", "")),
+                bearer=str(payload.get("bearer", "")),
+            )
+            return JSONResponse({"ok": True, "device_id": device.id})
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "message": str(exc)}, status_code=401)
+
     # ------------------------------------------------------------- /mcp
     async def _mcp_endpoint(self, request: Request) -> Response:
         body = await request.body()
         auth_header = request.headers.get("authorization", "")
         bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
         engine_credential = self.upstream_token_source()
-
-        # --- resolve proxy token and workspace ---
-        proxy_token: str | None = None
-        workspace_id: str = ""
-        upstream_target: str | None = None
         session_id = self._extract_session_id(request)
 
+        jsonrpc_method = ""
+        tool_name = ""
+        rpc: dict[str, Any] | None = None
+        if request.method == "POST":
+            try:
+                parsed = json.loads(body)
+                if isinstance(parsed, dict):
+                    rpc = parsed
+                    jsonrpc_method = str(parsed.get("method", ""))
+                    if jsonrpc_method == "tools/call":
+                        tool_name = str((parsed.get("params") or {}).get("name", ""))
+            except json.JSONDecodeError:
+                rpc = None
+
+        proxy_token: str | None = None
+        workspace_id = ""
+        upstream_target: str | None = None
         if bearer:
             direct_workspace = self._workspace_for_credential(bearer)
             if _constant_time_eq(bearer, engine_credential) or direct_workspace:
                 workspace_id = direct_workspace
-                with self._session_lock:
-                    if session_id and session_id in self._session_workspaces:
-                        workspace_id = self._session_workspaces[session_id]
-                if workspace_id:
-                    upstream_target = self._resolve_upstream(workspace_id)
-                    if not upstream_target:
-                        return JSONResponse(
-                            _jsonrpc_error(
-                                None,
-                                -32000,
-                                "工作区未就绪。请先在桌面启动对应项目的 CodexPro 引擎。",
-                            ),
-                            status_code=502,
-                        )
                 proxy_token = self._credential_for_workspace(
                     workspace_id, engine_credential or bearer
                 )
             else:
                 record = await self._provider.load_access_token(bearer)
-                if record is not None:
-                    if record.resource and record.resource.rstrip("/") != self.resource_url:
-                        return self._unauthorized()
-                    workspace_id = _workspace_from_subject(record.subject or "")
-                    with self._session_lock:
-                        if session_id and session_id in self._session_workspaces:
-                            workspace_id = self._session_workspaces[session_id]
-                    upstream_target = self._resolve_upstream(workspace_id)
-                    if not upstream_target:
-                        return JSONResponse(
-                            _jsonrpc_error(
-                                None,
-                                -32000,
-                                "工作区未就绪。请先在桌面启动对应项目的 CodexPro 引擎。",
-                            ),
-                            status_code=502,
-                        )
-                    proxy_token = self._credential_for_workspace(workspace_id, engine_credential)
-                    if not proxy_token:
-                        return self._unauthorized()
-                else:
+                if record is None:
+                    return self._unauthorized()
+                if record.resource and record.resource.rstrip("/") != self.resource_url:
+                    return self._unauthorized()
+                workspace_id = _workspace_from_subject(record.subject or "")
+                proxy_token = self._credential_for_workspace(workspace_id, engine_credential)
+                if not proxy_token:
                     return self._unauthorized()
         elif self.allow_local_anonymous and _is_loopback(request):
             proxy_token = None
         else:
             return self._unauthorized()
 
-        # --- intercept local Python tool calls ---
-        jsonrpc_method: str = ""
-        tool_name: str = ""
-        rpc = None  # type: ignore[assignment]
-        if request.method == "POST":
-            try:
-                rpc = json.loads(body)
-                if isinstance(rpc, dict):
-                    jsonrpc_method = str(rpc.get("method", ""))
-            except json.JSONDecodeError:
-                rpc = None
-            if isinstance(rpc, dict) and rpc.get("method") == "tools/call":
-                params = rpc.get("params") or {}
-                name = params.get("name", "")
-                tool_name = name
-                if name in _LOCAL_TOOL_NAMES:
-                    result = await self._exec_local_tool(name, rpc, params, workspace_id, session_id)
-                    _write_diag_entry(
-                        path=request.url.path,
-                        method=request.method,
-                        local_tool=name,
-                        workspace_hash=_diag_short_hash(workspace_id),
-                        session_id=session_id[:16],
+        device_id = self._effective_device(session_id)
+        remote = None
+        if self._device_registry is not None and device_id and device_id != self._local_device_id:
+            remote = self._device_registry.resolve_remote(device_id)
+            if remote is None:
+                return JSONResponse(
+                    _jsonrpc_error(
+                        None, -32001, "目标电脑当前离线。请用 devbridge_list_devices 查看在线设备。"
+                    ),
+                    status_code=502,
+                )
+            upstream_target = remote.base_url
+            proxy_token = remote.bearer
+        else:
+            with self._session_lock:
+                if session_id and session_id in self._session_workspaces:
+                    workspace_id = self._session_workspaces[session_id]
+            if workspace_id:
+                upstream_target = self._resolve_upstream(workspace_id)
+                if not upstream_target:
+                    return JSONResponse(
+                        _jsonrpc_error(
+                            None, -32000, "当前项目尚未启动。请先在 MCP DevBridge 桌面启动它。"
+                        ),
+                        status_code=502,
                     )
-                    return result
+                proxy_token = self._credential_for_workspace(
+                    workspace_id, engine_credential or proxy_token
+                )
 
-        return await self._proxy(request, body, proxy_token, upstream_target=upstream_target,
-                                   jsonrpc_method=jsonrpc_method, tool_name=tool_name,
-                                   workspace_id=workspace_id, session_id=session_id)
+        if rpc is not None and jsonrpc_method == "tools/call":
+            params = rpc.get("params") or {}
+            if tool_name in _DEVICE_TOOL_NAMES:
+                result = await self._exec_local_tool(
+                    tool_name, rpc, params, workspace_id, session_id
+                )
+                self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
+                return result
+            if remote is None and tool_name in _LOCAL_TOOL_NAMES:
+                result = await self._exec_local_tool(
+                    tool_name, rpc, params, workspace_id, session_id
+                )
+                self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
+                return result
+
+        return await self._proxy(
+            request,
+            body,
+            proxy_token,
+            upstream_target=upstream_target,
+            jsonrpc_method=jsonrpc_method,
+            tool_name=tool_name,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            device_id=device_id,
+            rpc=rpc,
+        )
 
     async def _proxy(
-        self, request: Request, body: bytes, authorization: str | None, *,
+        self,
+        request: Request,
+        body: bytes,
+        authorization: str | None,
+        *,
         upstream_target: str | None = None,
-        jsonrpc_method: str = "", tool_name: str = "",
-        workspace_id: str = "", session_id: str = "",
+        jsonrpc_method: str = "",
+        tool_name: str = "",
+        workspace_id: str = "",
+        session_id: str = "",
+        device_id: str = "",
+        rpc: dict[str, Any] | None = None,
     ) -> Response:
         base = upstream_target or self.upstream_url
         target = f"{base}{request.url.path}"
@@ -700,17 +868,38 @@ class OAuthGateway:
         headers["accept-encoding"] = "identity"
         if authorization:
             headers["authorization"] = f"Bearer {authorization}"
+        started = time.monotonic()
         try:
             upstream = await self._http.send(
                 self._http.build_request(request.method, target, content=body, headers=headers),
                 stream=True,
             )
         except httpx.HTTPError:
+            if tool_name:
+                self._audit_gateway_tool(
+                    request,
+                    rpc,
+                    tool_name,
+                    workspace_id,
+                    device_id,
+                    False,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    error_type="upstream_unreachable",
+                )
             return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
+        if tool_name:
+            self._audit_gateway_tool(
+                request,
+                rpc,
+                tool_name,
+                workspace_id,
+                device_id,
+                upstream.status_code < 400,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                error_type="" if upstream.status_code < 400 else f"http_{upstream.status_code}",
+            )
         filtered = {
-            key: value
-            for key, value in upstream.headers.items()
-            if key.lower() not in _HOP_HEADERS
+            key: value for key, value in upstream.headers.items() if key.lower() not in _HOP_HEADERS
         }
         if request.method == "POST":
             if b'"tools/list"' in body:
@@ -718,7 +907,8 @@ class OAuthGateway:
                 rewritten = _inject_tools(upstream.content)
                 tool_count, dupes = _analyze_tools(rewritten)
                 _write_diag_entry(
-                    path=request.url.path, method=request.method,
+                    path=request.url.path,
+                    method=request.method,
                     jsonrpc_method="tools/list",
                     upstream_status=upstream.status_code,
                     upstream_target=target,
@@ -727,17 +917,22 @@ class OAuthGateway:
                     duplicate_tools=dupes,
                     workspace_hash=_diag_short_hash(workspace_id),
                 )
-                return Response(content=rewritten, status_code=upstream.status_code, headers=filtered)
+                return Response(
+                    content=rewritten, status_code=upstream.status_code, headers=filtered
+                )
             if b"initialize" in body:
                 await upstream.aread()
                 rewritten = _rewrite_server_identity(upstream.content)
                 _write_diag_entry(
-                    path=request.url.path, method=request.method,
+                    path=request.url.path,
+                    method=request.method,
                     jsonrpc_method="initialize",
                     upstream_status=upstream.status_code,
                     upstream_target=target,
                 )
-                return Response(content=rewritten, status_code=upstream.status_code, headers=filtered)
+                return Response(
+                    content=rewritten, status_code=upstream.status_code, headers=filtered
+                )
         return StreamingResponse(
             upstream.aiter_raw(),
             status_code=upstream.status_code,
@@ -746,8 +941,12 @@ class OAuthGateway:
 
     # ---------------------------------------------------- local tools
     async def _exec_local_tool(
-        self, name: str, rpc: dict[str, Any], params: dict[str, Any],
-        workspace_id: str = "", session_id: str = "",
+        self,
+        name: str,
+        rpc: dict[str, Any],
+        params: dict[str, Any],
+        workspace_id: str = "",
+        session_id: str = "",
     ) -> JSONResponse:
         rpc_id = rpc.get("id")
         workspace = self._resolve_workspace_path(workspace_id) or self._workspace or Path.cwd()
@@ -767,7 +966,9 @@ class OAuthGateway:
                     f"{'*** TIMED OUT ***' if res.timed_out else ''}\n"
                     f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
                 )
-                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]}))
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]})
+                )
             elif name == "run_program":
                 executable = str(params.get("executable", ""))
                 if not executable.strip():
@@ -784,14 +985,18 @@ class OAuthGateway:
                     f"{'*** TIMED OUT ***' if res.timed_out else ''}\n"
                     f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
                 )
-                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]}))
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]})
+                )
             elif name == "shell_self_test":
                 lines: list[str] = []
                 info = get_shell_info()
                 default = info.get("default") or {}
                 if isinstance(default, dict):
                     if default.get("executable"):
-                        lines.append(f"[✓] shell: {default.get('name', '?')} ({default.get('path', '?')})")
+                        lines.append(
+                            f"[✓] shell: {default.get('name', '?')} ({default.get('path', '?')})"
+                        )
                     else:
                         lines.append(f"[✗] shell: 不可执行 ({default.get('path', '?')})")
                 bin_versions = detect_binaries()
@@ -801,6 +1006,7 @@ class OAuthGateway:
                     lines.append(f"{symbol} {tool}: {ver or '未安装'}")
                 for tool in ("pytest", "pyright"):
                     import subprocess as _sp
+
                     try:
                         r = _sp.run(
                             ["python", "-m", tool, "--version"],
@@ -812,26 +1018,164 @@ class OAuthGateway:
                         lines.append(f"[✓] {tool}: {out[0] if out else 'ok'} (python -m {tool})")
                     except Exception:
                         lines.append(f"[✗] {tool}: 未安装或不可调用")
-                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": "\n".join(lines)}]}))
+                return JSONResponse(
+                    _jsonrpc_result(
+                        rpc_id, {"content": [{"type": "text", "text": "\n".join(lines)}]}
+                    )
+                )
             elif name == "devbridge_list_workspaces":
                 result = self._list_workspaces()
-                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                )
             elif name == "devbridge_get_current_workspace":
                 result = self._get_current_workspace(workspace_id, session_id)
-                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                )
             elif name == "devbridge_switch_workspace":
                 args = params.get("arguments", {}) if isinstance(params, dict) else {}
                 target_id = str(args.get("project_id", ""))
                 if not target_id:
                     raise ValueError("project_id 不能为空。")
                 result = self._do_switch_workspace(target_id, session_id)
-                return JSONResponse(_jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]}))
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                )
+            elif name == "devbridge_list_devices":
+                result = self._list_devices(session_id)
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                )
+            elif name == "devbridge_get_current_device":
+                result = self._get_current_device(session_id)
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                )
+            elif name == "devbridge_switch_device":
+                args = params.get("arguments", {}) if isinstance(params, dict) else {}
+                target_id = str(args.get("device_id", ""))
+                if not target_id:
+                    raise ValueError("device_id 不能为空。")
+                result = self._do_switch_device(target_id, session_id)
+                return JSONResponse(
+                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                )
             else:
                 raise ValueError(f"未知的本地工具: {name}")
         except ValueError as exc:
             return JSONResponse(_jsonrpc_error(rpc_id, -32602, str(exc)))
         except Exception as exc:
             return JSONResponse(_jsonrpc_error(rpc_id, -32603, f"工具执行失败: {exc}"))
+
+    # ----------------------------------------------------------- device helpers
+    def _local_device_online(self) -> bool:
+        if self._workspace_registry is None:
+            return True
+        try:
+            from .config_store import load_projects
+
+            return any(p.id and self._workspace_registry(p.id) for p in load_projects())
+        except Exception:
+            return True
+
+    def _effective_device(self, session_id: str) -> str:
+        if self._device_registry is None:
+            return self._local_device_id
+        online = self._device_registry.online_ids(local_online=self._local_device_online())
+        with self._session_lock:
+            selected = self._session_devices.get(session_id, "") if session_id else ""
+            if selected in online:
+                return selected
+            if len(online) == 1:
+                if session_id:
+                    self._session_devices[session_id] = online[0]
+                return online[0]
+        if self._local_device_id in online:
+            return self._local_device_id
+        return online[0] if online else ""
+
+    def _list_devices(self, session_id: str) -> str:
+        if self._device_registry is None:
+            return "当前仅启用本机设备。"
+        current = self._effective_device(session_id)
+        views = self._device_registry.views(local_online=self._local_device_online())
+        rows = ["可用电脑："]
+        for view in views:
+            state = "在线" if view.online else "离线"
+            suffix = "（本机）" if view.local else ""
+            selected = " ← 当前" if view.id == current else ""
+            rows.append(f"- {view.name}{suffix} · {state} · id={view.id}{selected}")
+        online_count = sum(1 for view in views if view.online)
+        if online_count == 1:
+            rows.append("\n目前只有一台电脑在线，系统已自动使用它。")
+        elif online_count > 1:
+            rows.append("\n多台电脑在线时，可用 devbridge_switch_device 切换；只影响当前聊天会话。")
+        return "\n".join(rows)
+
+    def _get_current_device(self, session_id: str) -> str:
+        current = self._effective_device(session_id)
+        if self._device_registry is None:
+            return "当前电脑：本机"
+        view = next(
+            (
+                item
+                for item in self._device_registry.views(local_online=self._local_device_online())
+                if item.id == current
+            ),
+            None,
+        )
+        if view is None:
+            return "当前没有可用电脑。"
+        return f"当前电脑：{view.name}{'（本机）' if view.local else ''}\nid={view.id}"
+
+    def _do_switch_device(self, device_id: str, session_id: str) -> str:
+        if self._device_registry is None:
+            raise ValueError("当前没有启用 Multi-Device Hub。")
+        if not session_id:
+            raise ValueError("无法识别当前 MCP 会话，不能安全地切换电脑。")
+        views = self._device_registry.views(local_online=self._local_device_online())
+        target = next((view for view in views if view.id == device_id), None)
+        if target is None:
+            raise ValueError(f"找不到电脑：{device_id}。请先用 devbridge_list_devices 查看。")
+        if not target.online:
+            raise ValueError(f"电脑“{target.name}”当前离线。")
+        with self._session_lock:
+            self._session_devices[session_id] = device_id
+        return f"已切换到电脑：{target.name}\n仅影响当前 MCP 会话。"
+
+    def _audit_gateway_tool(
+        self,
+        request: Request,
+        rpc: dict[str, Any] | None,
+        tool_name: str,
+        workspace_id: str,
+        device_id: str,
+        success: bool,
+        *,
+        duration_ms: int = 0,
+        error_type: str = "",
+    ) -> None:
+        params = (rpc or {}).get("params") or {}
+        arguments = params.get("arguments") if isinstance(params, dict) else {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        workspace = str(self._resolve_workspace_path(workspace_id) or "")
+        if device_id and device_id != self._local_device_id:
+            workspace = f"remote:{device_id}"
+        ua = request.headers.get("user-agent", "")
+        self._audit.log_tool_call(
+            request_id=str((rpc or {}).get("id", "")) or None,
+            client_name=ua[:120] or None,
+            tool_name=tool_name,
+            parameters=arguments,
+            workspace=workspace,
+            permission_mode="gateway",
+            duration_ms=max(0, duration_ms),
+            success=success,
+            error_type=error_type or None,
+            extra={"device_id": device_id},
+        )
 
     # -------------------------------------------------------- workspace helpers
     def _credential_for_workspace(self, workspace_id: str, fallback: str | None) -> str | None:
@@ -890,6 +1234,7 @@ class OAuthGateway:
         lines = ["已注册的工作区：", ""]
         try:
             from .config_store import load_projects
+
             projects = load_projects()
             for i, p in enumerate(projects, 1):
                 port_info = ""
@@ -910,7 +1255,11 @@ class OAuthGateway:
     def _get_current_workspace(self, workspace_id: str, session_id: str) -> str:
         """Return info about the current session's workspace."""
         with self._session_lock:
-            effective = self._session_workspaces.get(session_id, workspace_id) if session_id else workspace_id
+            effective = (
+                self._session_workspaces.get(session_id, workspace_id)
+                if session_id
+                else workspace_id
+            )
         if not effective:
             default_root = str(self._workspace) if self._workspace else "（未设置）"
             return f"当前工作区：默认（{default_root}）"
@@ -922,6 +1271,7 @@ class OAuthGateway:
         # Verify the project exists
         try:
             from .config_store import load_projects
+
             projects = load_projects()
             match = next((p for p in projects if p.id == project_id), None)
             if match is None:
@@ -929,7 +1279,9 @@ class OAuthGateway:
         except Exception:
             pass
         if not session_id:
-            raise ValueError("无法识别当前会话（缺少 mcp-session-id 请求头），请使用支持会话的 MCP 客户端。")
+            raise ValueError(
+                "无法识别当前会话（缺少 mcp-session-id 请求头），请使用支持会话的 MCP 客户端。"
+            )
         # Verify engine is running for this workspace
         if self._workspace_registry and not self._workspace_registry(project_id):
             raise ValueError(
@@ -940,6 +1292,7 @@ class OAuthGateway:
             self._session_workspaces[session_id] = project_id
         try:
             from .config_store import load_projects
+
             projects = load_projects()
             match = next((p for p in projects if p.id == project_id), None)
             name = (match.display_name or Path(match.root_path).name) if match else project_id

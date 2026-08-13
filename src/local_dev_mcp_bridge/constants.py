@@ -26,6 +26,10 @@ def projects_file() -> Path:
     return _base_config_dir() / "projects.json"
 
 
+def devices_file() -> Path:
+    return _base_config_dir() / "devices.json"
+
+
 def rc_file() -> Path:
     return _base_config_dir() / "runtime.json"
 
@@ -56,6 +60,7 @@ BACKUP_DIR = CONFIG_DIR / "backups"
 
 CONFIG_FILE = CONFIG_DIR / "config.json"
 PROJECTS_FILE = CONFIG_DIR / "projects.json"
+DEVICES_FILE = CONFIG_DIR / "devices.json"
 RC_FILE = CONFIG_DIR / "runtime.json"
 STATE_FILE = CONFIG_DIR / "state.json"
 PORT_FILE = CONFIG_DIR / "port.json"

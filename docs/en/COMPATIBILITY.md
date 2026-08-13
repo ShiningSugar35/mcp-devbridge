@@ -31,3 +31,7 @@ Gateway/CodexPro/Windows-MCP ports are allocated per project from the defaults 8
 ## v0.6 Windows desktop behavior
 
 The packaged desktop uses the Windows system tray. Closing the main window hides it to the tray by default; users can switch the close action to direct exit in Settings. Normal title-bar minimization remains a taskbar minimize.
+
+## v0.7 Multi-Device and tunnel compatibility
+
+A remote device can join a Hub from Cloudflare Named Tunnel, ngrok fixed address or Quick Tunnel. Quick Tunnel is appropriate for a remote development PC because its new random address is heartbeat-updated to the Hub. For the main Hub, use a fixed Cloudflare/ngrok address for long-term use; changing the Hub URL still requires updating ChatGPT and paired clients.

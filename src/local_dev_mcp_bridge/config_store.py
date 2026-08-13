@@ -9,7 +9,7 @@ from typing import Any
 
 from . import constants
 from .constants import ensure_dirs
-from .models import AppConfig, ProjectConfig, RuntimeConfig, TunnelState
+from .models import AppConfig, DeviceConfig, ProjectConfig, RuntimeConfig, TunnelState
 
 
 def _read_json(path: Path) -> Any:
@@ -61,6 +61,44 @@ def save_projects(projects: list[ProjectConfig]) -> None:
         constants.projects_file(),
         {"projects": [p.model_dump() for p in projects]},
     )
+
+
+def load_devices() -> list[DeviceConfig]:
+    data = _read_json(constants.devices_file())
+    if not isinstance(data, dict):
+        return []
+    devices: list[DeviceConfig] = []
+    for item in data.get("devices", []):
+        try:
+            devices.append(DeviceConfig.model_validate(item))
+        except Exception:
+            continue
+    return devices
+
+
+def save_devices(devices: list[DeviceConfig]) -> None:
+    _write_json(
+        constants.devices_file(),
+        {"devices": [d.model_dump() for d in devices]},
+    )
+
+
+def upsert_device(device: DeviceConfig) -> list[DeviceConfig]:
+    devices = load_devices()
+    for index, existing in enumerate(devices):
+        if existing.id == device.id:
+            devices[index] = device
+            break
+    else:
+        devices.append(device)
+    save_devices(devices)
+    return devices
+
+
+def delete_device(device_id: str) -> list[DeviceConfig]:
+    devices = [d for d in load_devices() if d.id != device_id]
+    save_devices(devices)
+    return devices
 
 
 def upsert_project(project: ProjectConfig) -> list[ProjectConfig]:

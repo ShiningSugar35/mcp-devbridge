@@ -2,6 +2,20 @@
 
 All dates are local development dates.
 
+## 0.7.0 (2026-08-13) — Multi-Device Hub and beginner-facing UX
+
+- Added a device registry with stable local identity, one-time pairing codes, encrypted per-device Bearer/heartbeat credentials and heartbeat-based presence.
+- Added Hub routes `/device/register` and `/device/heartbeat`; remote Quick Tunnel URL changes are learned automatically from heartbeats.
+- Added session-isolated `devbridge_list_devices`, `devbridge_get_current_device` and `devbridge_switch_device`. A single online device is selected automatically; multiple online devices keep local as the default until explicitly switched.
+- Remote device selection transparently proxies MCP traffic to that device while its own workspace tools continue to control projects on that computer. Tool injection is de-duplicated for Hub-to-Hub proxying.
+- Fixed process logs to read the selected project's real engine log instead of treating `ProcessLog` as an iterable or pinning the public-entry project.
+- Fixed audit logs by recording the actual Gateway → CodexPro `tools/call` path; audit parameters remain redacted by the existing `AuditLogger` policy.
+- Reworked Logs to beginner-facing Run Status / Operation History / Network Connection views and Diagnostics to a conclusion-first, next-action format.
+- Removed the duplicate connection-test card and component jargon from Workbench; self-test and technical component state now live under Diagnostics.
+- Added searchable in-app Manual, connection advisor and contextual `?` help for connection info, Gateway port, connection method, public hostname and tunnel token.
+- Quick Tunnel behavior is documented as random `trycloudflare.com`, test/development only; fixed-address Hub is recommended for long-term multi-device use.
+- Verification baseline: **304 pytest cases**, Ruff clean, Pyright 0 errors / 0 warnings, multi-device routing integration green, and all top-level pages fit 900×650 / 1200×850 / 1920×1080 without horizontal overflow.
+
 ## 0.6.0 (2026-08-11) — desktop UX and per-project interaction isolation
 
 - Reworked the top-level information architecture into Workbench / Project Settings / Diagnostics / Logs / Settings; process, audit and Gateway logs now live under one Logs section.

@@ -100,6 +100,25 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.7.0 Multi-Device Hub 与新手体验
+
+- **一个 ChatGPT MCP 地址可管理多台电脑**：主 Hub 维护设备目录；每个 MCP 会话可以独立切换目标电脑，不会影响朋友正在使用的另一个会话。
+- **单设备自动选择**：当前只有一台电脑在线时自动使用它；多台在线时默认本机，并可用 `devbridge_list_devices / devbridge_switch_device` 切换。
+- **远端 Quick Tunnel 自动更新**：朋友电脑可用 Quick Tunnel 加入 Hub；临时 `trycloudflare.com` 地址变化后会通过心跳自动更新到主 Hub，ChatGPT 仍只连接主 Hub 的固定 URL。
+- **设备配对不要求开放家庭路由器端口**：两端都通过已有公网 MCP 入口通信；6 位一次性配对码只在内存存在 10 分钟，设备 Bearer/心跳凭据进入 Windows 凭据存储，不写入 `devices.json` 或日志。
+- 新增顶层 **设备** 与 **使用手册** 页面。使用手册支持搜索、上一篇/下一篇和“帮我选择连接方式”，覆盖 ChatGPT、Gemini、Quick Tunnel、固定地址、多设备、权限、诊断和常见问题。
+- 工作台/项目设置关键网络字段增加 `?` 上下文帮助；悬浮或点击显示非模态说明，帮助用户理解连接方式、域名、Tunnel Token 和公网入口端口。
+- 工作台删除重复的“连接自测”卡和底层组件状态；自测合并进 **诊断**，诊断先给“可以正常使用 / 需要处理”结论，再给逐步解决方法。
+- **日志真正接入正式链路**：运行情况读取当前选中项目的进程输出；操作记录由 Gateway 直接记录实际 `tools/call`；网络连接把 Gateway JSONL 加工成普通用户能理解的事件。
+
+### Quick Tunnel 到底怎么用？
+
+选择“Quick Tunnel 临时测试”并启动服务后，Cloudflare 会随机生成一个 `https://xxxxx.trycloudflare.com` 地址，MCP DevBridge 自动补上 `/mcp`。单机使用时把工作台显示的 MCP 地址复制到 ChatGPT / Gemini 即可；重新建立 Quick Tunnel 后地址会变化，需要在客户端更新。**如果这台电脑已经作为远端设备加入固定主 Hub，新地址会自动上报 Hub，不需要修改 ChatGPT 中的主 Hub URL。**
+
+> 长期 Multi-Device 建议：主 Hub 使用 Cloudflare / ngrok 固定地址；远端电脑可以使用 Quick Tunnel。
+
+---
+
 ## v0.6.0 桌面体验重构
 
 - 顶层界面收敛为 **工作台 / 项目设置 / 诊断 / 日志 / 设置**，详细技术信息不再挤在主操作路径里。

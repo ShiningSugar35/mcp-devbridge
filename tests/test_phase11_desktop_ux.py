@@ -48,10 +48,10 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
     app, window, project_a, project_b = _window(tmp_path, monkeypatch)
     try:
         assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
-            "工作台", "项目设置", "诊断", "日志", "设置"
+            "工作台", "设备", "项目设置", "诊断", "日志", "使用手册", "设置"
         ]
         assert [window.log_tabs.tabText(i) for i in range(window.log_tabs.count())] == [
-            "进程", "审计", "Gateway"
+            "运行情况", "操作记录", "网络连接"
         ]
         unit_a = window.pm.unit_for(project_a.id)
         assert unit_a is not None

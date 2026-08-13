@@ -7,7 +7,7 @@ Output: dist/MCPDevBridge/
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.6.0"
+PROJECT_VERSION = "0.7.0"
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry_desktop.py")],
@@ -23,6 +23,8 @@ datas=[
         "local_dev_mcp_bridge.config_store",
         "local_dev_mcp_bridge.secrets",
         "local_dev_mcp_bridge.project_secrets",
+        "local_dev_mcp_bridge.device_hub",
+        "local_dev_mcp_bridge.help_content",
         "local_dev_mcp_bridge.audit",
         "local_dev_mcp_bridge.shell",
         "local_dev_mcp_bridge.processes",

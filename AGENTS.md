@@ -91,7 +91,7 @@ mcp-devBridge/
 │       ├── app_state.py        # 服务协调状态机 ServiceCoordinator（顺序、URL 固定性、故障清理；无 Qt）
 │       ├── backend_manager.py  # 后端子进程管理 /health 轮询（已归档，桌面改走 ServiceCoordinator）
 │       └── desktop_main.py     # Phase 3 桌面 UI（PySide6 单窗口，已接线 ServiceCoordinator）
-├── tests/                      # pytest 测试（Phase 11 当前 294 项全绿，以实际 pytest 输出为准）
+├── tests/                      # pytest 测试（Phase 12 当前 304 项全绿，以实际 pytest 输出为准）
 │   ├── conftest.py
 │   ├── test_fs.py · test_commands.py · test_git.py · test_config.py
 │   ├── test_mcp_integration.py · test_selftest.py
@@ -144,6 +144,13 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 ---
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
+
+- 2026-08-13 · **v0.7.0 Multi-Device Hub + 新手体验**：
+  - 新增 `device_hub.py`、`DeviceConfig/devices.json` 与设备级 SecretsStore 凭据；Gateway 支持配对/心跳、session 级设备选择和透明远端代理，单在线设备自动选择。
+  - 新增 `devbridge_list_devices/get_current_device/switch_device`；远端设备选择后 workspace/文件/命令工具在远端执行，工具注入按名称去重。
+  - Gateway 正式 `tools/call` 链路写 AuditLogger；进程日志改读选中项目真实 log_tail；日志/诊断全部提供普通用户语言。
+  - 新增 `help_content.py`、设备页、可搜索使用手册、连接方式选择助手和 5 类 `?` 非模态帮助浮层；工作台移除重复自测与底层组件状态。
+  - 当前源码验收：304 passed、Ruff/Pyright 全绿、Multi-Device 6 项集成与三档 UI 布局通过；待 v0.7.0 打包发布。
 
 - 2026-08-11 · **v0.6.0 桌面 UX / 托盘 / 项目级交互隔离**：
   - 全局 busy 改为 `_busy_project_ids`，一个项目运行不再锁其它项目；READY 项目可停止，IDLE/ERROR 项目可独立启动。

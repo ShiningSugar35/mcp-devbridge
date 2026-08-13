@@ -1008,7 +1008,14 @@ def test_gateway_merge_no_duplicates() -> None:
     injected = _inject_tools(codexpro)
     count, dupes = _analyze_tools(injected)
     assert dupes == [], f"Collisions: {dupes}"
-    assert count == 10
+    assert count == 13
+    merged = json.loads(injected)["result"]["tools"]
+    names = {tool["name"] for tool in merged}
+    assert {
+        "devbridge_list_devices",
+        "devbridge_get_current_device",
+        "devbridge_switch_device",
+    } <= names
 
 
 def test_diag_redact_body() -> None:

@@ -13,13 +13,17 @@ self-test) runs on QThreadPool workers so the UI never freezes.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import shutil
+import socket
 import sys
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QTextOption
 from PySide6.QtWidgets import (
@@ -36,6 +40,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -49,6 +54,9 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
+    QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -62,7 +70,17 @@ from .config_store import (
     load_projects,
     save_app_config,
 )
+from .device_hub import HUB_PEER_SECRET_KEY, DeviceRegistry, mcp_base_url, normalize_mcp_url
 from .engines import EngineState
+from .help_content import (
+    HELP_CONNECTION_INFO,
+    HELP_CONNECTION_METHOD,
+    HELP_GATEWAY_PORT,
+    HELP_PUBLIC_HOSTNAME,
+    HELP_TUNNEL_TOKEN,
+    recommend_connection,
+    search_topics,
+)
 from .models import PermissionMode, ProjectConfig, gateway_service_url, git_field_error
 from .oauth_provider import get_or_create_gemini_client
 from .project_manager import ProjectManager
@@ -108,6 +126,26 @@ class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event: Any) -> None:  # noqa: N802 - Qt API name
         event.ignore()
+
+
+class HelpButton(QToolButton):
+    """Small non-modal contextual help trigger; hover/click shows a tooltip card."""
+
+    def __init__(self, html: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setText("?")
+        self.setToolTip(html)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAutoRaise(True)
+        self.setFixedSize(20, 20)
+        self.clicked.connect(self._show_help)
+
+    def _show_help(self) -> None:
+        QToolTip.showText(self.mapToGlobal(self.rect().bottomLeft()), self.toolTip(), self)
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 
 class _Signals(QObject):
@@ -163,15 +201,30 @@ def _remember_tunnel_token(token: str) -> None:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self._app_config = load_app_config()
+        identity_changed = False
+        if not self._app_config.device_id:
+            self._app_config.device_id = uuid.uuid4().hex[:12]
+            identity_changed = True
+        if not self._app_config.device_name:
+            self._app_config.device_name = socket.gethostname() or "本机"
+            identity_changed = True
+        if identity_changed:
+            save_app_config(self._app_config)
+        self.device_registry = DeviceRegistry(
+            local_device_id=self._app_config.device_id,
+            local_device_name=self._app_config.device_name,
+        )
         self.pm = ProjectManager()
         self.coord = ServiceCoordinator(
             workspace_registry=self._lookup_workspace,
             workspace_credential_registry=self._lookup_workspace_credential,
+            device_registry=self.device_registry,
+            local_device_id=self._app_config.device_id,
         )
         self._signals = _Signals()
         self._signals.coord_event.connect(self._on_coord_event)
         self.coord.listen(self._emit_coord_event)
-        self._app_config = load_app_config()
         self._projects = load_projects()
         self._current_token = ""
         self._bridge_token = _bridge_token()
@@ -182,6 +235,7 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._force_exit = False
         self._tray_hint_shown = False
+        self._device_heartbeat_busy = False
         self._test_outputs: dict[str, str] = {}
         self._diag_outputs: dict[str, str] = {}
         self._tunnel_token_default = ""
@@ -196,7 +250,21 @@ class MainWindow(QMainWindow):
         self._sync_token_ui()
         self._poll_status()
         self._timer.start(1000)
+        self._device_timer = QTimer(self)
+        self._device_timer.timeout.connect(self._send_device_heartbeat)
+        self._device_timer.start(15000)
         QTimer.singleShot(1500, self._resume_upgrade_if_requested)
+        QTimer.singleShot(3000, self._send_device_heartbeat)
+
+    def _help_label(self, text: str, html: str) -> QWidget:
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(QLabel(text))
+        row.addWidget(HelpButton(html))
+        row.addStretch(1)
+        return holder
 
     # ---------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -296,12 +364,12 @@ class MainWindow(QMainWindow):
             self.connection_combo.addItem(method.label(), method.value)
         self.connection_combo.currentIndexChanged.connect(self._on_connection_changed)
         self.connection_combo.setToolTip("长期使用建议固定地址；Quick Tunnel 仅适合临时测试。")
-        cfg_form.addRow("连接方式:", self.connection_combo)
+        cfg_form.addRow(self._help_label("连接方式", HELP_CONNECTION_METHOD), self.connection_combo)
 
         self.hostname_edit = QLineEdit()
         self.hostname_edit.setPlaceholderText("例如 mcp.example.com")
         self.hostname_edit.editingFinished.connect(self._autosave_project_settings)
-        cfg_form.addRow("公网域名:", self.hostname_edit)
+        cfg_form.addRow(self._help_label("公网域名", HELP_PUBLIC_HOSTNAME), self.hostname_edit)
 
         self.cf_token_edit = QLineEdit()
         self.cf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -310,7 +378,7 @@ class MainWindow(QMainWindow):
         if self._tunnel_token_default:
             self.cf_token_edit.setText(self._tunnel_token_default)
         self.cf_token_edit.textEdited.connect(self._on_tunnel_token_edited)
-        cfg_form.addRow("隧道令牌:", self.cf_token_edit)
+        cfg_form.addRow(self._help_label("隧道令牌", HELP_TUNNEL_TOKEN), self.cf_token_edit)
 
         self.gemini_box = QGroupBox("Gemini OAuth")
         gemini_form = QFormLayout(self.gemini_box)
@@ -416,13 +484,16 @@ class MainWindow(QMainWindow):
         self.component_status = QLabel("组件：Codex 未启动 · Gateway 未启动 · 隧道 未启动 · Windows 桥 未启动")
         self.component_status.setWordWrap(True)
         self.component_status.setStyleSheet("color: #666666;")
-        self.ctrl_layout.addWidget(self.component_status)
 
         # --- token / URL
         tok_box = QGroupBox("连接信息")
         tok_layout = QVBoxLayout(tok_box)
         tok_layout.setContentsMargins(12, 12, 12, 12)
         tok_layout.setSpacing(8)
+        info_help_row = QHBoxLayout()
+        info_help_row.addStretch(1)
+        info_help_row.addWidget(HelpButton(HELP_CONNECTION_INFO))
+        tok_layout.addLayout(info_help_row)
         self.token_edit = QLineEdit("选择项目后显示")
         self.token_edit.setReadOnly(True)
         self.url_edit = QLineEdit("选择项目后显示")
@@ -446,7 +517,7 @@ class MainWindow(QMainWindow):
         # --- gateway port (Cloudflare 公网入口端口)
         port_row = QHBoxLayout()
         port_row.setSpacing(8)
-        port_row.addWidget(QLabel("公网入口端口（Gateway）:"))
+        port_row.addWidget(self._help_label("公网入口端口", HELP_GATEWAY_PORT))
         self.gateway_port_spin = QSpinBox()
         self.gateway_port_spin.setRange(1, 65535)
         self.gateway_port_spin.setValue(self._app_config.gateway_port)
@@ -482,7 +553,8 @@ class MainWindow(QMainWindow):
         self.ctrl_layout.addWidget(tok_box)
 
         # --- self test
-        test_group = QGroupBox("连接自测")
+        test_group = QGroupBox("单项检查（可选）")
+        self.test_group = test_group
         test_box = QVBoxLayout(test_group)
         test_box.setContentsMargins(12, 12, 12, 12)
         test_box.setSpacing(8)
@@ -503,7 +575,7 @@ class MainWindow(QMainWindow):
         self.test_output.setMinimumHeight(120)
         test_box.addLayout(btn_row)
         test_box.addWidget(self.test_output)
-        self.ctrl_layout.addWidget(test_group)
+        # 此卡片由“诊断”页面承载，工作台不重复展示。
 
         # --- 最近消息（控制页）
         msg_group = QGroupBox("运行记录")
@@ -534,6 +606,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.project_settings_tab, "项目设置")
 
         self._build_app_settings_tab()
+        self._build_devices_tab()
+        self._build_manual_tab()
         self._organize_top_level_tabs()
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -555,90 +629,212 @@ class MainWindow(QMainWindow):
         self.diag_output.setFont(QFont("Consolas", 9))
         self.diag_output.setWordWrapMode(QTextOption.WrapMode.NoWrap)
         layout.addWidget(self.diag_output)
+        layout.addWidget(self.test_group)
+        tech_box = QGroupBox("技术详情（通常不需要看）")
+        tech_layout = QVBoxLayout(tech_box)
+        tech_layout.setContentsMargins(12, 18, 12, 12)
+        tech_layout.addWidget(self.component_status)
+        layout.addWidget(tech_box)
         self.tabs.addTab(tab, "连接诊断")
 
     def _run_diagnostics(self) -> None:
         project = self._project_config()
         if project is None:
-            self.diag_output.setPlainText("✘ 未选择项目。")
+            self.diag_output.setPlainText(
+                "需要先做一件事\n\n"
+                "你还没有选择项目。回到“工作台”添加或选中一个项目，然后再运行诊断。"
+            )
             return
         project_id = project.id
         self.diag_btn.setEnabled(False)
-        self.diag_output.setPlainText("正在诊断…")
+        self.diag_output.setPlainText("正在检查项目、连接方式和网页端可用性…")
 
         def work() -> str:
-            lines: list[str] = []
+            problems: list[tuple[str, str]] = []
+            ok_items: list[str] = []
+            details: list[str] = []
             root_path = Path(project.root_path)
-            lines.append(f"{'✔' if root_path.is_dir() else '✘'} 项目目录：{root_path}")
-            lines.append(f"✔ 权限模式：{project.permission_mode}")
-            lines.append(
-                f"✔ 客户端：{'Gemini Spark' if project.client_target == 'gemini' else 'ChatGPT 网页端'}"
-            )
-            access_value = get_project_access_token(project.id)
-            lines.append(f"{'✔' if access_value else '✘'} 项目访问令牌：{'已加密保存' if access_value else '未生成'}")
+
+            if root_path.is_dir():
+                ok_items.append("项目文件夹可以正常访问")
+            else:
+                problems.append((
+                    "找不到项目文件夹",
+                    "回到工作台移除这个项目，再重新添加正确的项目目录。",
+                ))
+
+            access_value = get_project_access_token(project.id) or ""
+            if access_value:
+                ok_items.append("访问令牌已经准备好")
+            else:
+                problems.append((
+                    "还没有访问令牌",
+                    "回到工作台，在“连接信息”里点击“重新生成”。",
+                ))
+
             try:
                 method = ConnectionMethod(project.connection)
             except ValueError:
                 method = ConnectionMethod.LOCAL
-            lines.append(f"✔ 连接方式：{method.label()}")
+            details.append(f"连接方式：{method.label()}")
+
             if method == ConnectionMethod.CLOUDFLARE:
-                lines.append(
-                    f"{'✔' if project.public_hostname else '✘'} Cloudflare 固定域名："
-                    f"{project.public_hostname or '未配置'}"
-                )
-                tunnel_value = get_project_tunnel_token(project.id)
-                lines.append(
-                    f"{'✔' if tunnel_value else '✘'} Cloudflare 隧道令牌："
-                    f"{'已加密保存' if tunnel_value else '未配置'}"
-                )
+                if not project.public_hostname:
+                    problems.append((
+                        "没有填写固定公网域名",
+                        "打开“项目设置”，填写 Cloudflare Tunnel 对应的域名，例如 mcp.example.com。",
+                    ))
+                else:
+                    ok_items.append("固定公网域名已经填写")
+                if not get_project_tunnel_token(project.id):
+                    problems.append((
+                        "没有填写 Cloudflare 隧道令牌",
+                        "打开“项目设置”，把 Cloudflare Named Tunnel 的 Token 粘贴到“隧道令牌”。",
+                    ))
+                else:
+                    ok_items.append("Cloudflare 隧道凭据已经保存")
             elif method == ConnectionMethod.NGROK:
-                ngrok_path = shutil.which("ngrok") or shutil.which("ngrok.exe")
-                lines.append(
-                    f"{'✔' if project.public_hostname else '✘'} ngrok 固定域名："
-                    f"{project.public_hostname or '未配置'}"
-                )
-                lines.append(
-                    f"{'✔' if ngrok_path else '✘'} ngrok："
-                    f"{ngrok_path or '未找到，请安装并加入 PATH'}"
-                )
+                if not project.public_hostname:
+                    problems.append((
+                        "没有填写 ngrok 固定域名",
+                        "打开“项目设置”，填写你的 ngrok Reserved Domain。",
+                    ))
+                if not (shutil.which("ngrok") or shutil.which("ngrok.exe")):
+                    problems.append((
+                        "电脑里没有找到 ngrok",
+                        "如果你没有使用过 ngrok，建议改用 Quick Tunnel；否则请安装 ngrok 并加入 PATH。",
+                    ))
             elif method == ConnectionMethod.QUICK:
-                lines.append("✔ Quick Tunnel：启动时自动生成临时地址，重启会变化")
-            if project.client_target == "gemini":
-                lines.append(
-                    f"{'✔' if project.gemini_redirect_uri else '✘'} Gemini Redirect URI："
-                    f"{project.gemini_redirect_uri or '未配置'}"
-                )
+                if not (shutil.which("cloudflared") or Path(self.coord.tunnel.cloudflared).is_file()):
+                    problems.append((
+                        "没有找到 Quick Tunnel 所需的 cloudflared",
+                        "重新安装 MCP DevBridge 正式版；安装包会自带 cloudflared。",
+                    ))
+                else:
+                    ok_items.append("Quick Tunnel 所需组件已经就绪")
+                details.append("Quick Tunnel 的地址是临时的；重建后会换地址。")
+            else:
+                details.append("“仅本机”不会把这台电脑暴露到互联网。")
+                if project.client_target in {"chatgpt", "gemini"}:
+                    problems.append((
+                        "当前选择了“仅本机”",
+                        "网页端 ChatGPT / Gemini 无法直接访问仅本机地址。到“项目设置”改用 Quick Tunnel、Cloudflare 固定地址或 ngrok。",
+                    ))
+
+            if project.client_target == "gemini" and not project.gemini_redirect_uri:
+                problems.append((
+                    "Gemini 还缺少 Redirect URI",
+                    "到“项目设置 → Gemini OAuth”，粘贴 Gemini Custom Connected App 提供的 Redirect URI。",
+                ))
+
             ports = (project.gateway_port, project.codexpro_port, project.windows_bridge_port)
-            lines.append(
-                f"{'✔' if len(set(ports)) == 3 and all(ports) else '✘'} "
-                f"端口：Gateway={ports[0]} Codex={ports[1]} Windows={ports[2]}"
-            )
+            if not all(ports) or len(set(ports)) != 3:
+                problems.append((
+                    "当前项目的内部端口配置有冲突",
+                    "停止这个项目后，打开“高级设置”，恢复默认端口或改成互不重复的端口。",
+                ))
+            else:
+                details.append(
+                    f"内部端口：公网入口 {ports[0]} / 项目服务 {ports[1]} / Windows 控制 {ports[2]}"
+                )
+
             unit = self.pm.unit(project.id)
-            state = unit.state if unit is not None else EngineState.IDLE
-            lines.append(f"✔ 当前引擎状态：{state.value}")
+            state = self._project_state(project)
             if state == EngineState.READY:
+                ok_items.append("项目服务正在运行")
                 is_entry = bool(
                     self._service_root
                     and _same_root(project.root_path, self._service_root)
                     and self.coord.running
                 )
-                url = (
-                    self._display_url()
-                    if is_entry
-                    else f"http://127.0.0.1:{project.codexpro_port}/mcp"
-                )
-                result = run_selftest(url, access_value or None)
-                lines.append(
-                    f"{'✔' if result.ok else '✘'} MCP 真实自测："
-                    f"{'通过' if result.ok else result.error or '失败'}"
-                )
+                url = self._display_url() if is_entry else f"http://127.0.0.1:{project.codexpro_port}/mcp"
+                try:
+                    result = run_selftest(url, access_value or None)
+                except Exception as exc:  # noqa: BLE001
+                    result = None
+                    problems.append((
+                        "连接测试没有完成",
+                        f"服务已经启动，但自测时出现异常：{exc}。先尝试停止再启动；仍失败时查看“日志 → 运行情况”。",
+                    ))
+                if result is not None:
+                    if result.ok:
+                        ok_items.append("MCP 实际调用测试通过")
+                    else:
+                        problems.append((
+                            "MCP 实际调用没有完全通过",
+                            "先停止并重新启动当前项目，再运行诊断。如果仍失败，查看“日志 → 运行情况”和“网络连接”。",
+                        ))
+            elif state == EngineState.STARTING:
+                problems.append((
+                    "项目还在连接中",
+                    "等待工作台状态变成“可以使用”后，再运行一次诊断。",
+                ))
+            elif state == EngineState.STOPPING:
+                problems.append((
+                    "项目正在停止",
+                    "等待停止完成，再重新启动项目。",
+                ))
+            elif state == EngineState.ERROR:
+                message = unit.message if unit is not None else ""
+                problems.append((
+                    "项目上一次启动失败",
+                    f"先回到工作台重新启动。{('系统记录：' + str(message)) if message else '如果继续失败，请查看“日志 → 运行情况”。'}",
+                ))
             else:
-                lines.append("△ MCP 真实自测：项目未启动，已跳过")
-            return "\n".join(lines)
+                problems.append((
+                    "项目还没有启动",
+                    "回到工作台点击“启动服务”。状态变成“可以使用”后再运行诊断。",
+                ))
+
+            peer = SecretsStore().get(HUB_PEER_SECRET_KEY)
+            if self._app_config.hub_url and peer:
+                details.append(f"这台电脑已加入 Multi-Device Hub：{self._app_config.hub_url}")
+            remote_views = [
+                view
+                for view in self.device_registry.views(local_online=state == EngineState.READY)
+                if not view.local
+            ]
+            if remote_views:
+                online = sum(1 for view in remote_views if view.online)
+                details.append(f"Multi-Device Hub：已配对 {len(remote_views)} 台远程电脑，其中 {online} 台在线")
+
+            lines: list[str] = []
+            if problems:
+                lines.extend([
+                    "需要处理后再使用",
+                    f"发现 {len(problems)} 个需要处理的问题。按下面顺序操作即可：",
+                    "",
+                ])
+                for index, (title, action) in enumerate(problems, 1):
+                    lines.append(f"{index}. {title}")
+                    lines.append(f"   怎么做：{action}")
+                    lines.append("")
+            else:
+                lines.extend([
+                    "可以正常使用",
+                    "没有发现会阻止 ChatGPT / Gemini 使用当前项目的问题。",
+                    "",
+                ])
+
+            if ok_items:
+                lines.append("已经正常的项目")
+                lines.extend(f"✓ {item}" for item in ok_items)
+                lines.append("")
+            if details:
+                lines.append("补充信息")
+                lines.extend(f"• {item}" for item in details)
+            return "\n".join(lines).rstrip()
 
         def done(result: Any) -> None:
             self.diag_btn.setEnabled(True)
-            output = f"诊断异常：{result}" if isinstance(result, Exception) else str(result)
+            if isinstance(result, Exception):
+                output = (
+                    "诊断没有完成\n\n"
+                    f"检查过程中发生异常：{result}\n"
+                    "建议先停止并重新启动当前项目，然后再次诊断。"
+                )
+            else:
+                output = str(result)
             self._diag_outputs[project_id] = output
             if project_id == self._selected_project_id():
                 self.diag_output.setPlainText(output)
@@ -660,6 +856,8 @@ class MainWindow(QMainWindow):
         gateway_page = self._take_top_tab("Gateway 日志")
         diagnostics_page = self._take_top_tab("连接诊断")
         project_settings_page = self._take_top_tab("项目设置")
+        devices_page = self._take_top_tab("设备")
+        manual_page = self._take_top_tab("使用手册")
         app_settings_page = self._take_top_tab("设置")
 
         self.logs_tab = QWidget()
@@ -670,16 +868,18 @@ class MainWindow(QMainWindow):
         self.process_log_page = process_page
         self.audit_log_page = audit_page
         self.gateway_log_page = gateway_page
-        self.log_tabs.addTab(process_page, "进程")
-        self.log_tabs.addTab(audit_page, "审计")
-        self.log_tabs.addTab(gateway_page, "Gateway")
+        self.log_tabs.addTab(process_page, "运行情况")
+        self.log_tabs.addTab(audit_page, "操作记录")
+        self.log_tabs.addTab(gateway_page, "网络连接")
         self.log_tabs.currentChanged.connect(self._on_log_tab_changed)
         logs_layout.addWidget(self.log_tabs)
 
-        self.tabs.insertTab(1, project_settings_page, "项目设置")
-        self.tabs.insertTab(2, diagnostics_page, "诊断")
-        self.tabs.insertTab(3, self.logs_tab, "日志")
-        self.tabs.insertTab(4, app_settings_page, "设置")
+        self.tabs.insertTab(1, devices_page, "设备")
+        self.tabs.insertTab(2, project_settings_page, "项目设置")
+        self.tabs.insertTab(3, diagnostics_page, "诊断")
+        self.tabs.insertTab(4, self.logs_tab, "日志")
+        self.tabs.insertTab(5, manual_page, "使用手册")
+        self.tabs.insertTab(6, app_settings_page, "设置")
 
     def _on_log_tab_changed(self, _index: int) -> None:
         current = self.log_tabs.currentWidget()
@@ -690,6 +890,351 @@ class MainWindow(QMainWindow):
             self._refresh_audit_log()
         elif current is self.gateway_log_page:
             self._refresh_gateway_log()
+
+    def _build_devices_tab(self) -> None:
+        self.devices_tab = QWidget()
+        layout = QVBoxLayout(self.devices_tab)
+        layout.setContentsMargins(0, 8, 0, 4)
+        layout.setSpacing(12)
+
+        identity_box = QGroupBox("这台电脑")
+        identity_form = QFormLayout(identity_box)
+        identity_form.setContentsMargins(14, 18, 14, 14)
+        self.device_name_edit = QLineEdit(self._app_config.device_name)
+        self.device_name_edit.setPlaceholderText("给这台电脑起一个容易辨认的名字")
+        self.device_name_edit.editingFinished.connect(self._save_device_name)
+        identity_form.addRow("设备名称", self.device_name_edit)
+        id_view = QLineEdit(self._app_config.device_id)
+        id_view.setReadOnly(True)
+        identity_form.addRow("设备 ID", id_view)
+        layout.addWidget(identity_box)
+
+        hub_box = QGroupBox("让别的电脑加入这台 Hub")
+        hub_v = QVBoxLayout(hub_box)
+        hub_v.setContentsMargins(14, 18, 14, 14)
+        hub_v.setSpacing(8)
+        hub_text = QLabel("把主 Hub 的 MCP 地址和下面的 6 位配对码发给另一台电脑。配对码 10 分钟内有效，只能使用一次。")
+        hub_text.setWordWrap(True)
+        hub_text.setObjectName("MutedText")
+        hub_v.addWidget(hub_text)
+        code_row = QHBoxLayout()
+        self.pair_code_edit = QLineEdit("点击右侧生成")
+        self.pair_code_edit.setReadOnly(True)
+        self.pair_code_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pair_code_btn = QPushButton("生成配对码")
+        self.pair_code_btn.clicked.connect(self._generate_device_pair_code)
+        code_row.addWidget(self.pair_code_edit, 1)
+        code_row.addWidget(self.pair_code_btn)
+        hub_v.addLayout(code_row)
+        layout.addWidget(hub_box)
+
+        join_box = QGroupBox("把这台电脑加入别人的 Hub")
+        join_form = QFormLayout(join_box)
+        join_form.setContentsMargins(14, 18, 14, 14)
+        join_form.setSpacing(10)
+        self.hub_url_edit = QLineEdit(self._app_config.hub_url)
+        self.hub_url_edit.setPlaceholderText("主 Hub 的 MCP 地址，例如 https://mcp.example.com/mcp")
+        self.hub_pair_edit = QLineEdit()
+        self.hub_pair_edit.setPlaceholderText("6 位配对码")
+        self.hub_pair_edit.setMaxLength(6)
+        self.join_hub_btn = QPushButton("加入 Hub")
+        self.join_hub_btn.clicked.connect(self._join_remote_hub)
+        join_form.addRow("Hub MCP 地址", self.hub_url_edit)
+        join_form.addRow("配对码", self.hub_pair_edit)
+        join_form.addRow("", self.join_hub_btn)
+        self.hub_status_label = QLabel("未加入其它 Hub")
+        self.hub_status_label.setObjectName("MutedText")
+        join_form.addRow("状态", self.hub_status_label)
+        layout.addWidget(join_box)
+
+        connected_box = QGroupBox("已连接的电脑")
+        connected_v = QVBoxLayout(connected_box)
+        connected_v.setContentsMargins(14, 18, 14, 14)
+        self.device_table = QTableWidget(0, 4)
+        self.device_table.setHorizontalHeaderLabels(["电脑", "状态", "公网 MCP 地址", "操作"])
+        self.device_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.device_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.device_table.verticalHeader().setVisible(False)
+        self.device_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        connected_v.addWidget(self.device_table)
+        layout.addWidget(connected_box)
+        layout.addStretch(1)
+        self.tabs.addTab(self.devices_tab, "设备")
+        self._refresh_device_table()
+        self._update_hub_status()
+
+    def _save_device_name(self) -> None:
+        name = self.device_name_edit.text().strip() or socket.gethostname() or "本机"
+        self.device_name_edit.setText(name)
+        self._app_config.device_name = name
+        save_app_config(self._app_config)
+        self.device_registry.set_local_identity(self._app_config.device_id, name)
+        self._refresh_device_table()
+
+    def _generate_device_pair_code(self) -> None:
+        code, expires = self.device_registry.generate_pair_code()
+        self.pair_code_edit.setText(code)
+        until = datetime.datetime.fromtimestamp(expires).strftime("%H:%M")
+        self.pair_code_edit.setToolTip(f"此配对码将在 {until} 过期，并且成功使用一次后立即失效。")
+        QApplication.clipboard().setText(code)
+        self._append_log("已生成一次性设备配对码，并复制到剪贴板。")
+
+    def _entry_project(self) -> ProjectConfig | None:
+        return self.pm.by_root(self._service_root) if self._service_root else None
+
+    def _public_entry_for_pairing(self) -> tuple[str, str] | None:
+        project = self._entry_project()
+        if project is None or self.coord.state != EngineState.READY or not self.coord.public_url:
+            return None
+        try:
+            method = ConnectionMethod(project.connection)
+        except ValueError:
+            method = ConnectionMethod.LOCAL
+        if method == ConnectionMethod.LOCAL or not self.coord.public_url.startswith("https://"):
+            return None
+        token = get_project_access_token(project.id) or ""
+        return (self.coord.public_url, token) if token else None
+
+    def _join_remote_hub(self) -> None:
+        hub_raw = self.hub_url_edit.text().strip()
+        pair_code = self.hub_pair_edit.text().strip()
+        public = self._public_entry_for_pairing()
+        if not hub_raw or len(pair_code) != 6:
+            QMessageBox.warning(self, "还差一点", "请填写主 Hub 的 MCP 地址和 6 位配对码。")
+            return
+        if public is None:
+            QMessageBox.warning(
+                self,
+                "这台电脑还没有公网地址",
+                "请先在工作台为一个项目选择 Cloudflare、ngrok 或 Quick Tunnel 并启动服务。\n"
+                "只有“仅本机”连接时，另一台电脑无法访问这里。",
+            )
+            return
+        try:
+            hub_mcp = normalize_mcp_url(hub_raw)
+            hub_base = mcp_base_url(hub_mcp)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Hub 地址不正确", str(exc))
+            return
+        public_url, token = public
+        self.join_hub_btn.setEnabled(False)
+        self.hub_status_label.setText("正在配对…")
+
+        def work() -> dict[str, Any]:
+            response = httpx.post(
+                f"{hub_base}/device/register",
+                json={
+                    "pair_code": pair_code,
+                    "device_id": self._app_config.device_id,
+                    "name": self._app_config.device_name,
+                    "mcp_url": public_url,
+                    "bearer": token,
+                },
+                timeout=20.0,
+            )
+            payload = response.json()
+            if response.status_code >= 400 or not payload.get("ok"):
+                raise RuntimeError(str(payload.get("message") or f"HTTP {response.status_code}"))
+            return {"hub_mcp": hub_mcp, "peer": str(payload.get("peer_secret") or "")}
+
+        def done(result: Any) -> None:
+            self.join_hub_btn.setEnabled(True)
+            if isinstance(result, Exception):
+                self.hub_status_label.setText(f"配对失败：{result}")
+                return
+            peer = str(result.get("peer") or "")
+            if not peer:
+                self.hub_status_label.setText("配对失败：Hub 未返回设备凭据")
+                return
+            SecretsStore().set(HUB_PEER_SECRET_KEY, peer)
+            self._app_config.hub_url = str(result["hub_mcp"])
+            save_app_config(self._app_config)
+            self.hub_url_edit.setText(self._app_config.hub_url)
+            self.hub_pair_edit.clear()
+            self._update_hub_status()
+            self._append_log("这台电脑已加入 Multi-Device Hub。")
+            self._send_device_heartbeat()
+
+        _run_async(work, done)
+
+    def _update_hub_status(self) -> None:
+        peer = SecretsStore().get(HUB_PEER_SECRET_KEY)
+        if self._app_config.hub_url and peer:
+            self.hub_status_label.setText(f"已加入 Hub：{self._app_config.hub_url}")
+        else:
+            self.hub_status_label.setText("未加入其它 Hub")
+
+    def _send_device_heartbeat(self) -> None:
+        if self._device_heartbeat_busy:
+            return
+        hub_url = self._app_config.hub_url.strip()
+        peer = SecretsStore().get(HUB_PEER_SECRET_KEY) or ""
+        public = self._public_entry_for_pairing()
+        if not hub_url or not peer or public is None:
+            return
+        try:
+            hub_base = mcp_base_url(hub_url)
+        except ValueError:
+            return
+        public_url, token = public
+        self._device_heartbeat_busy = True
+
+        def work() -> str:
+            response = httpx.post(
+                f"{hub_base}/device/heartbeat",
+                json={
+                    "device_id": self._app_config.device_id,
+                    "peer_secret": peer,
+                    "name": self._app_config.device_name,
+                    "mcp_url": public_url,
+                    "bearer": token,
+                },
+                timeout=15.0,
+            )
+            payload = response.json()
+            if response.status_code >= 400 or not payload.get("ok"):
+                raise RuntimeError(str(payload.get("message") or f"HTTP {response.status_code}"))
+            return "ok"
+
+        def done(result: Any) -> None:
+            self._device_heartbeat_busy = False
+            if isinstance(result, Exception):
+                self.hub_status_label.setText(f"Hub 暂时不可达：{result}")
+            else:
+                self._update_hub_status()
+            self._refresh_device_table()
+
+        _run_async(work, done)
+
+    def _remove_remote_device(self, device_id: str, name: str) -> None:
+        answer = QMessageBox.question(
+            self,
+            "移除电脑",
+            f"确定让“{name}”退出这个 Hub 吗？对方之后需要重新配对才能接入。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.device_registry.remove(device_id)
+        self._refresh_device_table()
+
+    def _refresh_device_table(self) -> None:
+        if not hasattr(self, "device_table"):
+            return
+        local_online = any(
+            (unit := self.pm.unit(project.id)) is not None and unit.state == EngineState.READY
+            for project in self.pm.list()
+        )
+        rows = self.device_registry.views(local_online=local_online)
+        self.device_table.setRowCount(len(rows))
+        for row, view in enumerate(rows):
+            name = f"{view.name}（本机）" if view.local else view.name
+            self.device_table.setItem(row, 0, QTableWidgetItem(name))
+            self.device_table.setItem(row, 1, QTableWidgetItem("在线" if view.online else "离线"))
+            address = self.coord.public_url if view.local and self.coord.public_url else view.endpoint_url
+            self.device_table.setItem(row, 2, QTableWidgetItem(address or "—"))
+            if view.local:
+                action = QLabel("—")
+                action.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.device_table.setCellWidget(row, 3, action)
+            else:
+                btn = QPushButton("移除")
+                btn.clicked.connect(lambda _checked=False, did=view.id, n=view.name: self._remove_remote_device(did, n))
+                self.device_table.setCellWidget(row, 3, btn)
+
+    def _build_manual_tab(self) -> None:
+        self.manual_tab = QWidget()
+        root = QVBoxLayout(self.manual_tab)
+        root.setContentsMargins(0, 8, 0, 4)
+        root.setSpacing(10)
+
+        search_row = QHBoxLayout()
+        self.manual_search = QLineEdit()
+        self.manual_search.setPlaceholderText("搜索：Quick Tunnel、ChatGPT、多设备、连不上……")
+        self.manual_search.textChanged.connect(self._filter_manual_topics)
+        search_row.addWidget(self.manual_search, 1)
+        root.addLayout(search_row)
+
+        advisor = QGroupBox("不知道选哪种连接方式？")
+        advisor_row = QHBoxLayout(advisor)
+        advisor_row.setContentsMargins(12, 18, 12, 12)
+        self.advisor_internet = QCheckBox("需要网页端 ChatGPT / Gemini 访问")
+        self.advisor_internet.setChecked(True)
+        self.advisor_long = QCheckBox("准备长期使用")
+        self.advisor_domain = QCheckBox("已经有固定域名")
+        advisor_btn = QPushButton("给我建议")
+        advisor_btn.clicked.connect(self._update_connection_advice)
+        advisor_row.addWidget(self.advisor_internet)
+        advisor_row.addWidget(self.advisor_long)
+        advisor_row.addWidget(self.advisor_domain)
+        advisor_row.addWidget(advisor_btn)
+        root.addWidget(advisor)
+        self.advisor_result = QLabel("第一次体验通常从 Quick Tunnel 开始最省事。")
+        self.advisor_result.setWordWrap(True)
+        self.advisor_result.setObjectName("MutedText")
+        root.addWidget(self.advisor_result)
+
+        content_row = QHBoxLayout()
+        self.manual_list = QListWidget()
+        self.manual_list.setMinimumWidth(230)
+        self.manual_list.setMaximumWidth(320)
+        self.manual_list.currentRowChanged.connect(self._show_manual_topic)
+        self.manual_browser = QTextBrowser()
+        self.manual_browser.setOpenExternalLinks(False)
+        content_row.addWidget(self.manual_list)
+        content_row.addWidget(self.manual_browser, 1)
+        root.addLayout(content_row, 1)
+
+        nav = QHBoxLayout()
+        self.manual_prev = QPushButton("上一篇")
+        self.manual_next = QPushButton("下一篇")
+        self.manual_prev.clicked.connect(lambda: self._move_manual_topic(-1))
+        self.manual_next.clicked.connect(lambda: self._move_manual_topic(1))
+        nav.addStretch(1)
+        nav.addWidget(self.manual_prev)
+        nav.addWidget(self.manual_next)
+        root.addLayout(nav)
+        self.tabs.addTab(self.manual_tab, "使用手册")
+        self._filter_manual_topics("")
+
+    def _filter_manual_topics(self, query: str) -> None:
+        self._manual_topics = search_topics(query)
+        self.manual_list.blockSignals(True)
+        self.manual_list.clear()
+        for topic in self._manual_topics:
+            self.manual_list.addItem(topic.title)
+        self.manual_list.blockSignals(False)
+        if self._manual_topics:
+            self.manual_list.setCurrentRow(0)
+            self._show_manual_topic(0)
+        else:
+            self.manual_browser.setHtml("<h3>没有找到相关内容</h3><p>换一个更短的关键词试试，例如“Quick”“多设备”或“诊断”。</p>")
+            self.manual_prev.setEnabled(False)
+            self.manual_next.setEnabled(False)
+
+    def _show_manual_topic(self, row: int) -> None:
+        if row < 0 or row >= len(getattr(self, "_manual_topics", [])):
+            return
+        topic = self._manual_topics[row]
+        self.manual_browser.setHtml(topic.html)
+        self.manual_prev.setEnabled(row > 0)
+        self.manual_next.setEnabled(row + 1 < len(self._manual_topics))
+
+    def _move_manual_topic(self, delta: int) -> None:
+        target = self.manual_list.currentRow() + delta
+        if 0 <= target < self.manual_list.count():
+            self.manual_list.setCurrentRow(target)
+
+    def _update_connection_advice(self) -> None:
+        self.advisor_result.setText(
+            recommend_connection(
+                internet_client=self.advisor_internet.isChecked(),
+                long_term=self.advisor_long.isChecked(),
+                has_fixed_domain=self.advisor_domain.isChecked(),
+            )
+        )
 
     def _build_app_settings_tab(self) -> None:
         self.app_settings_tab = QWidget()
@@ -761,17 +1306,21 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.setSpacing(8)
         self.proc_combo = QComboBox()
-        self.proc_combo.addItem("Codex 引擎", "codex")
-        self.proc_combo.addItem("Windows 控制桥", "windows")
-        self.proc_combo.addItem("隧道（cloudflared/ngrok）", "tunnel")
+        self.proc_combo.addItem("项目服务", "service")
+        self.proc_combo.addItem("Windows 控制", "windows")
+        self.proc_combo.addItem("公网连接", "tunnel")
         self.proc_refresh_btn = QPushButton("刷新")
         self.proc_refresh_btn.clicked.connect(self._refresh_process_log)
-        row.addWidget(QLabel("进程:"))
+        row.addWidget(QLabel("查看:"))
         row.addWidget(self.proc_combo, 1)
         row.addWidget(self.proc_refresh_btn)
         proc_v.addLayout(row)
+        self.proc_empty = QLabel("还没有运行记录。启动当前项目后，这里会显示服务启动和连接过程。")
+        self.proc_empty.setObjectName("MutedText")
+        self.proc_empty.setWordWrap(True)
+        proc_v.addWidget(self.proc_empty)
         self.proc_view = QTableWidget(0, 3)
-        self.proc_view.setHorizontalHeaderLabels(["时间", "类型", "内容"])
+        self.proc_view.setHorizontalHeaderLabels(["序号", "来源", "说明"])
         self.proc_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.proc_view.verticalHeader().setVisible(False)
         self.proc_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -795,14 +1344,18 @@ class MainWindow(QMainWindow):
         self.audit_refresh_btn.clicked.connect(self._refresh_audit_log)
         row.addWidget(QLabel("日期:"))
         row.addWidget(self.audit_day_combo)
-        row.addWidget(QLabel("工具:"))
+        row.addWidget(QLabel("操作:"))
         row.addWidget(self.audit_tool_combo, 1)
         row.addWidget(QLabel("结果:"))
         row.addWidget(self.audit_success_combo)
         row.addWidget(self.audit_refresh_btn)
         audit_v.addLayout(row)
+        self.audit_empty = QLabel("还没有 AI 操作记录。ChatGPT / Gemini 读取文件、修改代码或执行命令后会出现在这里。")
+        self.audit_empty.setObjectName("MutedText")
+        self.audit_empty.setWordWrap(True)
+        audit_v.addWidget(self.audit_empty)
         self.audit_view = QTableWidget(0, 6)
-        self.audit_view.setHorizontalHeaderLabels(["时间", "工具", "结果", "耗时 ms", "客户端", "参数摘要"])
+        self.audit_view.setHorizontalHeaderLabels(["时间", "操作", "结果", "用时", "来源", "说明"])
         self.audit_view.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.audit_view.verticalHeader().setVisible(False)
         self.audit_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -816,32 +1369,29 @@ class MainWindow(QMainWindow):
             self._on_log_tab_changed(self.log_tabs.currentIndex())
 
     def _refresh_gateway_log(self) -> None:
-        """Read today's gateway JSONL and display it incrementally."""
+        """Show network activity in beginner-friendly language."""
         from datetime import date as _date
         path = constants.LOG_DIR / f"gateway-{_date.today().isoformat()}.jsonl"
-        self.gw_log_path_label.setText(str(path))
+        self.gw_log_path_label.setToolTip(str(path))
         if not path.exists():
-            self.gw_log_view.setPlainText("尚未收到 Gateway 请求")
-            self.gw_log_path_label.setText(f"{path}（文件不存在）")
+            self.gw_log_view.setPlainText("还没有网页端连接记录。启动公网服务并从 ChatGPT / Gemini 连接后，这里会出现记录。")
             return
         try:
-            with open(path, encoding="utf-8") as f:
-                text = f.read()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-500:]
         except OSError:
+            self.gw_log_view.setPlainText("暂时无法读取网络连接记录。")
             return
-        if not hasattr(self, "_gw_log_last_size"):
-            self._gw_log_last_size = 0
-        size = len(text)
-        if size <= self._gw_log_last_size:
-            return
-        new_text = text[self._gw_log_last_size:]
-        self._gw_log_last_size = size
-        if not new_text.strip():
-            return
-        current = self.gw_log_view.toPlainText()
-        if "尚未收到" in current:
-            self.gw_log_view.setPlainText("")
-        self.gw_log_view.appendPlainText(new_text.rstrip())
+        display: list[str] = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                friendly = self._friendly_gateway_record(record)
+                if friendly:
+                    display.append(friendly)
+        self.gw_log_view.setPlainText("\n".join(display[-300:]) if display else "目前没有需要关注的网络连接记录。")
         sb = self.gw_log_view.verticalScrollBar()
         if sb:
             sb.setValue(sb.maximum())
@@ -863,14 +1413,14 @@ class MainWindow(QMainWindow):
         gw_v.setSpacing(8)
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.gw_log_path_label = QLabel("")
-        self.gw_log_path_label.setStyleSheet("color: #555555; font-size: 11px;")
+        self.gw_log_path_label = QLabel("这里显示网页端是否真正连接到了这台电脑。")
+        self.gw_log_path_label.setObjectName("MutedText")
         row.addWidget(self.gw_log_path_label, 1)
         gw_refresh = QPushButton("刷新")
         gw_refresh.clicked.connect(self._refresh_gateway_log)
-        gw_copy = QPushButton("复制")
+        gw_copy = QPushButton("复制显示内容")
         gw_copy.clicked.connect(self._copy_gateway_log)
-        gw_open_dir = QPushButton("打开目录")
+        gw_open_dir = QPushButton("打开原始日志目录")
         gw_open_dir.clicked.connect(self._open_gateway_log_dir)
         row.addWidget(gw_refresh)
         row.addWidget(gw_copy)
@@ -1700,9 +2250,15 @@ class MainWindow(QMainWindow):
             and _same_root(selected.root_path, self._service_root)
         )
         if state == EngineState.ERROR:
-            self.status_label.setText("状态：失败")
+            self.status_label.setText("状态：连接失败")
         else:
-            self.status_label.setText(f"状态：{state.value}")
+            friendly_state = {
+                EngineState.IDLE: "未启动",
+                EngineState.STARTING: "正在连接",
+                EngineState.READY: "可以使用",
+                EngineState.STOPPING: "正在停止",
+            }.get(state, state.value)
+            self.status_label.setText(f"状态：{friendly_state}")
         self.start_btn.setText("停止服务" if state == EngineState.READY else "启动服务")
         if state == EngineState.STARTING:
             self.start_btn.setText("启动中…")
@@ -1747,10 +2303,11 @@ class MainWindow(QMainWindow):
                 else EngineState.IDLE.value
             )
         self.component_status.setText(
-            f"组件：Codex {codex_state} · Gateway {gateway_state} · "
-            f"隧道 {tunnel_state} · Windows 桥 {windows_state}"
+            f"项目服务：{codex_state} · 公网入口：{gateway_state} · "
+            f"公网连接：{tunnel_state} · Windows 控制：{windows_state}"
         )
         self._refresh_project_list()
+        self._refresh_device_table()
         self._refresh_url_ui()
         self._poll_gateway_log()
 
@@ -1854,43 +2411,139 @@ class MainWindow(QMainWindow):
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def _friendly_tool_name(self, name: str) -> str:
+        labels = {
+            "read_file": "读取文件", "read_files": "读取多个文件", "write_file": "写入文件",
+            "replace_text": "修改文件内容", "apply_patch": "应用代码补丁", "delete_path": "删除文件/目录",
+            "list_directory": "查看目录", "search_files": "搜索文件", "search_text": "搜索代码内容",
+            "run_command": "执行命令", "run_program": "运行程序", "start_process": "启动后台进程",
+            "stop_process": "停止后台进程", "git_status": "查看 Git 状态", "git_diff": "查看代码差异",
+            "git_commit": "提交 Git", "git_push": "推送 Git", "git_restore": "恢复 Git 文件",
+            "devbridge_list_workspaces": "查看项目列表", "devbridge_switch_workspace": "切换项目",
+            "devbridge_list_devices": "查看电脑列表", "devbridge_switch_device": "切换电脑",
+            "shell_self_test": "检查开发环境",
+        }
+        return labels.get(name, name.replace("_", " ") or "未知操作")
+
+    def _friendly_parameters(self, summary: Any) -> str:
+        if not isinstance(summary, dict) or not summary:
+            return "—"
+        parts: list[str] = []
+        if summary.get("path"):
+            parts.append(f"文件：{summary['path']}")
+        if summary.get("project_id"):
+            parts.append(f"项目：{summary['project_id']}")
+        if summary.get("device_id"):
+            parts.append(f"电脑：{summary['device_id']}")
+        if "command" in summary:
+            parts.append("命令内容已隐藏（保护隐私）")
+        if not parts:
+            visible = [f"{key}={value}" for key, value in summary.items() if value != "<redacted>"]
+            parts.extend(visible[:3])
+        return "；".join(parts) if parts else "敏感参数已隐藏"
+
+    def _friendly_client_name(self, value: str) -> str:
+        lowered = value.lower()
+        if "chatgpt" in lowered or "openai" in lowered:
+            return "ChatGPT"
+        if "gemini" in lowered or "google" in lowered:
+            return "Gemini"
+        return "MCP 客户端" if value else "—"
+
+    def _friendly_process_line(self, line: str) -> str:
+        lowered = line.lower()
+        if "error" in lowered or "failed" in lowered or "exception" in lowered:
+            return f"发生错误：{line.strip()}"
+        if "listening" in lowered or "ready" in lowered:
+            return "服务已准备好，可以接收请求。"
+        if "trycloudflare.com" in lowered:
+            return "Quick Tunnel 已获得新的临时公网地址。"
+        if "connected" in lowered and ("cloudflare" in lowered or "tunnel" in lowered):
+            return "公网连接已经建立。"
+        if "starting" in lowered or "spawn" in lowered:
+            return "正在启动服务进程。"
+        return line.strip()
+
+    def _friendly_gateway_record(self, record: dict[str, Any]) -> str | None:
+        path = str(record.get("path") or "")
+        status = int(record.get("status") or record.get("upstream_status") or 0)
+        event = str(record.get("event") or "")
+        method = str(record.get("jsonrpc_method") or "")
+        stamp = str(record.get("timestamp") or "")
+        when = stamp[11:19] if len(stamp) >= 19 else "--:--:--"
+        if path == "/device/heartbeat" and status < 400:
+            return None
+        if event == "device_paired":
+            message = "新电脑已成功加入 Multi-Device Hub。"
+        elif "consent" in path:
+            message = "Gemini 授权流程已到达这台电脑。"
+        elif method == "initialize":
+            message = "网页端正在建立 MCP 连接。"
+        elif method == "tools/list":
+            message = "网页端已成功获取可用功能列表。"
+        elif path == "/mcp":
+            message = "收到了一次来自网页端的 MCP 请求。"
+        elif path.startswith("/device/"):
+            message = "收到了一次多设备连接请求。"
+        else:
+            message = f"收到网络请求：{path or '/'}"
+        if status >= 400 or record.get("error"):
+            message += f" 结果：失败（{record.get('error') or 'HTTP '+str(status)}）"
+        elif status:
+            message += " 结果：正常。"
+        return f"[{when}] {message}"
+
     # ------------------------------------------------- logs: process tail
     def _engine_log_source(self) -> list[str]:
-        """Select the active engine's log buffer (newest first)."""
-        key = self.proc_combo.currentData()
-        manager = {"codex": self.coord.codex, "windows": self.coord.windows, "tunnel": self.coord.tunnel}.get(key)
+        project = self._project_config()
+        if project is None:
+            return []
+        key = str(self.proc_combo.currentData() or "service")
+        unit = self.pm.unit(project.id)
+        manager: Any = None
+        if key == "service" and unit is not None:
+            manager = unit.codex
+        elif key == "windows" and unit is not None:
+            manager = unit.windows
+        elif key == "tunnel" and self._service_root and _same_root(project.root_path, self._service_root):
+            manager = self.coord.tunnel
         if manager is None:
             return []
-        proc = getattr(manager, "_proc", None)
-        if proc is None or getattr(proc, "log", None) is None:
+        try:
+            text = manager.log_tail(400)
+        except Exception:
             return []
-        return list(proc.log)  # type: ignore[union-attr]
+        return [line for line in text.splitlines() if line.strip()]
 
     def _refresh_process_log(self) -> None:
         lines = self._engine_log_source()[-400:]
+        self.proc_empty.setVisible(not lines)
+        self.proc_view.setVisible(bool(lines))
         self.proc_view.setRowCount(len(lines))
+        source = self.proc_combo.currentText()
         for row, line in enumerate(lines):
-            self.proc_view.setItem(row, 0, QTableWidgetItem("-"))
-            self.proc_view.setItem(row, 1, QTableWidgetItem(self.proc_combo.currentText()))
-            self.proc_view.setItem(row, 2, QTableWidgetItem(line))
-        self.proc_view.setColumnWidth(0, 80)
-        self.proc_view.setColumnWidth(1, 120)
+            self.proc_view.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+            self.proc_view.setItem(row, 1, QTableWidgetItem(source))
+            self.proc_view.setItem(row, 2, QTableWidgetItem(self._friendly_process_line(line)))
+        self.proc_view.setColumnWidth(0, 55)
+        self.proc_view.setColumnWidth(1, 110)
 
     # ------------------------------------------------- logs: audit page
     def _refresh_audit_tool_combo(self) -> None:
-        current = self.audit_tool_combo.currentText()
+        current = str(self.audit_tool_combo.currentData() or "")
         names = available_tool_names()
         self.audit_tool_combo.blockSignals(True)
         self.audit_tool_combo.clear()
-        self.audit_tool_combo.addItem("全部工具")
-        self.audit_tool_combo.addItems(names)
-        if current in names:
-            self.audit_tool_combo.setCurrentText(current)
+        self.audit_tool_combo.addItem("全部操作", "")
+        for name in names:
+            self.audit_tool_combo.addItem(self._friendly_tool_name(name), name)
+        index = self.audit_tool_combo.findData(current)
+        self.audit_tool_combo.setCurrentIndex(index if index >= 0 else 0)
         self.audit_tool_combo.blockSignals(False)
 
     def _refresh_audit_log(self) -> None:
         day_mode = self.audit_day_combo.currentIndex()
-        tool = "" if self.audit_tool_combo.currentIndex() <= 0 else self.audit_tool_combo.currentText()
+        tool = str(self.audit_tool_combo.currentData() or "")
         mode = self.audit_success_combo.currentIndex()
         success = None if mode == 0 else mode == 1
         records = query_logs(AuditQuery(tool_name=tool, success=success, limit=2000))
@@ -1906,24 +2559,22 @@ class MainWindow(QMainWindow):
             cutoff_day = cutoff.strftime("%Y-%m-%d")
             records = [r for r in records if (r.get("timestamp") or "")[:10] >= cutoff_day]
         records = records[:500]
+        self.audit_empty.setVisible(not records)
+        self.audit_view.setVisible(bool(records))
         self.audit_view.setRowCount(len(records))
         for row, record in enumerate(records):
-            summary = record.get("parameter_summary") or {}
-            summary_text = (
-                str(summary)[:220] if isinstance(summary, dict) else str(summary)[:220]
-            )
-            self.audit_view.setItem(row, 0, QTableWidgetItem(record.get("timestamp", "")[11:19]))
-            self.audit_view.setItem(row, 1, QTableWidgetItem(str(record.get("tool_name", ""))))
+            duration = record.get("duration_ms", "")
+            self.audit_view.setItem(row, 0, QTableWidgetItem(str(record.get("timestamp", ""))[11:19]))
+            self.audit_view.setItem(row, 1, QTableWidgetItem(self._friendly_tool_name(str(record.get("tool_name", "")))))
             self.audit_view.setItem(row, 2, QTableWidgetItem("成功" if record.get("success") else "失败"))
-            self.audit_view.setItem(row, 3, QTableWidgetItem(str(record.get("duration_ms", ""))))
-            self.audit_view.setItem(row, 4, QTableWidgetItem(str(record.get("client_name", ""))))
-            self.audit_view.setItem(row, 5, QTableWidgetItem(summary_text))
+            self.audit_view.setItem(row, 3, QTableWidgetItem(f"{duration} ms" if duration != "" else "—"))
+            self.audit_view.setItem(row, 4, QTableWidgetItem(self._friendly_client_name(str(record.get("client_name", "")))))
+            self.audit_view.setItem(row, 5, QTableWidgetItem(self._friendly_parameters(record.get("parameter_summary"))))
         self.audit_view.setColumnWidth(0, 70)
-        self.audit_view.setColumnWidth(1, 110)
-        self.audit_view.setColumnWidth(2, 55)
-        self.audit_view.setColumnWidth(3, 70)
+        self.audit_view.setColumnWidth(1, 120)
+        self.audit_view.setColumnWidth(2, 60)
+        self.audit_view.setColumnWidth(3, 75)
         self.audit_view.setColumnWidth(4, 90)
-
 
     def _resume_upgrade_if_requested(self) -> None:
         """Consume an installer handoff request and restore the previous entry service.
@@ -2022,8 +2673,10 @@ def main() -> int:
         QTabWidget::pane { border: none; top: -1px; }
         QTabBar::tab { background: transparent; color: #64748b; padding: 9px 14px; margin-right: 4px; border-bottom: 2px solid transparent; }
         QTabBar::tab:selected { color: #1d4ed8; border-bottom: 2px solid #2563eb; font-weight: 600; }
-        QGroupBox { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; margin-top: 12px; padding-top: 10px; font-size: 13px; font-weight: 600; color: #111827; }
-        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
+        QGroupBox { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; margin-top: 20px; padding-top: 14px; font-size: 13px; font-weight: 600; color: #111827; }
+        QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 12px; top: 2px; padding: 0 5px; background: #f5f7fa; }
+        QToolButton { border: 1px solid rgba(100,116,139,0.35); color: rgba(71,85,105,0.72); background: rgba(241,245,249,0.75); border-radius: 9px; font-weight: 700; }
+        QToolButton:hover { color: #2563eb; border-color: rgba(37,99,235,0.5); background: #eef4ff; }
         QLineEdit, QComboBox, QSpinBox, QPlainTextEdit { background: #ffffff; border: 1px solid #d7dde5; border-radius: 7px; padding: 6px 8px; color: #111827; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border: 1px solid #7aa2f7; }
         QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background: #f3f4f6; color: #9ca3af; }

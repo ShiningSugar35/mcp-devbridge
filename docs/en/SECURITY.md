@@ -13,3 +13,12 @@
 - The application blocks known destructive disk/system command patterns in every execution profile.
 - Window shutdown performs process cleanup off the GUI thread.
 - Upgrade handoff files contain only non-secret metadata; the new process reloads protected values from SecretsStore.
+
+## v0.7 Multi-Device security
+
+- Pairing codes are six-digit, single-use and memory-only with a ten-minute lifetime. They are never persisted.
+- `devices.json` contains only device id/name, endpoint and timestamps. Remote MCP Bearer values and heartbeat secrets are stored in Windows Credential Manager / DPAPI-backed `SecretsStore`.
+- Heartbeats require the per-device secret and update the remote endpoint; remote endpoints must use HTTPS (loopback HTTP exists only for local development/tests).
+- The Hub swaps its own client credential for the selected remote device's Bearer only on the outbound proxy request. Device credentials are not returned through MCP tools or written to audit/network logs.
+- Gateway tool audit continues using the existing redaction policy, including complete masking of command/content/patch values and secret-like key names.
+- A remote device using Local-only mode cannot join a Hub because its loopback address is not reachable from another physical computer.

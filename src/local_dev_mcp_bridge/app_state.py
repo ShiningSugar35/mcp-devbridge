@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .device_hub import DeviceRegistry
 from .engines import (
     CodexProManager,
     EngineState,
@@ -86,6 +87,8 @@ class ServiceCoordinator:
         tunnel: TunnelManager | None = None,
         workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
         workspace_credential_registry: Callable[[str], str | None] | None = None,
+        device_registry: DeviceRegistry | None = None,
+        local_device_id: str = "",
     ) -> None:
         self.codex = codex or CodexProManager()
         self.windows = windows or WindowsBridgeManager()
@@ -93,6 +96,8 @@ class ServiceCoordinator:
         self.gateway: OAuthGateway | None = None
         self._workspace_registry = workspace_registry
         self._workspace_credential_registry = workspace_credential_registry
+        self._device_registry = device_registry
+        self._local_device_id = local_device_id
         self._lock = threading.Lock()
         self._state = EngineState.IDLE
         self._message: str | None = None
@@ -161,6 +166,8 @@ class ServiceCoordinator:
             upstream_legacy_token=lambda: SecretsStore().get(ACCESS_TOKEN_CRED_NAME),
             workspace_registry=self._workspace_registry,
             workspace_credential_registry=self._workspace_credential_registry,
+            device_registry=self._device_registry,
+            local_device_id=self._local_device_id,
         )
         self.gateway.start(port=options.gateway_port)
         if not self._wait_gateway_ready(options.gateway_port):

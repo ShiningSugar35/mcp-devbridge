@@ -1,5 +1,19 @@
 # Architecture
 
+## v0.7 multi-device routing
+
+The public Hub Gateway owns a `DeviceRegistry`. Remote DevBridge instances first expose their own MCP endpoint through Named Tunnel, ngrok or Quick Tunnel, then pair to the Hub with a short-lived one-time code. The Hub persists only non-secret device metadata in `devices.json`; remote Bearer and heartbeat credentials remain in `SecretsStore`.
+
+Each MCP session has an independent device binding in addition to its workspace binding. Device-local routing behaves as follows:
+
+1. if exactly one registered/local device is online, use it automatically;
+2. with multiple devices online, keep local as the default unless that session explicitly switches;
+3. Hub-owned device tools always execute on the Hub;
+4. workspace/command/file tools proxy to the selected remote DevBridge when a remote device is selected;
+5. the remote DevBridge then applies its own session-to-workspace mapping and permission policy.
+
+Remote devices heartbeat about every 15 seconds and report the current public MCP URL. This makes a remote Quick Tunnel address replaceable without changing the ChatGPT-facing Hub URL. `tools/list` augmentation is name-deduplicated so Hub-to-Hub routing does not duplicate DevBridge tools.
+
 ## v0.6 desktop interaction layer
 
 Desktop operation state is per-project rather than global. Only the project currently transitioning is busy; READY projects retain their stop action and other IDLE/ERROR projects remain selectable and startable. The desktop navigation is Workbench / Project Settings / Diagnostics / Logs / Settings, with log sub-tabs for process, audit and Gateway output. `AppConfig.close_behavior` controls close-to-tray (default) versus direct exit; the normal minimize button still minimizes to the taskbar.

@@ -99,6 +99,17 @@ class ProjectConfig(BaseModel):
         return data
 
 
+class DeviceConfig(BaseModel):
+    """Persisted metadata for a remote MCP DevBridge device. Secrets are stored separately."""
+
+    id: str
+    name: str = ""
+    endpoint_url: str = ""
+    last_seen: float = 0.0
+    paired_at: float = 0.0
+    enabled: bool = True
+
+
 class AppConfig(BaseModel):
     """Global app configuration."""
 
@@ -115,6 +126,9 @@ class AppConfig(BaseModel):
     full_system_risk_accepted: bool = False
     first_run_version: int = 0
     close_behavior: CloseBehavior = "tray"
+    device_id: str = ""
+    device_name: str = ""
+    hub_url: str = ""
     # 端口配置（集中维护默认值，见 constants.DEFAULT_*_PORT）：
     gateway_port: int = constants.DEFAULT_GATEWAY_PORT
     codexpro_port: int = constants.DEFAULT_CODEXPRO_PORT
