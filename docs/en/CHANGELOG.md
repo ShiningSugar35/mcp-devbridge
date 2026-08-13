@@ -14,7 +14,7 @@ All dates are local development dates.
 - Removed the duplicate connection-test card and component jargon from Workbench; self-test and technical component state now live under Diagnostics.
 - Added searchable in-app Manual, connection advisor and contextual `?` help for connection info, Gateway port, connection method, public hostname and tunnel token.
 - Quick Tunnel behavior is documented as random `trycloudflare.com`, test/development only; fixed-address Hub is recommended for long-term multi-device use.
-- Verification baseline: **304 pytest cases**, Ruff clean, Pyright 0 errors / 0 warnings, multi-device routing integration green, and all top-level pages fit 900×650 / 1200×850 / 1920×1080 without horizontal overflow.
+- Verification: **304 pytest cases**, Ruff clean, Pyright 0 errors / 0 warnings, multi-device routing integration green, all top-level pages fit 900×650 / 1200×850 / 1920×1080, frozen staging smoke and detached-upgrade dry-run passed, final installer asset SHA-256 was verified, and the installed v0.7 build restored Gateway 8786 / Codex 8788 and successfully served `devbridge_list_devices`.
 
 ## 0.6.0 (2026-08-11) — desktop UX and per-project interaction isolation
 

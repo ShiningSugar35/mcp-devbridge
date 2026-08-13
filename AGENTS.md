@@ -150,7 +150,7 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
   - 新增 `devbridge_list_devices/get_current_device/switch_device`；远端设备选择后 workspace/文件/命令工具在远端执行，工具注入按名称去重。
   - Gateway 正式 `tools/call` 链路写 AuditLogger；进程日志改读选中项目真实 log_tail；日志/诊断全部提供普通用户语言。
   - 新增 `help_content.py`、设备页、可搜索使用手册、连接方式选择助手和 5 类 `?` 非模态帮助浮层；工作台移除重复自测与底层组件状态。
-  - 当前源码验收：304 passed、Ruff/Pyright 全绿、Multi-Device 6 项集成与三档 UI 布局通过；待 v0.7.0 打包发布。
+  - 最终验收：304 passed、Ruff/Pyright 全绿、Multi-Device 6 项集成与三档 UI 布局通过；`v0.7.0` Release、完整安装器、detached 本机升级、快捷方式替换、D:\ 服务恢复和安装版设备工具调用均真机通过。
 
 - 2026-08-11 · **v0.6.0 桌面 UX / 托盘 / 项目级交互隔离**：
   - 全局 busy 改为 `_busy_project_ids`，一个项目运行不再锁其它项目；READY 项目可停止，IDLE/ERROR 项目可独立启动。
