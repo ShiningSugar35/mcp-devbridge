@@ -10,6 +10,7 @@ All dates are local development dates.
 - Added a **600-second orchestration watchdog**. It never kills a task: after 600 seconds without any task observation, the next task snapshot reports `orchestrationStale=true` plus a resume hint. Any get/wait/list/cancel observation refreshes the watchdog. `wait_task` remains capped at 60 seconds per polling call.
 - Full hotfix verification passed: TypeScript build, complete `npm run smoke`, `npm run stress`, 304 Python tests, Ruff and Pyright.
 - Final v0.7.2 Windows installer after watchdog integration: 66,977,760 bytes, SHA-256 `09f6e87f699fdc806404a961846cf78d1ece1fbdcaff80d3a6b4a1243c577510`; frozen staging smoke and detached-upgrade dry-run passed.
+- Live installed verification passed: installed process/desktop shortcut point to the normal install directory; Gateway 8786 and project engine 8788 listen; installed `server.js` contains `wait_task` and no `timeout_ms`; a separate MCP `wait_task` successfully recovered a task id returned by an earlier `bash` call; runtime snapshots expose the 600000 ms orchestration watchdog.
 
 ## 0.7.1 (2026-08-16) — timeout-free command tasks by default
 

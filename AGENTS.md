@@ -149,9 +149,8 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
   - `bash` 无公开 timeout、默认返回 task_id；删除 `start_task`，保留 get/wait/list/cancel。
   - `BashTaskManager` 必须是 CodexPro 进程级共享实例；任务本身仍按 workspace_id 隔离。v0.7.1 的 per-McpServer 实例会导致后续 MCP session 查不到 task_id。
   - 编排等待保护：`wait_task` 单次最多 60 秒；600 秒无任务观察只标记 `orchestrationStale` 并提供恢复提示，不改变/终止任务。
-  - HTTP smoke 已增加跨 session task lookup 回归；watchdog 合入后完整 smoke/stress + 304 pytest + Ruff/Pyright 全绿；最终 0.7.2 安装器与 Dry Run 已通过，当前待 Release 和在线接力。
+  - 最终验收：跨 session task lookup 回归、600s watchdog、完整 smoke/stress + 304 pytest + Ruff/Pyright 全绿；`v0.7.2` Release、安装器 digest、detached 升级、桌面快捷方式、D:\ 服务恢复、bash→wait_task 跨 MCP 真机调用均通过。
 
-- 2026-08-13 · **v0.7.0 Multi-Device Hub + 新手体验**：
 - 2026-08-13 · **v0.7.0 Multi-Device Hub + 新手体验**：
   - 新增 `device_hub.py`、`DeviceConfig/devices.json` 与设备级 SecretsStore 凭据；Gateway 支持配对/心跳、session 级设备选择和透明远端代理，单在线设备自动选择。
   - 新增 `devbridge_list_devices/get_current_device/switch_device`；远端设备选择后 workspace/文件/命令工具在远端执行，工具注入按名称去重。
