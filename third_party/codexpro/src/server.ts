@@ -9,7 +9,7 @@ import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./gu
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
 import { viewWorkspaceImage } from "./imageOps.js";
 import { searchWorkspace } from "./searchOps.js";
-import { runBash } from "./bashOps.js";
+import { BashTaskManager, runBash, type BashTaskSnapshot } from "./bashOps.js";
 import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
@@ -51,29 +51,19 @@ function textResult(text: string, structuredContent: Record<string, unknown> = {
   };
 }
 
-function countTextLines(value: string | undefined): number {
-  if (!value) return 0;
-  return value.split(/\r?\n/).filter((line) => line.length > 0).length;
-}
-
-function bashTextResult(config: CodexProConfig, result: Awaited<ReturnType<typeof runBash>>): string {
-  if (config.bashTranscript === "full") {
-    return `# Bash\n\n\`\`\`bash\n$ ${result.command}\n\`\`\`\n\nCWD: ${result.cwd}\nExit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}\nDuration: ${result.durationMs} ms\n\n## stdout\n\n\`\`\`text\n${result.stdout || ""}\n\`\`\`\n\n## stderr\n\n\`\`\`text\n${result.stderr || ""}\n\`\`\``;
-  }
-
-  const stdoutLines = countTextLines(result.stdout);
-  const stderrLines = countTextLines(result.stderr);
+function bashTaskTextResult(result: BashTaskSnapshot): string {
+  const terminal = result.status === "completed" || result.status === "failed" || result.status === "cancelled";
   return [
-    "# Bash",
+    `# Task ${result.taskId}`,
     "",
-    `\`${result.command}\``,
-    "",
+    `Status: ${result.status}`,
     `CWD: ${result.cwd}`,
-    `Exit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}`,
+    `PID: ${result.pid ?? "-"}`,
     `Duration: ${result.durationMs} ms`,
-    `Output: stdout ${stdoutLines} line${stdoutLines === 1 ? "" : "s"}, stderr ${stderrLines} line${stderrLines === 1 ? "" : "s"}.`,
+    terminal ? `Exit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}` : "Execution limit: none (runs until completion or cancel_task)",
+    result.truncated ? "Output: rolling buffer (earlier output was omitted)." : "Output: current buffered stdout/stderr.",
     "",
-    "Raw stdout/stderr are in the structured CodexPro card. Start with `--bash-transcript full` to print raw output in chat."
+    terminal ? "Task finished." : "Use wait_task/get_task to check progress, or cancel_task to stop it."
   ].join("\n");
 }
 
@@ -326,6 +316,10 @@ const MINIMAL_TOOL_NAMES = [
   "edit",
   "apply_patch",
   "bash",
+  "get_task",
+  "wait_task",
+  "list_tasks",
+  "cancel_task",
   "show_changes"
 ] as const;
 
@@ -361,6 +355,10 @@ const FULL_TOOL_NAMES = [
   "edit",
   "apply_patch",
   "bash",
+  "get_task",
+  "wait_task",
+  "list_tasks",
+  "cancel_task",
   "git_status",
   "git_diff",
   "show_changes",
@@ -379,6 +377,10 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "edit",
   "apply_patch",
   "bash",
+  "get_task",
+  "wait_task",
+  "list_tasks",
+  "cancel_task",
   "export_pro_context",
   "handoff_to_agent",
   "handoff_to_codex"
@@ -442,7 +444,7 @@ function registeredToolNames(server: McpServer): string[] {
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
-  if (name === "bash" && config.bashMode === "off") return false;
+  if ((name === "bash" || BASH_TASK_TOOL_NAMES.has(name)) && config.bashMode === "off") return false;
   if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
@@ -479,7 +481,7 @@ function serverInstructions(config: CodexProConfig): string {
   const bashInstruction =
     config.bashMode === "off"
       ? "5. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
-      : "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
+      : "5. Every bash command runs as a background task. Call bash to start it and receive task_id immediately; then use wait_task/get_task/list_tasks to observe progress or cancel_task to stop it. User command tasks have no execution-time limit.";
 
   return [
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
@@ -921,12 +923,14 @@ const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destru
 const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
+const BASH_TASK_TOOL_NAMES = new Set<string>(["get_task", "wait_task", "list_tasks", "cancel_task"]);
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
 export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = new WorkspaceManager(config);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
+  const bashTasks = new BashTaskManager();
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
@@ -1959,30 +1963,131 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     {
       title: "Bash",
       description:
-        "Run one allowlisted verification command in the workspace, such as tests, build, lint, typecheck, or a project script. Do not use for git status/diff or file inspection; use show_changes, tree, search, and read instead. Do not chain commands with &&, pipes, redirects, or shell file readers.",
+        "Start one allowlisted shell command as a background task and return task_id immediately. The task has no execution-time limit and runs until it exits or cancel_task is called. Use wait_task/get_task/list_tasks to observe progress. Do not use for git status/diff or file inspection; use show_changes, tree, search, and read instead. Do not chain commands with &&, pipes, redirects, or shell file readers.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        command: z.string().describe("Command to run."),
+        command: z.string().describe("Command to run as a task."),
         session_id: z.string().optional().describe(config.requireBashSession && config.bashSessionId ? `Required bash session id for this server: ${config.bashSessionId}.` : "Optional bash session id. If configured on the server, a provided value must match it."),
-        cwd: z.string().optional().describe("Working directory relative to workspace root. Default: ."),
-        timeout_ms: z.number().int().min(1000).max(180000).optional().describe("Timeout in milliseconds. Default: 30000.")
+        cwd: z.string().optional().describe("Working directory relative to workspace root. Default: .")
       },
       annotations: BASH_ANNOTATIONS,
       _meta: {
         ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Running bash command...",
-        "openai/toolInvocation/invoked": "Bash command finished"
+        "openai/toolInvocation/invoking": "Starting command task...",
+        "openai/toolInvocation/invoked": "Command task started"
       }
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const result = await runBash(config, guard, workspace, String(args.command ?? ""), {
+      const task = bashTasks.start(config, guard, workspace, String(args.command ?? ""), {
         cwd: args.cwd,
-        timeoutMs: args.timeout_ms,
         sessionId: args.session_id
       });
-      const text = bashTextResult(config, result);
-      return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result, bash_session_id: result.bashSessionId ?? null });
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "get_task",
+    {
+      title: "Get Task",
+      description: "Read the current status and rolling stdout/stderr of one command task in this workspace.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        task_id: z.string().describe("Task id returned by bash.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Reading task...",
+        "openai/toolInvocation/invoked": "Task status ready"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const task = bashTasks.get(workspace, String(args.task_id ?? ""));
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "wait_task",
+    {
+      title: "Wait Task",
+      description: "Wait briefly for a command task to finish, then return its current status. The task itself keeps running with no execution-time limit even when this wait call returns.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        task_id: z.string().describe("Task id returned by bash."),
+        wait_seconds: z.number().int().min(1).max(60).optional().describe("How long this status call may wait. Default: 20 seconds; maximum: 60 seconds. This is only a polling wait and never limits task execution.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Waiting for task...",
+        "openai/toolInvocation/invoked": "Task status ready"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const waitMs = Math.max(1, Number(args.wait_seconds ?? 20)) * 1_000;
+      const task = await bashTasks.wait(workspace, String(args.task_id ?? ""), waitMs);
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "list_tasks",
+    {
+      title: "List Tasks",
+      description: "List recent command tasks for the selected workspace, newest first. Completed tasks are retained in memory for up to 24 hours.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Listing tasks...",
+        "openai/toolInvocation/invoked": "Task list ready"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const tasks = bashTasks.list(workspace);
+      const lines = tasks.length
+        ? tasks.map((task) => `${task.taskId}  ${task.status}  ${task.durationMs} ms  ${task.command}`)
+        : ["No command tasks in this workspace."];
+      return textResult(["# Tasks", "", ...lines].join("\n"), { workspace_id: workspace.id, root: workspace.root, tasks });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "cancel_task",
+    {
+      title: "Cancel Task",
+      description: "Cancel one running command task and terminate its process tree. Completed tasks are unchanged.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        task_id: z.string().describe("Task id returned by bash.")
+      },
+      annotations: BASH_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Cancelling task...",
+        "openai/toolInvocation/invoked": "Task cancellation requested"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const task = bashTasks.cancel(workspace, String(args.task_id ?? ""));
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
     }
   );
 

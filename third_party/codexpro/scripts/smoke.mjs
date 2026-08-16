@@ -236,11 +236,15 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
 const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
+const bashSchemaProperties = toolsByName.get('bash')?.inputSchema?.properties ?? {};
+if ('timeout_ms' in bashSchemaProperties) {
+  throw new Error(`bash should not expose timeout_ms: ${JSON.stringify(bashSchemaProperties)}`);
+}
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
   return meta.ui?.resourceUri === toolCardUri && meta['openai/outputTemplate'] === toolCardUri;
@@ -258,6 +262,14 @@ async function expectToolError(name, args, pattern, targetClient = client) {
   if (pattern && !pattern.test(text)) {
     throw new Error(`${name} error did not match ${pattern}: ${text}`);
   }
+}
+async function waitForTask(targetClient, startResult, workspaceId, waitSeconds = 10) {
+  const taskId = startResult.structuredContent?.task_id ?? startResult.structuredContent?.task?.taskId;
+  if (!taskId) throw new Error(`command did not return task_id: ${JSON.stringify(startResult.structuredContent)}`);
+  return targetClient.request('tools/call', {
+    name: 'wait_task',
+    arguments: { ...(workspaceId ? { workspace_id: workspaceId } : {}), task_id: taskId, wait_seconds: waitSeconds }
+  });
 }
 for (const visualTool of toolNames) {
   if (hasWidgetMeta(visualTool) || hasToolCardStatusMeta(visualTool)) throw new Error(`${visualTool} exposed widget metadata while CODEXPRO_TOOL_CARDS is off`);
@@ -486,6 +498,13 @@ const inventory = await client.request('tools/call', { name: 'codexpro_inventory
 if (inventory.structuredContent.codexpro_tool !== 'codexpro_inventory') throw new Error('inventory result was not tagged for widget rendering');
 const opened = await client.request('tools/call', { name: 'open_workspace', arguments: { root: tmp, include_tree: true } });
 const ws = opened.structuredContent.workspace_id;
+const asyncStart = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'pwd' } });
+const asyncTaskId = asyncStart.structuredContent?.task?.taskId;
+if (!asyncTaskId) throw new Error(`bash did not return task_id: ${JSON.stringify(asyncStart.structuredContent)}`);
+const asyncWait = await client.request('tools/call', { name: 'wait_task', arguments: { workspace_id: ws, task_id: asyncTaskId, wait_seconds: 5 } });
+if (asyncWait.structuredContent?.task?.status !== 'completed') {
+  throw new Error(`wait_task did not complete pwd task: ${JSON.stringify(asyncWait.structuredContent)}`);
+}
 const viewedImage = await client.request('tools/call', { name: 'view_image', arguments: { workspace_id: ws, path: 'pixel.png' } });
 const imagePart = viewedImage.content?.find?.((part) => part.type === 'image');
 if (!imagePart?.data || imagePart.mimeType !== 'image/png' || viewedImage.structuredContent.width !== 1 || viewedImage.structuredContent.height !== 1) {
@@ -939,22 +958,26 @@ if (!codexContext.structuredContent.agents_files.includes('AGENTS.md')) throw ne
 if (codexContext.structuredContent.agents_files.length !== 1) throw new Error(`codex_context returned duplicate AGENTS files: ${codexContext.structuredContent.agents_files.join(', ')}`);
 if (!codexContext.content?.[0]?.text?.includes('Smoke Agents')) throw new Error('codex_context did not include AGENTS.md content');
 const pwdBash = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'pwd' } });
-const pwdBashText = pwdBash.content?.[0]?.text ?? '';
-if (!pwdBashText.includes('Exit: 0') || pwdBashText.includes('## stdout') || pwdBashText.includes('## stderr')) {
-  throw new Error(`default bash transcript should be compact: ${pwdBashText}`);
+if (!pwdBash.structuredContent?.task_id || pwdBash.structuredContent?.task?.status !== 'running') {
+  throw new Error(`bash did not start a background task immediately: ${JSON.stringify(pwdBash.structuredContent)}`);
 }
-const normalizedPwd = (pwdBash.structuredContent.stdout ?? '').trim().replaceAll('\\', '/').toLowerCase();
+const pwdDone = await waitForTask(client, pwdBash, ws);
+if (pwdDone.structuredContent?.task?.status !== 'completed' || pwdDone.structuredContent?.task?.exitCode !== 0) {
+  throw new Error(`pwd task did not complete successfully: ${JSON.stringify(pwdDone.structuredContent)}`);
+}
+const normalizedPwd = (pwdDone.structuredContent.task.stdout ?? '').trim().replaceAll('\\', '/').toLowerCase();
 const expectedPwdLeaf = path.basename(tmp).toLowerCase();
 if (!normalizedPwd.endsWith(`/${expectedPwdLeaf}`)) {
-  throw new Error(`compact bash transcript dropped structured stdout: ${JSON.stringify(pwdBash.structuredContent)}`);
+  throw new Error(`task result dropped structured stdout: ${JSON.stringify(pwdDone.structuredContent)}`);
 }
 await expectToolError('bash', { workspace_id: ws, command: 'find /tmp' }, /blocked/i);
 await expectToolError('bash', { workspace_id: ws, command: 'find . -fprint leaked.txt' }, /blocked/i);
 await expectToolError('bash', { workspace_id: ws, command: 'git show HEAD:.env' }, /blocked/i);
 await expectToolError('bash', { workspace_id: ws, command: 'ls $HOME' }, /blocked/i);
-const clientBuild = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'npm run build:clients', timeout_ms: 60000 } });
-if (!clientBuild.structuredContent.stdout?.includes('clients ok')) {
-  throw new Error('safe bash did not run npm run build:clients');
+const clientBuild = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'npm run build:clients' } });
+const clientBuildDone = await waitForTask(client, clientBuild, ws, 20);
+if (clientBuildDone.structuredContent?.task?.status !== 'completed' || !clientBuildDone.structuredContent?.task?.stdout?.includes('clients ok')) {
+  throw new Error(`safe bash task did not run npm run build:clients: ${JSON.stringify(clientBuildDone.structuredContent)}`);
 }
 const exported = await client.request('tools/call', { name: 'export_pro_context', arguments: { workspace_id: ws, selected_paths: ['demo.txt'], max_files: 4, max_total_bytes: 80000 } });
 if (exported.structuredContent.path !== '.ai-bridge/pro-context.md') throw new Error('export_pro_context wrote an unexpected path');
@@ -1140,18 +1163,29 @@ if (process.platform !== 'win32') {
     `fs.writeFileSync(${JSON.stringify(descendantPidPath)}, String(child.pid));`,
     "setInterval(() => {}, 1000);"
   ].join('');
-  const timedOutTree = await processTreeClient.request('tools/call', {
+  const runningTree = await processTreeClient.request('tools/call', {
     name: 'bash',
     arguments: {
       workspace_id: processTreeOpened.structuredContent.workspace_id,
-      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(descendantScript)}`,
-      timeout_ms: 1000
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(descendantScript)}`
     }
   });
-  if (!timedOutTree.structuredContent.stderr?.includes('Command timed out')) {
-    throw new Error(`bash process-tree smoke did not time out: ${JSON.stringify(timedOutTree.structuredContent)}`);
+  const runningTreeId = runningTree.structuredContent?.task_id;
+  if (!runningTreeId) throw new Error(`bash process-tree smoke did not return task_id: ${JSON.stringify(runningTree.structuredContent)}`);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      await fs.access(descendantPidPath);
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
   const descendantPid = Number(await fs.readFile(descendantPidPath, 'utf8'));
+  const cancelTree = await processTreeClient.request('tools/call', {
+    name: 'cancel_task',
+    arguments: { workspace_id: processTreeOpened.structuredContent.workspace_id, task_id: runningTreeId }
+  });
+  await waitForTask(processTreeClient, cancelTree, processTreeOpened.structuredContent.workspace_id, 5);
   let descendantAlive = true;
   for (let attempt = 0; attempt < 20 && descendantAlive; attempt += 1) {
     try {
@@ -1164,7 +1198,7 @@ if (process.platform !== 'win32') {
   }
   if (descendantAlive) {
     process.kill(descendantPid, 'SIGKILL');
-    throw new Error(`timed-out bash descendant ${descendantPid} survived process-group termination`);
+    throw new Error(`cancelled bash descendant ${descendantPid} survived process-group termination`);
   }
   processTreeClient.close();
 }
@@ -1190,7 +1224,7 @@ async function assertToolMode(mode, expected, hidden, extraEnv = {}) {
     if (names.includes(hiddenName)) throw new Error(`${mode || 'default'} mode should hide ${hiddenName}; got ${names.join(', ')}`);
   }
   const superActions = await modeClient.request('tools/call', { name: 'codexpro', arguments: { action: 'list_actions' } });
-  const expectedActions = names.filter((name) => name !== 'codexpro').sort();
+  const expectedActions = names.filter((name) => name !== 'codexpro' && !name.startsWith('windows_')).sort();
   const actualActions = [...superActions.structuredContent.actions].sort();
   if (JSON.stringify(actualActions) !== JSON.stringify(expectedActions)) {
     throw new Error(`${mode || 'default'} supertool actions did not match registered tools: expected ${expectedActions.join(', ')} got ${actualActions.join(', ')}`);
@@ -1198,8 +1232,8 @@ async function assertToolMode(mode, expected, hidden, extraEnv = {}) {
   modeClient.close();
 }
 
-await assertToolMode('', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'show_changes', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
-await assertToolMode('minimal', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'apply_patch', 'bash', 'show_changes'], ['inspect_workspace', 'tree', 'search', 'load_skill', 'view_image', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
+await assertToolMode('', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'show_changes', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
+await assertToolMode('minimal', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'show_changes'], ['inspect_workspace', 'tree', 'search', 'load_skill', 'view_image', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
 await assertToolMode('', ['codexpro', 'server_config', 'show_changes', 'search'], ['inspect_workspace'], { CODEXPRO_ANALYSIS: '0' });
 
 const handoffWriteClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--write', 'handoff'], {
@@ -1246,8 +1280,10 @@ await noBashClient.request('initialize', {
 noBashClient.notify('notifications/initialized');
 const noBashTools = await noBashClient.request('tools/list', {});
 const noBashToolNames = noBashTools.tools.map((tool) => tool.name);
-if (noBashToolNames.includes('bash')) {
-  throw new Error(`--bash off should not advertise bash tool; got ${noBashToolNames.join(', ')}`);
+for (const hiddenBashTool of ['bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task']) {
+  if (noBashToolNames.includes(hiddenBashTool)) {
+    throw new Error(`--bash off should not advertise ${hiddenBashTool} tool; got ${noBashToolNames.join(', ')}`);
+  }
 }
 const noBashConfig = await noBashClient.request('tools/call', { name: 'server_config', arguments: {} });
 if (noBashConfig.structuredContent.bashMode !== 'off') {
@@ -1328,10 +1364,9 @@ await fullTranscriptClient.request('initialize', {
 });
 fullTranscriptClient.notify('notifications/initialized');
 const fullTranscriptBash = await fullTranscriptClient.request('tools/call', { name: 'bash', arguments: { command: 'pwd' } });
-const fullTranscriptText = fullTranscriptBash.content?.[0]?.text ?? '';
-const fullTranscriptStdout = (fullTranscriptBash.structuredContent.stdout ?? '').trim();
-if (!fullTranscriptText.includes('## stdout') || !fullTranscriptStdout || !fullTranscriptText.includes(fullTranscriptStdout)) {
-  throw new Error(`full bash transcript mode did not preserve raw stdout in chat text: ${fullTranscriptText}`);
+const fullTranscriptDone = await waitForTask(fullTranscriptClient, fullTranscriptBash, undefined);
+if (fullTranscriptDone.structuredContent?.task?.status !== 'completed' || !fullTranscriptDone.structuredContent?.task?.stdout?.trim()) {
+  throw new Error(`legacy bash-transcript setting changed task execution semantics: ${JSON.stringify(fullTranscriptDone.structuredContent)}`);
 }
 fullTranscriptClient.close();
 
@@ -1623,8 +1658,12 @@ if (guardedConfig.structuredContent.bashSessionId !== 'codex-main' || guardedCon
 await expectToolError('bash', { command: 'pwd' }, /bash session/i, sessionGuardClient);
 await expectToolError('bash', { command: 'pwd', session_id: 'other-session' }, /codex-main/i, sessionGuardClient);
 const guardedBash = await sessionGuardClient.request('tools/call', { name: 'bash', arguments: { command: 'pwd', session_id: 'codex-main' } });
-if (guardedBash.structuredContent.bash_session_id !== 'codex-main' || !guardedBash.content?.[0]?.text?.includes('Exit: 0')) {
-  throw new Error(`bash session guard did not allow matching session id: ${JSON.stringify(guardedBash.structuredContent)}`);
+if (guardedBash.structuredContent?.task?.bashSessionId !== 'codex-main') {
+  throw new Error(`bash session guard did not attach matching session id: ${JSON.stringify(guardedBash.structuredContent)}`);
+}
+const guardedDone = await waitForTask(sessionGuardClient, guardedBash, undefined);
+if (guardedDone.structuredContent?.task?.status !== 'completed' || guardedDone.structuredContent?.task?.exitCode !== 0) {
+  throw new Error(`bash session guard task did not finish: ${JSON.stringify(guardedDone.structuredContent)}`);
 }
 const guardedSelfTest = await sessionGuardClient.request('tools/call', {
   name: 'codexpro_self_test',

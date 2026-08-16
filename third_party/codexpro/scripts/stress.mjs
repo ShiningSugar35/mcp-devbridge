@@ -240,7 +240,13 @@ async function runFullModeStress(root) {
       name: 'bash',
       arguments: { workspace_id: ws, command: 'pwd' }
     });
-    assert(safePwd.isError !== true && safePwd.structuredContent.exitCode === 0, 'safe bash rejected allowed pwd command');
+    const safePwdTaskId = safePwd.structuredContent?.task_id;
+    assert(safePwd.isError !== true && safePwdTaskId, 'safe bash did not start allowed pwd task');
+    const safePwdDone = await client.request('tools/call', {
+      name: 'wait_task',
+      arguments: { workspace_id: ws, task_id: safePwdTaskId, wait_seconds: 10 }
+    });
+    assert(safePwdDone.structuredContent?.task?.status === 'completed' && safePwdDone.structuredContent?.task?.exitCode === 0, 'safe bash pwd task did not complete');
 
     const newlineDirectTarget = path.join(root, 'newline-direct-owned');
     const blockedNewline = await client.request('tools/call', {
@@ -620,20 +626,29 @@ async function runBashOutputTerminationStress() {
   });
   try {
     const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
-    const started = Date.now();
     const result = await client.request('tools/call', {
       name: 'bash',
       arguments: {
         workspace_id: opened.structuredContent.workspace_id,
-        command: `${JSON.stringify(process.execPath)} -e "process.on('SIGTERM',()=>{}); setInterval(()=>process.stdout.write('x'.repeat(1024)),1)"`,
-        timeout_ms: 15000
+        command: `node -e "process.on('SIGTERM',()=>{}); setInterval(()=>process.stdout.write('x'.repeat(1024)),1)"`
       }
     });
-    const retainedBytes = Buffer.byteLength(result.structuredContent.stdout ?? '', 'utf8') +
-      Buffer.byteLength(result.structuredContent.stderr ?? '', 'utf8');
-    assert(Date.now() - started < 8000, `output-limited bash waited for the independent timeout: ${Date.now() - started} ms`);
-    assert(result.structuredContent.truncated === true, `output-limited bash did not report truncation: ${JSON.stringify(result.structuredContent)}`);
-    assert(retainedBytes < 9000, `output-limited bash retained too much output: ${retainedBytes} bytes`);
+    const taskId = result.structuredContent?.task_id;
+    assert(taskId, `output stress bash did not return task_id: ${JSON.stringify(result.structuredContent)}`);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const running = await client.request('tools/call', {
+      name: 'get_task',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, task_id: taskId }
+    });
+    const task = running.structuredContent?.task;
+    const retainedBytes = Buffer.byteLength(task?.stdout ?? '', 'utf8') + Buffer.byteLength(task?.stderr ?? '', 'utf8');
+    assert(task?.status === 'running', `output-heavy task should still be running: ${JSON.stringify(running.structuredContent)}`);
+    assert(task?.truncated === true, `rolling output task did not report truncation: ${JSON.stringify(running.structuredContent)}`);
+    assert(retainedBytes <= 18000, `rolling output task exceeded its bounded buffer: ${retainedBytes} bytes`);
+    await client.request('tools/call', {
+      name: 'cancel_task',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, task_id: taskId }
+    });
   } finally {
     client.close();
     await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

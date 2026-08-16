@@ -474,7 +474,7 @@ runFail([
   'none',
   '--bash',
   'banana'
-], env, /--bash must be off, safe, or full/i);
+], env, /--bash must be off, safe, developer, or full/i);
 
 runFail([
   'settings',

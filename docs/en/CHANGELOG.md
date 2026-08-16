@@ -2,7 +2,18 @@
 
 All dates are local development dates.
 
-## 0.7.0 (2026-08-13) — Multi-Device Hub and beginner-facing UX
+## 0.7.1 (2026-08-16) — timeout-free command tasks by default
+
+- `bash` now starts every shell command as a background task and returns `task_id` immediately. The public MCP schema no longer exposes `timeout_ms` and user command tasks have no fixed execution-time limit.
+- Removed the separate `start_task` tool and the normal-vs-large task distinction. Short commands and long builds now use the same execution model.
+- Kept `get_task`, `wait_task`, `list_tasks`, and `cancel_task` for task lifecycle management. `wait_task` is only a bounded polling wait and never limits the underlying task.
+- Task output uses a bounded rolling buffer; old output may be omitted, but output volume no longer terminates a task. MCP responses remain redacted.
+- Task creation still enforces the same bash-session guard, PathGuard, safe/developer/full command policy, and dangerous-command blocks. Cancellation terminates the full process tree.
+- Completed task metadata remains memory-only for up to 24 hours (maximum 100 retained terminal tasks). Running tasks are never evicted by retention cleanup. DevBridge/CodexPro restart intentionally ends running tasks and clears task state.
+- Restored the complete CodexPro Windows smoke chain by aligning stale Tool Cards, connection-test, doctor/settings and execute-handoff expectations with current behavior.
+- Verification before packaging: 304 Python tests passed; Ruff clean; Pyright 0/0; TypeScript build green; full `npm run smoke` green, including real MCP `bash → wait_task` and cancel-process-tree coverage.
+
+## 0.7.0 (2026-08-13)## 0.7.0 (2026-08-13) — Multi-Device Hub and beginner-facing UX
 
 - Added a device registry with stable local identity, one-time pairing codes, encrypted per-device Bearer/heartbeat credentials and heartbeat-based presence.
 - Added Hub routes `/device/register` and `/device/heartbeat`; remote Quick Tunnel URL changes are learned automatically from heartbeats.

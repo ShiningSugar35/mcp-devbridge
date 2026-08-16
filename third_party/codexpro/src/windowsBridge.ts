@@ -297,11 +297,7 @@ export function registerWindowsBridgeTools(server: McpServer, _config: CodexProC
           title: descriptor.title,
           description: descriptor.description,
           inputSchema: descriptor.inputSchema,
-          annotations: descriptor.annotations,
-          _meta: {
-            "openai/toolInvocation/invoking": `${descriptor.title}...`,
-            "openai/toolInvocation/invoked": `${descriptor.title} finished`
-          }
+          annotations: descriptor.annotations
         },
         wrapped
       );
@@ -376,7 +372,7 @@ export function registerWindowsBridgeTools(server: McpServer, _config: CodexProC
     }
   });
 
-  register({
+  if (!_config.connectionTest) register({
     name: "windows_call",
     title: "Windows Call",
     description:

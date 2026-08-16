@@ -1,5 +1,10 @@
 # Architecture
 
+## v0.7.1 command task model
+
+Public shell execution is task-based by default. The `bash` MCP tool validates the command and workspace, spawns it through `BashTaskManager`, and immediately returns `task_id`; it has no public timeout argument or execution timer. `get_task`, `wait_task`, `list_tasks`, and `cancel_task` manage the task lifecycle. `wait_task` only bounds a polling call, not execution. Output is held in a bounded rolling buffer, cancellation terminates the process tree, and all normal PathGuard/bash-session/permission checks remain in force. Terminal task metadata is memory-only and expires after 24 hours; restarting DevBridge/CodexPro ends running jobs and clears the registry.
+
+## v0.7 multi-device routing
 ## v0.7 multi-device routing
 
 The public Hub Gateway owns a `DeviceRegistry`. Remote DevBridge instances first expose their own MCP endpoint through Named Tunnel, ngrok or Quick Tunnel, then pair to the Hub with a short-lived one-time code. The Hub persists only non-secret device metadata in `devices.json`; remote Bearer and heartbeat credentials remain in `SecretsStore`.

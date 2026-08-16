@@ -2421,6 +2421,8 @@ class MainWindow(QMainWindow):
             "git_commit": "提交 Git", "git_push": "推送 Git", "git_restore": "恢复 Git 文件",
             "devbridge_list_workspaces": "查看项目列表", "devbridge_switch_workspace": "切换项目",
             "devbridge_list_devices": "查看电脑列表", "devbridge_switch_device": "切换电脑",
+            "get_task": "查看任务", "wait_task": "等待任务",
+            "list_tasks": "查看任务列表", "cancel_task": "取消任务",
             "shell_self_test": "检查开发环境",
         }
         return labels.get(name, name.replace("_", " ") or "未知操作")

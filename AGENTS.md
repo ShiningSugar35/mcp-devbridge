@@ -145,6 +145,13 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-16 · **v0.7.1 默认异步命令任务**：
+  - `bash` 不再有公开 `timeout_ms`，本身就是后台任务入口并立即返回 task_id；删除 `start_task`，不再区分普通/大型任务。
+  - 保留 `get_task / wait_task / list_tasks / cancel_task`；任务无 execution timer，输出使用滚动缓存，取消结束完整进程树。
+  - 任务继续强制 Bash session、PathGuard、权限档和危险命令策略；完成状态仅内存保留，软件重启不续跑。
+  - CodexPro 完整 `npm run smoke` 全绿；根项目 304 passed、Ruff/Pyright 全绿。当前待重新打包与在线接力。
+
+- 2026-08-13 · **v0.7.0 Multi-Device Hub + 新手体验**：
 - 2026-08-13 · **v0.7.0 Multi-Device Hub + 新手体验**：
   - 新增 `device_hub.py`、`DeviceConfig/devices.json` 与设备级 SecretsStore 凭据；Gateway 支持配对/心跳、session 级设备选择和透明远端代理，单在线设备自动选择。
   - 新增 `devbridge_list_devices/get_current_device/switch_device`；远端设备选择后 workspace/文件/命令工具在远端执行，工具注入按名称去重。

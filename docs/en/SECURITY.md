@@ -22,3 +22,7 @@
 - The Hub swaps its own client credential for the selected remote device's Bearer only on the outbound proxy request. Device credentials are not returned through MCP tools or written to audit/network logs.
 - Gateway tool audit continues using the existing redaction policy, including complete masking of command/content/patch values and secret-like key names.
 - A remote device using Local-only mode cannot join a Hub because its loopback address is not reachable from another physical computer.
+
+## v0.7.1 command task security
+
+Every public `bash` invocation is a task, but task execution does not bypass normal security. `bash` uses the same PathGuard, workspace selection, bash session guard, safe/developer/full policy and destructive-command blocks before spawning. Task output is redacted before MCP responses and stored only in memory-bounded rolling buffers. `cancel_task` terminates the process tree rather than only the shell parent. No task command/output transcript is persisted by the task manager, and running tasks are intentionally not resumed after a DevBridge restart.

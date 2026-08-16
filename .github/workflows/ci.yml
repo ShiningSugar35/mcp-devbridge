@@ -43,6 +43,10 @@ jobs:
         working-directory: third_party/codexpro
         run: npm ci && npm run build
 
+      - name: CodexPro async task smoke
+        working-directory: third_party/codexpro
+        run: node scripts/async-task-smoke.mjs
+
       - name: Verify build script syntax
         run: |
           $errors = $null

@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { CodexProConfig } from "./config.js";
@@ -16,6 +17,39 @@ export interface BashResult {
   stderr: string;
   truncated: boolean;
   bashSessionId?: string;
+}
+
+export const BASH_TASK_WAIT_MAX_MS = 60_000;
+
+export type BashTaskStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled";
+
+export interface BashTaskSnapshot extends BashResult {
+  taskId: string;
+  workspaceId: string;
+  status: BashTaskStatus;
+  pid: number | null;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+}
+
+interface BashTaskInternal {
+  taskId: string;
+  workspaceId: string;
+  command: string;
+  cwd: string;
+  status: BashTaskStatus;
+  child: ChildProcess;
+  startedAtMs: number;
+  finishedAtMs?: number;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  bashSessionId?: string;
+  error?: string;
+  maxOutputBytes: number;
 }
 
 const SAFE_ALLOWED_PREFIXES = [
@@ -286,6 +320,175 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void
   }
 }
 
+function appendRollingOutput(current: string, chunk: unknown, maxBytes: number): { value: string; truncated: boolean } {
+  const incoming = Buffer.from(String(chunk), "utf8");
+  const merged = Buffer.concat([Buffer.from(current, "utf8"), incoming]);
+  if (merged.byteLength <= maxBytes) return { value: merged.toString("utf8"), truncated: false };
+  const marker = Buffer.from("...[earlier output omitted]...\n", "utf8");
+  const payloadBytes = Math.max(1, maxBytes - marker.byteLength);
+  const tail = merged.subarray(Math.max(0, merged.byteLength - payloadBytes));
+  return { value: Buffer.concat([marker, tail]).toString("utf8"), truncated: true };
+}
+
+function taskTerminal(status: BashTaskStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+export class BashTaskManager {
+  private readonly tasks = new Map<string, BashTaskInternal>();
+  private readonly retentionMs = 24 * 60 * 60 * 1_000;
+  private readonly maxTasks = 100;
+
+  private prune(): void {
+    const now = Date.now();
+    for (const [taskId, task] of this.tasks) {
+      if (taskTerminal(task.status) && task.finishedAtMs && now - task.finishedAtMs > this.retentionMs) {
+        this.tasks.delete(taskId);
+      }
+    }
+    if (this.tasks.size <= this.maxTasks) return;
+    const removable = [...this.tasks.values()]
+      .filter((task) => taskTerminal(task.status))
+      .sort((left, right) => (left.finishedAtMs ?? left.startedAtMs) - (right.finishedAtMs ?? right.startedAtMs));
+    while (this.tasks.size > this.maxTasks && removable.length) {
+      const task = removable.shift();
+      if (task) this.tasks.delete(task.taskId);
+    }
+  }
+
+  private find(workspace: Workspace, taskId: string): BashTaskInternal {
+    this.prune();
+    const task = this.tasks.get(taskId);
+    if (!task || task.workspaceId !== workspace.id) {
+      throw new CodexProError(`Async task not found in this workspace: ${taskId}`);
+    }
+    return task;
+  }
+
+  private snapshot(task: BashTaskInternal): BashTaskSnapshot {
+    const finished = task.finishedAtMs;
+    return {
+      taskId: task.taskId,
+      workspaceId: task.workspaceId,
+      command: redactSensitiveText(task.command),
+      cwd: task.cwd,
+      status: task.status,
+      pid: task.child.pid ?? null,
+      startedAt: new Date(task.startedAtMs).toISOString(),
+      ...(finished ? { finishedAt: new Date(finished).toISOString() } : {}),
+      durationMs: (finished ?? Date.now()) - task.startedAtMs,
+      exitCode: task.exitCode,
+      signal: task.signal,
+      stdout: redactSensitiveText(task.stdout),
+      stderr: redactSensitiveText(task.stderr),
+      truncated: task.truncated,
+      ...(task.bashSessionId ? { bashSessionId: task.bashSessionId } : {}),
+      ...(task.error ? { error: redactSensitiveText(task.error) } : {})
+    };
+  }
+
+  start(
+    config: CodexProConfig,
+    guard: PathGuard,
+    workspace: Workspace,
+    command: string,
+    options: { cwd?: string; sessionId?: string } = {}
+  ): BashTaskSnapshot {
+    if (!command?.trim()) throw new CodexProError("command is required.");
+    const bashSessionId = assertBashSession(config, options.sessionId);
+    assertSafeCommand(config, command);
+    const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
+    const cwd = cwdResolved.absPath;
+    const { executable, shellArgs } = shellInfo(config);
+    const child = spawn(executable, [...shellArgs, command], {
+      cwd,
+      env: makeEnv(config),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      windowsHide: true
+    });
+    const task: BashTaskInternal = {
+      taskId: randomUUID(),
+      workspaceId: workspace.id,
+      command,
+      cwd: path.relative(workspace.root, cwd) || ".",
+      status: "running",
+      child,
+      startedAtMs: Date.now(),
+      exitCode: null,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      truncated: false,
+      ...(bashSessionId ? { bashSessionId } : {}),
+      maxOutputBytes: Math.max(16_384, config.maxOutputBytes)
+    };
+    this.tasks.set(task.taskId, task);
+    this.prune();
+
+    child.stdout?.on("data", (chunk) => {
+      const next = appendRollingOutput(task.stdout, chunk, task.maxOutputBytes);
+      task.stdout = next.value;
+      task.truncated = task.truncated || next.truncated;
+    });
+    child.stderr?.on("data", (chunk) => {
+      const next = appendRollingOutput(task.stderr, chunk, task.maxOutputBytes);
+      task.stderr = next.value;
+      task.truncated = task.truncated || next.truncated;
+    });
+    child.on("error", (error) => {
+      if (taskTerminal(task.status)) return;
+      task.status = "failed";
+      task.error = `${error.name}: ${error.message}`;
+      const next = appendRollingOutput(task.stderr, `\n[codexpro] ${task.error}\n`, task.maxOutputBytes);
+      task.stderr = next.value;
+      task.truncated = task.truncated || next.truncated;
+      task.finishedAtMs = Date.now();
+    });
+    child.on("close", (exitCode, signal) => {
+      task.exitCode = exitCode;
+      task.signal = signal;
+      task.finishedAtMs = Date.now();
+      if (task.status === "cancelling") {
+        task.status = "cancelled";
+      } else if (task.status !== "failed") {
+        task.status = exitCode === 0 ? "completed" : "failed";
+      }
+    });
+    return this.snapshot(task);
+  }
+
+  get(workspace: Workspace, taskId: string): BashTaskSnapshot {
+    return this.snapshot(this.find(workspace, taskId));
+  }
+
+  list(workspace: Workspace): BashTaskSnapshot[] {
+    this.prune();
+    return [...this.tasks.values()]
+      .filter((task) => task.workspaceId === workspace.id)
+      .sort((left, right) => right.startedAtMs - left.startedAtMs)
+      .map((task) => this.snapshot(task));
+  }
+
+  async wait(workspace: Workspace, taskId: string, waitMs = 20_000): Promise<BashTaskSnapshot> {
+    const deadline = Date.now() + Math.max(0, Math.min(waitMs, BASH_TASK_WAIT_MAX_MS));
+    while (true) {
+      const task = this.find(workspace, taskId);
+      if (taskTerminal(task.status) || Date.now() >= deadline) return this.snapshot(task);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  cancel(workspace: Workspace, taskId: string): BashTaskSnapshot {
+    const task = this.find(workspace, taskId);
+    if (!taskTerminal(task.status) && task.status !== "cancelling") {
+      task.status = "cancelling";
+      terminateProcessTree(task.child, "SIGTERM");
+    }
+    return this.snapshot(task);
+  }
+}
+
 export async function runBash(
   config: CodexProConfig,
   guard: PathGuard,
@@ -298,7 +501,7 @@ export async function runBash(
   assertSafeCommand(config, command);
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
-  const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, 180_000));
+  const timeoutMs = Math.max(1_000, options.timeoutMs ?? 30_000);
   const start = Date.now();
 
   return new Promise((resolve, reject) => {

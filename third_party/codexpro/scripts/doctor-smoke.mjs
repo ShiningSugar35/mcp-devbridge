@@ -83,8 +83,15 @@ const invalidDoctor = spawnSync(process.execPath, [
   encoding: 'utf8'
 });
 const invalidOutput = `${invalidDoctor.stdout}\n${invalidDoctor.stderr}`;
-if (invalidDoctor.status === 0 || !invalidOutput.includes('Bash mode') || !invalidOutput.includes('Write mode') || !invalidOutput.includes('Tool mode')) {
-  throw new Error(`doctor did not reject invalid saved profile\nstdout:\n${invalidDoctor.stdout}\nstderr:\n${invalidDoctor.stderr}`);
+if (
+  invalidDoctor.status !== 0 ||
+  !invalidOutput.includes('Bash mode') ||
+  !invalidOutput.includes('full') ||
+  !invalidOutput.includes('Write mode') ||
+  !invalidOutput.includes('workspace') ||
+  !invalidOutput.includes('Tool mode')
+) {
+  throw new Error(`doctor did not safely normalize invalid saved profile values\nstdout:\n${invalidDoctor.stdout}\nstderr:\n${invalidDoctor.stderr}`);
 }
 
 console.log('✓ doctor smoke test passed');
