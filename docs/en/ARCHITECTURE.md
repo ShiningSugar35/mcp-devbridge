@@ -2,7 +2,8 @@
 
 ## v0.7.1 command task model
 
-Public shell execution is task-based by default. The `bash` MCP tool validates the command and workspace, spawns it through `BashTaskManager`, and immediately returns `task_id`; it has no public timeout argument or execution timer. `get_task`, `wait_task`, `list_tasks`, and `cancel_task` manage the task lifecycle. `wait_task` only bounds a polling call, not execution. Output is held in a bounded rolling buffer, cancellation terminates the process tree, and all normal PathGuard/bash-session/permission checks remain in force. Terminal task metadata is memory-only and expires after 24 hours; restarting DevBridge/CodexPro ends running jobs and clears the registry.
+Public shell execution is task-based by default. The `bash` MCP tool validates the command and workspace, spawns it through `BashTaskManager`, and immediately returns `task_id`; it has no public timeout argument or execution timer. The `BashTaskManager` is process-scoped (not `McpServer`/MCP-session scoped) so task ids remain resolvable across successive HTTP MCP sessions while each task is still bound to its workspace id. `get_task`, `wait_task`, `list_tasks`, and `cancel_task` manage the task lifecycle. `wait_task` only bounds a polling call, not execution. Output is held in a bounded rolling buffer, cancellation terminates the process tree, and all normal PathGuard/bash-session/permission checks remain in force. Terminal task metadata is memory-only and expires after 24 hours; restarting DevBridge/CodexPro ends running jobs and clears the registry.
+The task registry also tracks the last client observation. If no get/wait/list/cancel observation occurs for 600 seconds, the next snapshot reports an orchestration-stale flag and resume hint. This watchdog is advisory only and never changes task status or terminates the process.
 
 ## v0.7 multi-device routing
 ## v0.7 multi-device routing

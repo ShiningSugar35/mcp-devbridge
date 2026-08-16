@@ -2,6 +2,15 @@
 
 All dates are local development dates.
 
+## 0.7.2 (2026-08-16) — shared task registry hotfix
+
+- Fixed a live multi-session bug from v0.7.1: `BashTaskManager` was created per `McpServer` instance, so a later MCP request/session could fail to resolve a task id returned by `bash`.
+- Moved the task registry to CodexPro process scope. Tasks remain workspace-scoped inside the registry, so project isolation is preserved while all MCP sessions in the same DevBridge process can observe the same task lifecycle.
+- Added HTTP regression coverage where MCP session A starts a `bash` task, closes, and MCP session B successfully waits on the same task id.
+- Added a **600-second orchestration watchdog**. It never kills a task: after 600 seconds without any task observation, the next task snapshot reports `orchestrationStale=true` plus a resume hint. Any get/wait/list/cancel observation refreshes the watchdog. `wait_task` remains capped at 60 seconds per polling call.
+- Full hotfix verification passed: TypeScript build, complete `npm run smoke`, `npm run stress`, 304 Python tests, Ruff and Pyright.
+- Final v0.7.2 Windows installer after watchdog integration: 66,977,760 bytes, SHA-256 `09f6e87f699fdc806404a961846cf78d1ece1fbdcaff80d3a6b4a1243c577510`; frozen staging smoke and detached-upgrade dry-run passed.
+
 ## 0.7.1 (2026-08-16) — timeout-free command tasks by default
 
 - `bash` now starts every shell command as a background task and returns `task_id` immediately. The public MCP schema no longer exposes `timeout_ms` and user command tasks have no fixed execution-time limit.

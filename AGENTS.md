@@ -145,11 +145,11 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
-- 2026-08-16 · **v0.7.1 默认异步命令任务**：
-  - `bash` 不再有公开 `timeout_ms`，本身就是后台任务入口并立即返回 task_id；删除 `start_task`，不再区分普通/大型任务。
-  - 保留 `get_task / wait_task / list_tasks / cancel_task`；任务无 execution timer，输出使用滚动缓存，取消结束完整进程树。
-  - 任务继续强制 Bash session、PathGuard、权限档和危险命令策略；完成状态仅内存保留，软件重启不续跑。
-  - CodexPro 完整 `npm run smoke` 全绿；根项目 304 passed、Ruff/Pyright 全绿。当前待重新打包与在线接力。
+- 2026-08-16 · **v0.7.2 默认异步命令任务 + 跨 session 热修复**：
+  - `bash` 无公开 timeout、默认返回 task_id；删除 `start_task`，保留 get/wait/list/cancel。
+  - `BashTaskManager` 必须是 CodexPro 进程级共享实例；任务本身仍按 workspace_id 隔离。v0.7.1 的 per-McpServer 实例会导致后续 MCP session 查不到 task_id。
+  - 编排等待保护：`wait_task` 单次最多 60 秒；600 秒无任务观察只标记 `orchestrationStale` 并提供恢复提示，不改变/终止任务。
+  - HTTP smoke 已增加跨 session task lookup 回归；watchdog 合入后完整 smoke/stress + 304 pytest + Ruff/Pyright 全绿；最终 0.7.2 安装器与 Dry Run 已通过，当前待 Release 和在线接力。
 
 - 2026-08-13 · **v0.7.0 Multi-Device Hub + 新手体验**：
 - 2026-08-13 · **v0.7.0 Multi-Device Hub + 新手体验**：

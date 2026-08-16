@@ -7,7 +7,7 @@ Output: dist/MCPDevBridge/
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.7.1"
+PROJECT_VERSION = "0.7.2"
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry_desktop.py")],

@@ -20,6 +20,7 @@ export interface BashResult {
 }
 
 export const BASH_TASK_WAIT_MAX_MS = 60_000;
+export const BASH_ORCHESTRATION_STALE_MS = 600_000;
 
 export type BashTaskStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled";
 
@@ -29,8 +30,12 @@ export interface BashTaskSnapshot extends BashResult {
   status: BashTaskStatus;
   pid: number | null;
   startedAt: string;
+  lastObservedAt: string;
+  orchestrationStale: boolean;
+  orchestrationStaleAfterMs: number;
   finishedAt?: string;
   error?: string;
+  resumeHint?: string;
 }
 
 interface BashTaskInternal {
@@ -41,6 +46,7 @@ interface BashTaskInternal {
   status: BashTaskStatus;
   child: ChildProcess;
   startedAtMs: number;
+  lastObservedAtMs: number;
   finishedAtMs?: number;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -339,6 +345,8 @@ export class BashTaskManager {
   private readonly retentionMs = 24 * 60 * 60 * 1_000;
   private readonly maxTasks = 100;
 
+  constructor(private readonly orchestrationStaleMs = BASH_ORCHESTRATION_STALE_MS) {}
+
   private prune(): void {
     const now = Date.now();
     for (const [taskId, task] of this.tasks) {
@@ -365,8 +373,12 @@ export class BashTaskManager {
     return task;
   }
 
-  private snapshot(task: BashTaskInternal): BashTaskSnapshot {
+  private snapshot(task: BashTaskInternal, touchObservation = false): BashTaskSnapshot {
+    const now = Date.now();
     const finished = task.finishedAtMs;
+    const lastObservedAtMs = task.lastObservedAtMs;
+    const orchestrationStale = now - lastObservedAtMs >= this.orchestrationStaleMs;
+    if (touchObservation) task.lastObservedAtMs = now;
     return {
       taskId: task.taskId,
       workspaceId: task.workspaceId,
@@ -375,15 +387,25 @@ export class BashTaskManager {
       status: task.status,
       pid: task.child.pid ?? null,
       startedAt: new Date(task.startedAtMs).toISOString(),
+      lastObservedAt: new Date(lastObservedAtMs).toISOString(),
+      orchestrationStale,
+      orchestrationStaleAfterMs: this.orchestrationStaleMs,
       ...(finished ? { finishedAt: new Date(finished).toISOString() } : {}),
-      durationMs: (finished ?? Date.now()) - task.startedAtMs,
+      durationMs: (finished ?? now) - task.startedAtMs,
       exitCode: task.exitCode,
       signal: task.signal,
       stdout: redactSensitiveText(task.stdout),
       stderr: redactSensitiveText(task.stderr),
       truncated: task.truncated,
       ...(task.bashSessionId ? { bashSessionId: task.bashSessionId } : {}),
-      ...(task.error ? { error: redactSensitiveText(task.error) } : {})
+      ...(task.error ? { error: redactSensitiveText(task.error) } : {}),
+      ...(orchestrationStale
+        ? {
+            resumeHint: taskTerminal(task.status)
+              ? "The orchestration was idle for at least 600 seconds. Read this terminal result and resume the workflow now; do not keep waiting."
+              : "The orchestration was idle for at least 600 seconds. The task is still running; resume from this snapshot instead of entering an unbounded wait."
+          }
+        : {})
     };
   }
 
@@ -415,6 +437,7 @@ export class BashTaskManager {
       status: "running",
       child,
       startedAtMs: Date.now(),
+      lastObservedAtMs: Date.now(),
       exitCode: null,
       signal: null,
       stdout: "",
@@ -459,7 +482,7 @@ export class BashTaskManager {
   }
 
   get(workspace: Workspace, taskId: string): BashTaskSnapshot {
-    return this.snapshot(this.find(workspace, taskId));
+    return this.snapshot(this.find(workspace, taskId), true);
   }
 
   list(workspace: Workspace): BashTaskSnapshot[] {
@@ -467,14 +490,14 @@ export class BashTaskManager {
     return [...this.tasks.values()]
       .filter((task) => task.workspaceId === workspace.id)
       .sort((left, right) => right.startedAtMs - left.startedAtMs)
-      .map((task) => this.snapshot(task));
+      .map((task) => this.snapshot(task, true));
   }
 
   async wait(workspace: Workspace, taskId: string, waitMs = 20_000): Promise<BashTaskSnapshot> {
     const deadline = Date.now() + Math.max(0, Math.min(waitMs, BASH_TASK_WAIT_MAX_MS));
+    const task = this.find(workspace, taskId);
     while (true) {
-      const task = this.find(workspace, taskId);
-      if (taskTerminal(task.status) || Date.now() >= deadline) return this.snapshot(task);
+      if (taskTerminal(task.status) || Date.now() >= deadline) return this.snapshot(task, true);
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
@@ -485,7 +508,7 @@ export class BashTaskManager {
       task.status = "cancelling";
       terminateProcessTree(task.child, "SIGTERM");
     }
-    return this.snapshot(task);
+    return this.snapshot(task, true);
   }
 }
 

@@ -21,6 +21,7 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { registerWindowsBridgeTools } from "./windowsBridge.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
+const bashTasks = new BashTaskManager();
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return redactSensitiveText(`${error.name}: ${error.message}`);
@@ -62,7 +63,11 @@ function bashTaskTextResult(result: BashTaskSnapshot): string {
     `Duration: ${result.durationMs} ms`,
     terminal ? `Exit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}` : "Execution limit: none (runs until completion or cancel_task)",
     result.truncated ? "Output: rolling buffer (earlier output was omitted)." : "Output: current buffered stdout/stderr.",
+    result.orchestrationStale
+      ? "Orchestration watchdog: STALE (no task observation for at least 600 seconds; task was not killed)."
+      : "Orchestration watchdog: active.",
     "",
+    ...(result.resumeHint ? [result.resumeHint, ""] : []),
     terminal ? "Task finished." : "Use wait_task/get_task to check progress, or cancel_task to stop it."
   ].join("\n");
 }
@@ -930,7 +935,6 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = new WorkspaceManager(config);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const bashTasks = new BashTaskManager();
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);

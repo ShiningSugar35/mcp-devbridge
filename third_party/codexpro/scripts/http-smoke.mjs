@@ -666,6 +666,26 @@ try {
     throw new Error(`open_current_workspace returned ${currentOpened}, open_workspace default returned ${opened}`);
   }
 
+  let crossSessionTaskId = '';
+  await withClient(mcpUrl, async (firstClient) => {
+    const started = await callTool(firstClient, 'bash', {
+      workspace_id: opened,
+      command: 'pwd'
+    });
+    crossSessionTaskId = started.structuredContent?.task_id ?? '';
+    if (!crossSessionTaskId) throw new Error(`HTTP bash did not return task_id: ${JSON.stringify(started.structuredContent)}`);
+  });
+  await withClient(mcpUrl, async (secondClient) => {
+    const completed = await callTool(secondClient, 'wait_task', {
+      workspace_id: opened,
+      task_id: crossSessionTaskId,
+      wait_seconds: 5
+    });
+    if (completed.structuredContent?.task?.status !== 'completed' || !completed.structuredContent?.task?.stdout?.trim()) {
+      throw new Error(`task state did not survive across HTTP MCP sessions: ${JSON.stringify(completed.structuredContent)}`);
+    }
+  });
+
   await withClient(mcpUrl, async (firstClient) => {
     const alternate = await callTool(firstClient, 'open_workspace', {
       root: alternateRoot,
