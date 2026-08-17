@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import process from "node:process";
-import { BashTaskManager } from "../dist/bashOps.js";
+import { BASH_TASK_WAIT_MAX_MS, BashTaskManager } from "../dist/bashOps.js";
 import { loadConfig } from "../dist/config.js";
 import { PathGuard, WorkspaceManager } from "../dist/guard.js";
 
@@ -11,6 +11,7 @@ const config = loadConfig(["--root", process.cwd(), "--bash", "full"]);
 const guard = new PathGuard(config);
 const workspaces = new WorkspaceManager(config);
 const workspace = workspaces.defaultWorkspace();
+assert.equal(BASH_TASK_WAIT_MAX_MS, 30_000, "wait_task polling cap must stay at 30 seconds");
 const tasks = new BashTaskManager();
 
 const startedAt = Date.now();

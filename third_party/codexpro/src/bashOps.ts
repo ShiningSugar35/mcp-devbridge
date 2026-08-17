@@ -19,7 +19,7 @@ export interface BashResult {
   bashSessionId?: string;
 }
 
-export const BASH_TASK_WAIT_MAX_MS = 60_000;
+export const BASH_TASK_WAIT_MAX_MS = 30_000;
 export const BASH_ORCHESTRATION_STALE_MS = 600_000;
 
 export type BashTaskStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled";
@@ -493,7 +493,7 @@ export class BashTaskManager {
       .map((task) => this.snapshot(task, true));
   }
 
-  async wait(workspace: Workspace, taskId: string, waitMs = 20_000): Promise<BashTaskSnapshot> {
+  async wait(workspace: Workspace, taskId: string, waitMs = 15_000): Promise<BashTaskSnapshot> {
     const deadline = Date.now() + Math.max(0, Math.min(waitMs, BASH_TASK_WAIT_MAX_MS));
     const task = this.find(workspace, taskId);
     while (true) {

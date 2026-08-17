@@ -2026,7 +2026,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
         task_id: z.string().describe("Task id returned by bash."),
-        wait_seconds: z.number().int().min(1).max(60).optional().describe("How long this status call may wait. Default: 20 seconds; maximum: 60 seconds. This is only a polling wait and never limits task execution.")
+        wait_seconds: z.number().int().min(1).max(30).optional().describe("How long this status call may wait. Default: 15 seconds; maximum: 30 seconds. This is only a polling wait and never limits task execution.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
@@ -2037,7 +2037,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const waitMs = Math.max(1, Number(args.wait_seconds ?? 20)) * 1_000;
+      const waitMs = Math.max(1, Number(args.wait_seconds ?? 15)) * 1_000;
       const task = await bashTasks.wait(workspace, String(args.task_id ?? ""), waitMs);
       return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
     }

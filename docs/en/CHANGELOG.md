@@ -2,6 +2,15 @@
 
 All dates are local development dates.
 
+## 0.8.0 (2026-08-17) — persistent pairing and bundled runtime
+
+- Extended successful registration receipts so the same `pair_code + device_id` can retry idempotently for 1800 seconds after the first successful registration.
+- Persisted paired-device identity, Hub endpoint and heartbeat credentials so normal application or Windows restarts do not require pairing again.
+- Update discovery now runs once on startup and then every 12 hours.
+- The Windows installer bundles pinned private Node.js 22.19.0, uv/uvx 0.11.25 and cloudflared 2026.7.3 runtimes. Startup diagnostics validate the private payload instead of relying on user-global PATH state.
+- Reduced synchronous `wait_task` polling to a 15-second default and a 30-second hard maximum to avoid long MCP delivery stalls in ChatGPT Web. Background command tasks still have no fixed execution-time limit.
+- The v0.8.0 release gate includes Python tests, Ruff, Pyright, CodexPro build/smoke, PyInstaller, Inno Setup, frozen single-instance smoke, bundled `live_upgrade.ps1` verification, detached-updater Dry Run, installer SHA-256, live upgrade, shortcut/service recovery and fixed-domain reconnection.
+
 ## 0.7.2 (2026-08-16) — shared task registry hotfix
 
 - Fixed a live multi-session bug from v0.7.1: `BashTaskManager` was created per `McpServer` instance, so a later MCP request/session could fail to resolve a task id returned by `bash`.

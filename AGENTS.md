@@ -145,6 +145,12 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-17 · **v0.8.0 配对持久化 / 自带运行时 / 更新可靠性**：
+  - 同一 `pair_code + device_id` 在首次成功注册后的 1800 秒内可幂等重试；设备目录、Hub 地址和心跳凭据持久化，重启无需再次配对。
+  - 更新检查改为启动后一次、之后每 12 小时；安装包内置固定版本 Node.js / uv / uvx / cloudflared，启动诊断检查私有运行时，不依赖用户全局 PATH。
+  - `wait_task` 为降低 ChatGPT Web/MCP 长同步调用导致的 message delivery timeout，改为默认 15 秒、单次最多 30 秒；后台命令本身仍无固定执行时长上限。
+  - v0.8.0 发布链要求重新跑 pytest、Ruff、Pyright、CodexPro build/smoke、PyInstaller、Inno Setup、冻结版单实例、live_upgrade payload、detached updater Dry Run、安装器 SHA-256、在线升级与固定域名接入验收。
+
 - 2026-08-16 · **v0.7.2 默认异步命令任务 + 跨 session 热修复**：
   - `bash` 无公开 timeout、默认返回 task_id；删除 `start_task`，保留 get/wait/list/cancel。
   - `BashTaskManager` 必须是 CodexPro 进程级共享实例；任务本身仍按 workspace_id 隔离。v0.7.1 的 per-McpServer 实例会导致后续 MCP session 查不到 task_id。
