@@ -163,10 +163,25 @@ class _Signals(QObject):
     coord_event = Signal(object, object)  # state, message
 
 
+# Keep worker signal bridges alive until the queued GUI callback has executed.
+# Without a strong reference PySide may destroy the QObject immediately after
+# the worker returns, losing the queued completion signal while the underlying
+# engine has already reached READY.
+_ASYNC_SIGNAL_GUARDS: set[_Signals] = set()
+
+
 def _run_async(fn: Callable[[], Any], callback: Callable[[Any], None]) -> None:
     """Run fn on the global thread pool; callback(result) on the GUI thread."""
     signals = _Signals()
-    signals.done.connect(callback)
+    _ASYNC_SIGNAL_GUARDS.add(signals)
+
+    def finish(result: Any) -> None:
+        try:
+            callback(result)
+        finally:
+            _ASYNC_SIGNAL_GUARDS.discard(signals)
+
+    signals.done.connect(finish)
 
     def target() -> None:
         try:

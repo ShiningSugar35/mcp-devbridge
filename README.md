@@ -100,6 +100,18 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.8.1 多工作区路由热修
+
+- **修复 ChatGPT 切换工作区后又回到入口项目**：ChatGPT 可能在连续工具调用之间重建底层 MCP transport，v0.8.0 只按 `mcp-session-id` 保存工作区会失效。v0.8.1 为工具增加可选的 `devbridge_workspace_id / devbridge_device_id` 路由提示，切换工具返回路由值，后续调用显式携带，因此不再依赖同一个 transport session。
+- **多项目真正同时在线**：主 Hub 只保留一个固定地址/Gateway；每个已启动项目继续拥有独立 CodexPro 端口，GPT 可在同一聊天中切换 C:\、D:\ 等项目。
+- **每个项目独立上游 MCP Session**：Gateway 为同一 ChatGPT 会话在每个 CodexPro/远端设备上分别维护上游 session；切换项目时懒初始化目标引擎并改写上游 `mcp-session-id`，避免不同项目各自 session 表导致 `Session not found`。
+- **修复 Gateway 本地命令参数**：`run_command / run_program` 正确读取 MCP `params.arguments`。
+- **修复“正在启动项目引擎”日志卡住**：异步 Qt signal 在 GUI 回调执行前保持强引用，避免项目已经 READY 但完成消息丢失。
+- **盘符根目录名称**：`C:\`、`D:\` 不再显示为空名称。
+- **长任务防 ChatGPT 工具流超时**：同步 `run_command / run_program` 只允许短调用（默认 10 秒、最多 20 秒）；构建、测试、安装、抓取等长任务统一使用后台 `bash → task_id → wait_task/get_task`，避免一个 MCP 请求长期占住。此优化只能缓解工具等待造成的超时，不能改变 ChatGPT 自身纯模型推理流的超时策略。
+
+> 升级到 0.8.1 后，ChatGPT 开发中的 App 请执行一次 **Refresh / Scan Tools**，让 ChatGPT 获取新增的可选路由参数。
+
 ## v0.8.0 单域名 Hub 路由与桌面可靠性
 
 - **一个固定域名、一个 OAuth App、任意设备/工作区**：OAuth 授权页不再绑定单个工作区。ChatGPT 只连接主 Hub 的固定 URL，连接后用 `devbridge_switch_device` / `devbridge_switch_workspace` 按会话切换目标。

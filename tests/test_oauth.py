@@ -994,3 +994,284 @@ def test_diag_short_hash() -> None:
     h = _diag_short_hash("test")
     assert h == _diag_short_hash("test") and len(h) == 8
     assert _diag_short_hash("") == ""
+
+
+
+def test_v081_stateless_route_hint_survives_transport_recreation(
+    mw_env: _MultiWorkspaceEnv,
+) -> None:
+    """Explicit route hints survive when ChatGPT creates a fresh MCP transport session."""
+    token, _, _cid = mw_env.register_and_authorize()
+    routed_to: list[int] = []
+    forwarded_bodies: list[bytes] = []
+
+    class _Router(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request):
+            from urllib.parse import urlparse
+
+            port = urlparse(str(request.url)).port or 18787
+            routed_to.append(port)
+            forwarded_bodies.append(request.content)
+            target = mw_env.transport_a if port == 18787 else mw_env.transport_b
+            return await target.handle_async_request(request)
+
+    mw_env.gateway._http = httpx.AsyncClient(transport=_Router())
+
+    def call(session_id: str, *, route: str | None) -> None:
+        arguments: dict[str, str] = {"path": "README.md"}
+        if route:
+            arguments["devbridge_workspace_id"] = route
+        rpc = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": len(routed_to) + 1,
+                "method": "tools/call",
+                "params": {"name": "read", "arguments": arguments},
+            }
+        )
+        response = mw_env.client.post(
+            "/mcp",
+            content=rpc,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "mcp-session-id": session_id,
+                "Content-Type": "application/json",
+            },
+        )
+        assert response.status_code == 200, response.text
+
+    call("transport-session-one", route=WORKSPACE_B_ID)
+    call("transport-session-two", route=WORKSPACE_B_ID)
+    assert routed_to[-2:] == [18788, 18788]
+    assert all(b"devbridge_workspace_id" not in body for body in forwarded_bodies[-2:])
+
+    call("transport-session-three", route=None)
+    assert routed_to[-1] == 18787
+
+
+def test_v081_injected_tool_schema_exposes_optional_route_hints() -> None:
+    from local_dev_mcp_bridge.gateway import _inject_tools
+
+    original = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {
+                        "name": "read",
+                        "description": "Read a file",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    }
+                ]
+            },
+        }
+    ).encode()
+    patched = json.loads(_inject_tools(original).decode())
+    tools = {tool["name"]: tool for tool in patched["result"]["tools"]}
+    for name in ("read", "run_command", "devbridge_switch_workspace"):
+        props = tools[name]["inputSchema"]["properties"]
+        assert "devbridge_workspace_id" in props
+        assert "devbridge_device_id" in props
+    assert tools["read"]["inputSchema"]["required"] == ["path"]
+
+
+def test_v081_gateway_local_tool_reads_mcp_arguments(
+    mw_env: _MultiWorkspaceEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    seen: dict[str, object] = {}
+
+    def fake_run(command: str, *, cwd: Path, timeout_seconds: int):
+        seen.update(command=command, cwd=cwd, timeout_seconds=timeout_seconds)
+        return SimpleNamespace(
+            shell="powershell",
+            exit_code=0,
+            duration_seconds=0.01,
+            timed_out=False,
+            stdout="ok",
+            stderr="",
+        )
+
+    monkeypatch.setattr("local_dev_mcp_bridge.gateway.run_command", fake_run)
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 91,
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": {"command": "Write-Output ok", "timeout_seconds": 9},
+        },
+    }
+    response = asyncio.run(
+        mw_env.gateway._exec_local_tool(
+            "run_command",
+            rpc,
+            rpc["params"],
+            workspace_id=WORKSPACE_A_ID,
+            session_id="",
+        )
+    )
+    data = json.loads(bytes(response.body))
+    assert "error" not in data
+    assert seen["command"] == "Write-Output ok"
+    assert seen["timeout_seconds"] == 9
+
+    rpc["params"]["arguments"]["timeout_seconds"] = 999
+    response = asyncio.run(
+        mw_env.gateway._exec_local_tool(
+            "run_command",
+            rpc,
+            rpc["params"],
+            workspace_id=WORKSPACE_A_ID,
+            session_id="",
+        )
+    )
+    data = json.loads(bytes(response.body))
+    assert "error" not in data
+    assert seen["timeout_seconds"] == 20
+
+
+def test_v081_switch_workspace_returns_route_without_transport_session(
+    mw_env: _MultiWorkspaceEnv,
+) -> None:
+    import asyncio
+
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 92,
+        "method": "tools/call",
+        "params": {
+            "name": "devbridge_switch_workspace",
+            "arguments": {"project_id": WORKSPACE_B_ID},
+        },
+    }
+    response = asyncio.run(
+        mw_env.gateway._exec_local_tool(
+            "devbridge_switch_workspace",
+            rpc,
+            rpc["params"],
+            workspace_id=WORKSPACE_A_ID,
+            session_id="",
+        )
+    )
+    data = json.loads(bytes(response.body))
+    assert "error" not in data
+    assert data["result"]["structuredContent"]["devbridge_workspace_id"] == WORKSPACE_B_ID
+
+
+
+def test_v081_gateway_virtualizes_per_workspace_upstream_sessions(
+    mw_env: _MultiWorkspaceEnv,
+) -> None:
+    """A client-facing session must map to a different MCP session on each CodexPro engine."""
+    token, _, _cid = mw_env.register_and_authorize()
+    session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    events: list[tuple[int, str, str, dict]] = []
+
+    class _StrictRouter(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            port = request.url.port or 18787
+            expected = session_a if port == 18787 else session_b
+            raw = request.content.decode("utf-8") if request.content else "{}"
+            payload = json.loads(raw)
+            method = str(payload.get("method", ""))
+            sid = request.headers.get("mcp-session-id", "")
+            events.append((port, method, sid, payload))
+            if method == "initialize":
+                assert not sid
+                return httpx.Response(
+                    200,
+                    headers={"mcp-session-id": expected},
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "CodexPro", "version": "test"},
+                        },
+                    },
+                )
+            if method == "notifications/initialized":
+                if sid != expected:
+                    return httpx.Response(404, json={"error": "Session not found"})
+                return httpx.Response(202)
+            if sid != expected:
+                return httpx.Response(
+                    404,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "error": {"code": -32001, "message": "Session not found"},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload.get("id"),
+                    "result": {"content": [{"type": "text", "text": f"port={port}"}]},
+                },
+            )
+
+    mw_env.gateway._http = httpx.AsyncClient(transport=_StrictRouter())
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "strict-session-test", "version": "1"},
+        },
+    }
+    r = mw_env.client.post(
+        "/mcp",
+        json=initialize,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    client_session = r.headers.get("mcp-session-id", "")
+    assert client_session == session_a
+
+    r = mw_env.client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        headers={"Authorization": f"Bearer {token}", "mcp-session-id": client_session},
+    )
+    assert r.status_code == 202, r.text
+
+    r = mw_env.client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "read",
+                "arguments": {
+                    "path": "README.md",
+                    "devbridge_workspace_id": WORKSPACE_B_ID,
+                },
+            },
+        },
+        headers={"Authorization": f"Bearer {token}", "mcp-session-id": client_session},
+    )
+    assert r.status_code == 200, r.text
+    b_tool_calls = [event for event in events if event[0] == 18788 and event[1] == "tools/call"]
+    assert len(b_tool_calls) == 1
+    _port, _method, forwarded_sid, forwarded_payload = b_tool_calls[0]
+    assert forwarded_sid == session_b
+    assert "devbridge_workspace_id" not in forwarded_payload["params"]["arguments"]
+    assert (18788, "initialize", "") in [(p, m, s) for p, m, s, _ in events]
+    assert (18788, "notifications/initialized", session_b) in [
+        (p, m, s) for p, m, s, _ in events
+    ]

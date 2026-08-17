@@ -141,3 +141,21 @@ def test_diagnostics_gives_conclusion_and_next_action(tmp_path: Path, monkeypatc
         assert window.component_status.parentWidget() is not window.ctrl_tab
     finally:
         _close(app, window)
+
+
+
+def test_v081_run_async_keeps_completion_signal_alive() -> None:
+    import time
+
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        app = QApplication([])
+    received: list[str] = []
+    dm._run_async(lambda: "ready", lambda result: received.append(str(result)))
+    deadline = time.monotonic() + 3.0
+    while not received and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    assert received == ["ready"]
+    app.processEvents()
+    assert not dm._ASYNC_SIGNAL_GUARDS

@@ -184,6 +184,10 @@ class ProjectManager:
             migrate_project_id(project)
             if project.id != before_id:
                 changed = True
+            if not project.display_name:
+                root = Path(project.root_path).expanduser()
+                project.display_name = root.name or root.drive or str(root)
+                changed = True
             if not project.codexpro_port or not project.windows_bridge_port or not project.gateway_port:
                 assign_project_ports(projects, index=index)
                 changed = True
@@ -211,7 +215,7 @@ class ProjectManager:
             return existing
         suggestions = suggest_commands(target)
         project = ProjectConfig(
-            display_name=display_name or target.name,
+            display_name=display_name or target.name or target.drive or str(target),
             root_path=str(target),
             permission_mode=permission_mode,  # type: ignore[arg-type]
             test_command=suggestions.get("test_command", ""),

@@ -2,6 +2,16 @@
 
 All dates are local development dates.
 
+## 0.8.1 (2026-08-17) — stateless multi-workspace routing hotfix
+
+- Fix ChatGPT custom-app calls falling back to the Hub entry workspace when the client recreates the underlying MCP transport session between tool-call batches.
+- Add optional `devbridge_workspace_id` / `devbridge_device_id` routing hints to tool schemas; switch tools return the selected routing value and the Gateway validates/consumes it without forwarding synthetic fields to CodexPro.
+- Keep `mcp-session-id` routing as a backward-compatible optimization, but no longer require it for workspace/device switching.
+- Virtualize upstream MCP sessions per client-session × workspace/device. Switching from one CodexPro engine to another lazily initializes that target and rewrites the upstream `mcp-session-id`, preventing `Session not found` when independent engines are active at the same time.
+- Fix Gateway-local `run_command` / `run_program` parsing of MCP `params.arguments`; cap these synchronous compatibility tools at 20 seconds and direct long builds/tests/installations to background `bash` tasks with bounded `wait_task` / `get_task` polling to reduce ChatGPT tool-stream timeout risk.
+- Keep PySide async completion bridges alive until their GUI callback executes, preventing a project from reaching READY while the runtime log remains stuck at “starting”.
+- Give drive-root projects such as `C:\` and `D:\` non-empty display names.
+
 ## 0.8.0 (2026-08-17) — persistent pairing and bundled runtime
 
 - Extended successful registration receipts so the same `pair_code + device_id` can retry idempotently for 1800 seconds after the first successful registration.

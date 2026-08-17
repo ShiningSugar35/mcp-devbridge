@@ -305,3 +305,26 @@ def test_parallel_real_engines(real_manager: tuple[ProjectManager, Path]) -> Non
     time.sleep(0.5)
     assert not port_listening(a.codexpro_port)
     assert not port_listening(b.codexpro_port)
+
+
+def test_v081_drive_root_gets_nonempty_display_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_dev_mcp_bridge.config_store import load_projects
+
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg_drive"))
+    save_projects(
+        [
+            ProjectConfig(
+                id="drive-root",
+                display_name="",
+                root_path="C:\\",
+                codexpro_port=19001,
+                windows_bridge_port=29001,
+                gateway_port=19002,
+            )
+        ]
+    )
+    projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
+    assert projects[0].display_name == "C:"
+    assert load_projects()[0].display_name == "C:"

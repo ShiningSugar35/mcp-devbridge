@@ -145,6 +145,11 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-17 · **v0.8.1 多工作区/ChatGPT stateless transport 热修**：
+  - 不再把工作区/设备选择仅绑定 `mcp-session-id`；工具 schema 增加可选显式路由提示，兼容 ChatGPT 在连续工具调用间重建 MCP transport 的行为。
+  - 修复 Gateway `run_command/run_program` 对 `params.arguments` 的读取；修复 PySide 异步完成 signal 生命周期导致的“项目已 READY、运行记录仍停在正在启动”；盘符根目录补齐显示名。
+  - 新增跨 transport session 路由回归，发布前重新跑全量 pytest / Ruff / Pyright / PyInstaller / Inno Setup / 在线升级与 C:\↔D:\ 真机切换。
+
 - 2026-08-17 · **v0.8.0 配对持久化 / 自带运行时 / 更新可靠性**：
   - 同一 `pair_code + device_id` 在首次成功注册后的 1800 秒内可幂等重试；设备目录、Hub 地址和心跳凭据持久化，重启无需再次配对。
   - 更新检查改为启动后一次、之后每 12 小时；安装包内置固定版本 Node.js / uv / uvx / cloudflared，启动诊断检查私有运行时，不依赖用户全局 PATH。
