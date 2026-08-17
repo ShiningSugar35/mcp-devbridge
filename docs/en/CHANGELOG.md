@@ -2,6 +2,13 @@
 
 All dates are local development dates.
 
+## 0.9.0 (2026-08-17) — per-device fixed endpoints and local Agent Pool
+
+- Promote remote-device routing from session-only state to formal `device_id` parameters on workspace-management tools, so the Hub can query/switch a specific computer after ChatGPT recreates the MCP transport.
+- Keep Quick Tunnel heartbeat rotation for Hub backhaul, while documenting that a ChatGPT App directly bound to a Quick URL is temporary and cannot have its configured URL rewritten by the server.
+- Support the stable two-App topology: each independent computer uses its own Cloudflare Tunnel UUID/token/hostname and may map that tunnel to its own `http://localhost:8786`; never deploy one tunnel identity across independent OAuth stores.
+- Add a lazy local Agent Pool backed by non-interactive OpenCode/Claude Code discovery, a bounded physical-concurrency queue, Git worktree isolation for write agents, lifecycle polling/cancel/collect/cleanup, and interrupted-state recovery after DevBridge restart.
+
 ## 0.8.1 (2026-08-17) — stateless multi-workspace routing hotfix
 
 - Fix ChatGPT custom-app calls falling back to the Hub entry workspace when the client recreates the underlying MCP transport session between tool-call batches.

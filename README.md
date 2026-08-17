@@ -100,6 +100,18 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.9.0 双固定域名、多设备显式路由与 Agent Pool
+
+- **朋友重启不再依赖旧 Quick App**：Quick Tunnel 仍会在重新建立时更换 `trycloudflare.com` 地址；已配对设备会通过 heartbeat 把新地址更新给主 Hub，但直接绑定旧 Quick URL 的 ChatGPT App 本身不会自动改 URL。长期直连请使用固定域名。
+- **共享 Hub 显式远端查询**：`devbridge_list_workspaces / devbridge_get_current_workspace / devbridge_switch_workspace` 正式增加可选 `device_id`，可直接指定目标电脑，不再要求先依赖某个 transport session 的 `switch_device` 状态。
+- **推荐双固定 App 拓扑**：主机使用自己的 Cloudflare Tunnel/Token/`mcp.shiningsugar.shop`，朋友另建一个完全独立的 Cloudflare Tunnel/Token/`jerry.shiningsugar.shop`。两个 Tunnel 都可以把各自机器的 hostname 映射到各自的 `http://localhost:8786`；禁止把同一个 Tunnel Token/UUID 部署到两台独立 OAuth Gateway。
+- **Hub 与独立 App 可以并存**：朋友仍可保持“已连接主 Hub”用于共享设备路由，同时用 `jerry.shiningsugar.shop/mcp` 创建自己的稳定 ChatGPT App。两条路径互不要求复用 Tunnel Token。
+- **Agent Pool**：新增本地并发实施 Agent 队列。执行器自动探测可非交互运行的 OpenCode CLI 与 Claude Code CLI；`auto` 默认优先 OpenCode，也可显式指定 `executor=claude/opencode`，单次可排队最多 64 个任务，默认物理并发 4（环境变量 `MCP_DEVBRIDGE_AGENT_POOL_MAX` 可调，硬上限 16）。写入任务默认创建独立 Git worktree + `mcp-agent/<id>` 分支，避免多个 Agent 同时踩主工作区。
+- **Agent 生命周期工具**：`agent_pool_capabilities / spawn / spawn_batch / list / get / wait / cancel / collect / cleanup`。长任务后台运行，`wait` 单次最多 30 秒；DevBridge 重启后旧 running/queued 任务标记 `interrupted`，不会谎称继续运行。
+- **并发开发边界**：Agent Pool 是逻辑任务池而不是“无限进程”。可以排很多任务，但真实并发受机器资源和模型服务限制；主会话负责规划、审阅 diff 和决定合并，Agent 不自动 push 主分支。
+
+> 使用共享 Hub 的旧 ChatGPT App 时，升级后请执行一次 **Refresh / Scan Tools**，以获取正式 `device_id` 参数和 Agent Pool 工具。朋友若使用独立 `jerry` 固定 App，也要对该 App 扫描一次工具。
+
 ## v0.8.1 多工作区路由热修
 
 - **修复 ChatGPT 切换工作区后又回到入口项目**：ChatGPT 可能在连续工具调用之间重建底层 MCP transport，v0.8.0 只按 `mcp-session-id` 保存工作区会失效。v0.8.1 为工具增加可选的 `devbridge_workspace_id / devbridge_device_id` 路由提示，切换工具返回路由值，后续调用显式携带，因此不再依赖同一个 transport session。

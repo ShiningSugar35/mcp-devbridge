@@ -957,7 +957,7 @@ def test_tool_analyze_function() -> None:
 
 
 def test_gateway_merge_no_duplicates() -> None:
-    from local_dev_mcp_bridge.gateway import _analyze_tools, _inject_tools
+    from local_dev_mcp_bridge.gateway import _PYTHON_TOOL_DEFS, _analyze_tools, _inject_tools
 
     codexpro = json.dumps({"result": {"tools": [
         {"name": "read_file"}, {"name": "write_file"},
@@ -966,7 +966,7 @@ def test_gateway_merge_no_duplicates() -> None:
     injected = _inject_tools(codexpro)
     count, dupes = _analyze_tools(injected)
     assert dupes == [], f"Collisions: {dupes}"
-    assert count == 13
+    assert count == 4 + len(_PYTHON_TOOL_DEFS)
     merged = json.loads(injected)["result"]["tools"]
     names = {tool["name"] for tool in merged}
     assert {

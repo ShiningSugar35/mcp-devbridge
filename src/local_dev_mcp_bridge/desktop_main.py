@@ -1175,9 +1175,12 @@ class MainWindow(QMainWindow):
             self.hub_pair_edit.clear()
             self._update_hub_status()
             self.hub_status_label.setText(
-                "已连接主 Hub。下一步：在 ChatGPT 继续使用主 Hub 插件，需要时切换到这台电脑。"
+                "已连接主 Hub。共享模式继续使用主 Hub；如需独立 App，请为本机配置独立固定域名/Tunnel。"
             )
-            self._append_log("这台电脑已加入 Multi-Device Hub；ChatGPT 无需新增第二个同域名插件。")
+            self._append_log(
+                "这台电脑已加入 Multi-Device Hub；不要把 Quick URL 当长期独立 App。"
+                "如需独立 ChatGPT App，请创建本机专属固定域名和独立 Cloudflare Tunnel Token。"
+            )
             self._send_device_heartbeat()
 
         _run_async(work, done)

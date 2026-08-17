@@ -152,21 +152,37 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         "multi-device",
         "两台或多台电脑：Multi-Device Hub",
         ("多设备", "hub", "朋友", "电脑", "配对", "心跳", "client id"),
-        """<h2>Multi-Device Hub</h2>
-        <p>正确目标是：<b>ChatGPT 只创建一个 App，只连接主 Hub 的固定 MCP 地址</b>。连接成功后，再在同一个会话里切换电脑和工作区。</p>
-        <h3>主 Hub 电脑</h3>
-        <ol><li>用 <b>Cloudflare 固定地址</b>或 ngrok 固定地址运行 Hub，例如 <code>https://mcp.example.com/mcp</code>。</li>
-        <li>这个固定域名和它的 Cloudflare Tunnel Token <b>只能部署在主 Hub 电脑</b>。</li>
-        <li>到“设备”页生成 6 位配对码，把“主 Hub MCP 地址 + 配对码”发给朋友。</li></ol>
-        <h3>朋友电脑</h3>
-        <ol><li>安装 MCP DevBridge，添加并启动项目。</li>
-        <li>给朋友电脑准备一个<b>独立的回传地址</b>：推荐 Quick Tunnel，也可以使用 ngrok 或朋友自己的独立域名。不要复制主 Hub 的 Tunnel Token。</li>
-        <li>到“设备”页输入主 Hub MCP 地址和配对码。<b>只需要首次配对一次</b>：成功后的 Hub 地址与设备凭据会安全持久化，之后双方电脑或软件重启都会自动恢复心跳，不需要再次输入配对码。</li></ol>
-        <p>如果首次注册的 HTTP 响应刚好丢失，同一个“配对码 + 设备 ID”在成功后的 <b>30 分钟</b>内可以安全重试，Hub 会返回同一设备凭据，不会重复注册。</p>
-        <h3>ChatGPT 怎么用</h3>
-        <p>ChatGPT 仍然只连接主 Hub，例如 <code>https://mcp.example.com/mcp</code>，不要给朋友电脑再创建第二个同 URL App。</p>
-        <p>之后可以让 AI 依次使用：<b>查看在线设备 → 切换设备 → 查看工作区 → 切换工作区</b>。只有一台设备或只有一个运行中的工作区时会自动选择，减少不必要的询问。</p>
-        <p>朋友使用 Quick Tunnel 时，临时地址变化会通过心跳自动更新到主 Hub，因此 ChatGPT 中的固定 Hub URL 不需要跟着改。</p>""",
+        """<h2>Multi-Device Hub 与双固定 App</h2>
+        <p>v0.9.0 支持两种长期使用方式，可以同时启用。</p>
+        <h3>方式 A：一个共享 Hub App</h3>
+        <ol><li>主机用 <b>Cloudflare 固定地址</b>运行 Hub，例如 <code>https://mcp.example.com/mcp</code>。</li>
+        <li>主 Hub 的 Cloudflare Tunnel Token <b>只部署在主 Hub 电脑</b>。</li>
+        <li>朋友电脑先启动自己的公网回传（Quick/ngrok/独立域名），再用 6 位配对码加入主 Hub。</li>
+        <li>首次成功后 Hub 地址、设备凭据和心跳身份会持久化；重启无需再次配对。Quick 地址变化会由 heartbeat 自动更新到主 Hub。</li></ol>
+        <p>共享 Hub 下可以直接让 AI 用 <code>device_id</code> 查询某台电脑的工作区，不必依赖上一次 transport 的设备切换状态。</p>
+        <h3>方式 B：每台电脑一个固定 App（推荐两个人长期并行）</h3>
+        <p>主机继续使用 <code>mcp.example.com</code>。朋友在 Cloudflare 新建<b>另一个独立 Tunnel</b>，例如发布 <code>jerry.example.com → http://localhost:8786</code>，并把这个新 Tunnel 自己的 Token 填到朋友电脑。</p>
+        <p><b>两台电脑都写 localhost:8786 完全没问题</b>：localhost 属于各自电脑。真正禁止的是两台独立 Gateway 共用同一个 Tunnel UUID/Token；那会形成 replicas，Cloudflare 可能把 OAuth 请求送到不同机器。</p>
+        <p>之后主机 ChatGPT App 连接 <code>https://mcp.example.com/mcp</code>，朋友自己的 App 连接 <code>https://jerry.example.com/mcp</code>，日常不需要切设备。朋友仍可保留 Hub 配对，因此共享 Hub 和独立 App 可以并存。</p>
+        <h3>不要把 Quick URL 当长期独立 App</h3>
+        <p>Quick Tunnel 的随机 URL 在重建后会变化。Hub 心跳能更新远端回传地址，但 ChatGPT 中一个直接绑定旧 Quick URL 的 App 不会自动改地址；长期独立 App 请换固定 Tunnel。</p>
+        <p>如果首次注册的 HTTP 响应丢失，同一个“配对码 + 设备 ID”在成功后的 <b>30 分钟</b>内仍可幂等重试。</p>""",
+    ),
+    ManualTopic(
+        "agent-pool",
+        "Agent Pool：在一个聊天里并发开发",
+        ("agent", "pool", "并发", "worktree", "opencode", "多智能体", "并行开发"),
+        """<h2>Agent Pool</h2>
+        <p>v0.9.0 可以把一个 ChatGPT 会话当作 manager/reviewer，在本机或指定远端设备排队多个实施 Agent，不需要为每个子任务手工新开 ChatGPT 对话。</p>
+        <h3>执行与并发</h3>
+        <ul><li>本地 worker 会探测真正可非交互运行的 <b>OpenCode CLI</b> 与 <b>Claude Code CLI</b>，不会把 Electron 桌面版误判成 worker。可用 CLI 会出现在 capabilities；模型账号认证、额度和 provider 健康在任务运行时验证。</li>
+        <li>单次最多排队 64 个任务；默认真实同时运行 4 个，硬上限 16。其余任务留在队列中，不会为了“看起来并发”把电脑一次拉满。</li>
+        <li>长任务返回 task id 后后台执行；用 list/get/wait/cancel 查看或停止。wait 单次最多 30 秒，不会占住 ChatGPT 的长同步请求。</li></ul>
+        <h3>写代码为什么不会互相踩</h3>
+        <p>写入型任务必须在 Git 仓库里运行。每个 Agent 自动创建独立 <code>git worktree</code> 和 <code>mcp-agent/&lt;id&gt;</code> 分支；主工作区不被子 Agent 直接编辑。完成后用 collect 读取日志、status 和 bounded diff，再由主会话决定如何合并。</p>
+        <p><b>注意：</b>worktree 是 Git 文件隔离，不是 Windows 安全沙箱。OpenCode / Claude Code 进程仍继承当前用户权限；因此 Agent Pool 不自动 push，也不自动 merge 主分支。</p>
+        <h3>跨电脑</h3>
+        <p>共享 Hub 下，Agent Pool 工具支持正式 <code>device_id</code>；spawn/spawn_batch 还支持 <code>project_id</code>。因此 manager 可以直接指定“在哪台电脑的哪个运行项目里启动 Agent”，不依赖上一条设备切换状态。</p>""",
     ),
     ManualTopic(
         "runtime",

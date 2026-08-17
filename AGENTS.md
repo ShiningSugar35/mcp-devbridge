@@ -74,6 +74,7 @@ mcp-devBridge/
 │       ├── config_store.py     # 读/写这些 JSON；功能探测；命令建议
 │       ├── secrets.py          # Bearer 令牌（Win CredManager + DPAPI 回退文件 secrets.dpapi.json）
 │       ├── audit.py            # 审计日志 + 密钥脱敏
+│       ├── agent_pool.py       # v0.9 本地并发 Agent 池：OpenCode/Claude Code + worktree + bounded queue
 │       ├── shell.py            # PowerShell 命令执行、进程树终止、环境探测
 │       ├── processes.py        # 受管进程注册（dev server 等）
 │       ├── permissions.py      # 权限：read_only / workspace / system
@@ -144,6 +145,11 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 ---
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
+
+- 2026-08-17 · **v0.9.0 双固定域名 / Multi-Device 显式路由 / Agent Pool**：
+  - 工作区管理工具正式支持 `device_id`，共享 Hub 可跨 ChatGPT transport 无状态指定远端电脑；Quick heartbeat 继续更新动态回传 URL，但直接绑定 Quick URL 的 App 只作为临时连接。
+  - 多人长期使用推荐每台电脑独立 Cloudflare Tunnel UUID/Token/hostname；不同电脑均可绑定各自 `localhost:8786`，严禁两台独立 OAuth Gateway 复用同一 Tunnel replica 身份。
+  - 新增 `agent_pool.py` 与 `agent_pool_*` Gateway tools：OpenCode/Claude Code worker、默认 4/硬上限 16 物理并发、单批 64、写任务 Git worktree 隔离、取消/收集/清理与 interrupted 恢复。
 
 - 2026-08-17 · **v0.8.1 多工作区/ChatGPT stateless transport 热修**：
   - 不再把工作区/设备选择仅绑定 `mcp-session-id`；工具 schema 增加可选显式路由提示，兼容 ChatGPT 在连续工具调用间重建 MCP transport 的行为。

@@ -46,6 +46,7 @@ from starlette.responses import (
 from starlette.routing import Route
 
 from . import constants
+from .agent_pool import AgentPool
 from .audit import AuditLogger
 from .constants import LOG_DIR as _LOG_DIR
 from .device_hub import DeviceRegistry
@@ -60,6 +61,28 @@ _DEVICE_TOOL_NAMES = frozenset(
         "devbridge_switch_device",
     }
 )
+_REMOTE_WORKSPACE_TOOL_NAMES = frozenset(
+    {
+        "devbridge_list_workspaces",
+        "devbridge_get_current_workspace",
+        "devbridge_switch_workspace",
+    }
+)
+_AGENT_POOL_TOOL_NAMES = frozenset(
+    {
+        "agent_pool_capabilities",
+        "agent_pool_spawn",
+        "agent_pool_spawn_batch",
+        "agent_pool_list",
+        "agent_pool_get",
+        "agent_pool_wait",
+        "agent_pool_cancel",
+        "agent_pool_collect",
+        "agent_pool_cleanup",
+    }
+)
+_FORMAL_DEVICE_ROUTE_TOOL_NAMES = _REMOTE_WORKSPACE_TOOL_NAMES | _AGENT_POOL_TOOL_NAMES
+_AGENT_POOL_SPAWN_TOOL_NAMES = frozenset({"agent_pool_spawn", "agent_pool_spawn_batch"})
 _LOCAL_TOOL_NAMES = (
     frozenset(
         {
@@ -72,6 +95,7 @@ _LOCAL_TOOL_NAMES = (
         }
     )
     | _DEVICE_TOOL_NAMES
+    | _AGENT_POOL_TOOL_NAMES
 )
 
 _ROUTE_WORKSPACE_ARG = "devbridge_workspace_id"
@@ -138,18 +162,28 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "devbridge_list_workspaces",
-        "description": "List all registered project workspaces with path, status, and CodexPro port.",
+        "description": "List registered project workspaces. Pass device_id to query a specific online computer without relying on session switch state.",
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Optional device ID from devbridge_list_devices. Omit for the current/default computer.",
+                }
+            },
         },
     },
     {
         "name": "devbridge_get_current_workspace",
-        "description": "Return the workspace project bound to the current MCP session.",
+        "description": "Return the current workspace on a computer. Pass device_id for a stateless remote-device query.",
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Optional device ID from devbridge_list_devices.",
+                }
+            },
         },
     },
     {
@@ -161,6 +195,10 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
                 "project_id": {
                     "type": "string",
                     "description": "Project ID from devbridge_list_workspaces output",
+                },
+                "device_id": {
+                    "type": "string",
+                    "description": "Optional device ID. When supplied, switches the workspace on that computer without depending on a previous device switch.",
                 },
             },
             "required": ["project_id"],
@@ -188,6 +226,114 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
                 },
             },
             "required": ["device_id"],
+        },
+    },
+    {
+        "name": "agent_pool_capabilities",
+        "description": "Show local Agent Pool executor availability, physical concurrency limits, and worktree-isolation support.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "device_id": {"type": "string", "description": "Optional target device ID."}
+            },
+        },
+    },
+    {
+        "name": "agent_pool_spawn",
+        "description": "Queue one local implementation agent. Write-capable tasks use an isolated Git worktree/branch; the call returns immediately while physical concurrency stays bounded.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Detailed bounded task for the worker agent."},
+                "title": {"type": "string", "description": "Short task title."},
+                "executor": {"type": "string", "enum": ["auto", "opencode", "claude"], "description": "Local executor. auto uses the preferred available CLI."},
+                "model": {"type": "string", "description": "Optional provider/model identifier understood by OpenCode."},
+                "write": {"type": "boolean", "description": "Allow code changes. Defaults true and requires a Git repository/worktree."},
+                "device_id": {"type": "string", "description": "Optional target device ID."},
+                "project_id": {"type": "string", "description": "Optional running project ID on the target device."},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "agent_pool_spawn_batch",
+        "description": "Queue up to 64 independent agent tasks. Tasks may outnumber the physical concurrency limit and will wait in the local queue.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string"},
+                            "title": {"type": "string"},
+                            "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                            "model": {"type": "string"},
+                            "write": {"type": "boolean"},
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+                "device_id": {"type": "string", "description": "Optional target device ID."},
+                "project_id": {"type": "string", "description": "Optional running project ID on the target device."}
+            },
+            "required": ["tasks"],
+        },
+    },
+    {
+        "name": "agent_pool_list",
+        "description": "List recent Agent Pool tasks, including queued/running counts and the physical concurrency limit.",
+        "inputSchema": {"type": "object", "properties": {"device_id": {"type": "string", "description": "Optional target device ID."}}},
+    },
+    {
+        "name": "agent_pool_get",
+        "description": "Get one Agent Pool task state and bounded output tail.",
+        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "device_id": {"type": "string", "description": "Optional target device ID."}}, "required": ["task_id"]},
+    },
+    {
+        "name": "agent_pool_wait",
+        "description": "Wait briefly for one Agent Pool task. The polling wait is capped at 30 seconds and never limits the worker process itself.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "wait_seconds": {"type": "integer", "minimum": 1, "maximum": 30},
+                "device_id": {"type": "string", "description": "Optional target device ID."},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "agent_pool_cancel",
+        "description": "Cancel a queued/running Agent Pool task and terminate its process tree.",
+        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "device_id": {"type": "string", "description": "Optional target device ID."}}, "required": ["task_id"]},
+    },
+    {
+        "name": "agent_pool_collect",
+        "description": "Collect a terminal Agent Pool task with output tail plus bounded Git status/diff from its isolated worktree.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "include_diff": {"type": "boolean", "description": "Include bounded unified diff. Defaults true."},
+                "device_id": {"type": "string", "description": "Optional target device ID."},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "agent_pool_cleanup",
+        "description": "Remove a terminal task's worktree. The agent branch is preserved unless remove_branch=true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "remove_branch": {"type": "boolean", "description": "Also delete the agent branch. Defaults false."},
+                "device_id": {"type": "string", "description": "Optional target device ID."},
+            },
+            "required": ["task_id"],
         },
     },
 ]
@@ -624,6 +770,7 @@ class OAuthGateway:
         self._upstream_sessions: dict[str, dict[str, str]] = {}
         self._initialize_requests: dict[str, bytes] = {}
         self._session_lock = threading.Lock()
+        self._agent_pool: AgentPool | None = None
 
     # ------------------------------------------------------------ build
     @property
@@ -799,8 +946,18 @@ class OAuthGateway:
                 rpc = None
 
         call_arguments = _tool_arguments(rpc.get("params") if rpc is not None else {})
-        route_workspace_id = str(call_arguments.get(_ROUTE_WORKSPACE_ARG) or "").strip()
-        route_device_id = str(call_arguments.get(_ROUTE_DEVICE_ARG) or "").strip()
+        synthetic_workspace_route = str(call_arguments.get(_ROUTE_WORKSPACE_ARG) or "").strip()
+        synthetic_device_route = str(call_arguments.get(_ROUTE_DEVICE_ARG) or "").strip()
+        route_workspace_id = synthetic_workspace_route
+        route_device_id = synthetic_device_route
+        if not route_device_id and tool_name in _FORMAL_DEVICE_ROUTE_TOOL_NAMES:
+            route_device_id = str(call_arguments.get("device_id") or "").strip()
+        if (
+            not route_workspace_id
+            and tool_name in _AGENT_POOL_SPAWN_TOOL_NAMES
+            and (not route_device_id or route_device_id == self._local_device_id)
+        ):
+            route_workspace_id = str(call_arguments.get("project_id") or "").strip()
 
         proxy_token: str | None = None
         workspace_id = ""
@@ -847,7 +1004,7 @@ class OAuthGateway:
                 if target_view is None or not target_view.online:
                     return JSONResponse(_jsonrpc_error(None, -32001, "指定电脑当前不可用。"), status_code=502)
             device_id = route_device_id
-            if session_id:
+            if session_id and synthetic_device_route:
                 with self._session_lock:
                     self._session_devices[session_id] = device_id
         else:
@@ -875,7 +1032,7 @@ class OAuthGateway:
                         status_code=502,
                     )
                 workspace_id = route_workspace_id
-                if session_id:
+                if session_id and synthetic_workspace_route:
                     with self._session_lock:
                         self._session_workspaces[session_id] = workspace_id
             workspace_id = self._effective_workspace(
@@ -1050,6 +1207,12 @@ class OAuthGateway:
             headers=filtered,
         )
 
+    # ------------------------------------------------------- Agent Pool
+    def _get_agent_pool(self) -> AgentPool:
+        if self._agent_pool is None:
+            self._agent_pool = AgentPool()
+        return self._agent_pool
+
     # ---------------------------------------------------- local tools
     async def _exec_local_tool(
         self,
@@ -1195,6 +1358,50 @@ class OAuthGateway:
                         },
                     )
                 )
+            elif name == "agent_pool_capabilities":
+                return JSONResponse(_jsonrpc_result(rpc_id, self._get_agent_pool().capabilities()))
+            elif name == "agent_pool_spawn":
+                result = self._get_agent_pool().spawn(
+                    workspace=workspace,
+                    prompt=str(arguments.get("prompt") or ""),
+                    title=str(arguments.get("title") or ""),
+                    executor=str(arguments.get("executor") or "auto"),
+                    model=str(arguments.get("model") or ""),
+                    write=bool(arguments.get("write", True)),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "agent_pool_spawn_batch":
+                raw_tasks = arguments.get("tasks") or []
+                if not isinstance(raw_tasks, list):
+                    raise ValueError("tasks 必须是数组。")
+                result = self._get_agent_pool().spawn_batch(workspace=workspace, tasks=raw_tasks)
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "agent_pool_list":
+                return JSONResponse(_jsonrpc_result(rpc_id, self._get_agent_pool().list()))
+            elif name == "agent_pool_get":
+                result = self._get_agent_pool().get(str(arguments.get("task_id") or ""))
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "agent_pool_wait":
+                result = self._get_agent_pool().wait(
+                    str(arguments.get("task_id") or ""),
+                    int(arguments.get("wait_seconds") or 15),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "agent_pool_cancel":
+                result = self._get_agent_pool().cancel(str(arguments.get("task_id") or ""))
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "agent_pool_collect":
+                result = self._get_agent_pool().collect(
+                    str(arguments.get("task_id") or ""),
+                    include_diff=bool(arguments.get("include_diff", True)),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "agent_pool_cleanup":
+                result = self._get_agent_pool().cleanup(
+                    str(arguments.get("task_id") or ""),
+                    remove_branch=bool(arguments.get("remove_branch", False)),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
             else:
                 raise ValueError(f"未知的本地工具: {name}")
         except ValueError as exc:
