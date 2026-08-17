@@ -104,6 +104,7 @@ MCP DevBridge 解决的就是中间这一层：
 
 - **修复 ChatGPT 切换工作区后又回到入口项目**：ChatGPT 可能在连续工具调用之间重建底层 MCP transport，v0.8.0 只按 `mcp-session-id` 保存工作区会失效。v0.8.1 为工具增加可选的 `devbridge_workspace_id / devbridge_device_id` 路由提示，切换工具返回路由值，后续调用显式携带，因此不再依赖同一个 transport session。
 - **多项目真正同时在线**：主 Hub 只保留一个固定地址/Gateway；每个已启动项目继续拥有独立 CodexPro 端口，GPT 可在同一聊天中切换 C:\、D:\ 等项目。
+- **升级保持多项目运行态**：detached updater 会在替换旧进程前记录所有正在监听的项目引擎，升级后恢复入口服务并并行恢复其余项目，不再只恢复项目 A。
 - **每个项目独立上游 MCP Session**：Gateway 为同一 ChatGPT 会话在每个 CodexPro/远端设备上分别维护上游 session；切换项目时懒初始化目标引擎并改写上游 `mcp-session-id`，避免不同项目各自 session 表导致 `Session not found`。
 - **修复 Gateway 本地命令参数**：`run_command / run_program` 正确读取 MCP `params.arguments`。
 - **修复“正在启动项目引擎”日志卡住**：异步 Qt signal 在 GUI 回调执行前保持强引用，避免项目已经 READY 但完成消息丢失。

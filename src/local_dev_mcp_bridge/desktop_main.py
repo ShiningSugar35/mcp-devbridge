@@ -2843,6 +2843,14 @@ class MainWindow(QMainWindow):
             return
         request_file.unlink(missing_ok=True)
         project_root = str(payload.get("project_root") or "").strip()
+        raw_project_roots = payload.get("project_roots") or []
+        project_roots = [
+            str(item).strip()
+            for item in raw_project_roots
+            if str(item).strip()
+        ] if isinstance(raw_project_roots, list) else []
+        if project_root and project_root not in project_roots:
+            project_roots.insert(0, project_root)
         if not project_root:
             self._append_log("升级接力未恢复服务：缺少项目路径。")
             return
@@ -2860,6 +2868,25 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"检测到升级接力请求，正在恢复 {project.display_name or project.root_path} …")
         self._start_service()
+        restored_extra = 0
+        for extra_root in project_roots:
+            if _same_root(extra_root, project.root_path):
+                continue
+            extra = self.pm.by_root(extra_root)
+            if extra is None:
+                self._append_log(f"升级接力跳过不存在的项目：{extra_root}")
+                continue
+            if extra.permission_mode == "system" and (
+                not self._app_config.first_system_risk_accepted
+                or not self._app_config.full_system_risk_accepted
+            ):
+                self._append_log(f"升级接力未自动恢复 {extra.display_name or extra.root_path}：完全访问模式尚未确认。")
+                continue
+            self._append_log(f"升级接力同时恢复项目引擎：{extra.display_name or extra.root_path}")
+            self._start_project_engine_for(extra)
+            restored_extra += 1
+        if restored_extra:
+            self._append_log(f"升级接力已安排恢复额外项目：{restored_extra} 个。")
 
     # --------------------------------------------------------------- end
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming

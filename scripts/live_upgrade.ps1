@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$InstallerPath = "",
     [string]$ProjectRoot = "",
@@ -107,9 +107,37 @@ if (-not $Worker) {
     }
     if ($FallbackExe) { $FallbackExe = [IO.Path]::GetFullPath($FallbackExe) }
 
+    # Preserve every currently-running project engine, not only the public entry project.
+    # Each additional project has its own CodexPro port and can be restored independently
+    # after the desktop process tree is replaced by the installer.
+    $resumeProjectRoots = @()
+    $projectsPath = Join-Path $ConfigDir "projects.json"
+    if (Test-Path -LiteralPath $projectsPath) {
+        try {
+            $projectPayload = Get-Content -LiteralPath $projectsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($candidateProject in @($projectPayload.projects)) {
+                $candidateRoot = [string]$candidateProject.root_path
+                $candidatePort = [int]$candidateProject.codexpro_port
+                if ($candidateRoot -and $candidatePort -gt 0 -and (Test-LoopbackPort -Port $candidatePort)) {
+                    $normalizedRoot = [IO.Path]::GetFullPath($candidateRoot)
+                    if ($resumeProjectRoots -notcontains $normalizedRoot) {
+                        $resumeProjectRoots += $normalizedRoot
+                    }
+                }
+            }
+        }
+        catch {
+            Write-UpgradeLog "Unable to snapshot additional running projects: $($_.Exception.Message)"
+        }
+    }
+    if ($ProjectRoot -and $resumeProjectRoots -notcontains $ProjectRoot) {
+        $resumeProjectRoots = @($ProjectRoot) + @($resumeProjectRoots)
+    }
+
     $request = [ordered]@{
         installer_path = $InstallerPath
         project_root = $ProjectRoot
+        resume_project_roots = @($resumeProjectRoots)
         old_pid = $OldPid
         fallback_exe = $FallbackExe
         dry_run = [bool]$DryRun
@@ -165,6 +193,7 @@ try {
     if ($projectRoot) {
         Write-JsonAtomic -Path $resumePath -Value ([ordered]@{
             project_root = $projectRoot
+            project_roots = @($request.resume_project_roots)
             requested_at = (Get-Date).ToString("o")
         })
         Write-UpgradeLog "Resume request written for project: $projectRoot"

@@ -11,6 +11,7 @@ All dates are local development dates.
 - Fix Gateway-local `run_command` / `run_program` parsing of MCP `params.arguments`; cap these synchronous compatibility tools at 20 seconds and direct long builds/tests/installations to background `bash` tasks with bounded `wait_task` / `get_task` polling to reduce ChatGPT tool-stream timeout risk.
 - Keep PySide async completion bridges alive until their GUI callback executes, preventing a project from reaching READY while the runtime log remains stuck at “starting”.
 - Give drive-root projects such as `C:\` and `D:\` non-empty display names.
+- Preserve all running project engines across detached upgrades: the updater snapshots listening project ports before terminating the old tree and the new desktop restores the entry service plus additional engines.
 
 ## 0.8.0 (2026-08-17) — persistent pairing and bundled runtime
 
