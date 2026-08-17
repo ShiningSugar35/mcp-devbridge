@@ -18,13 +18,15 @@ import os
 import shutil
 import socket
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
-from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QLockFile, QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -71,7 +73,7 @@ from .config_store import (
     save_app_config,
 )
 from .device_hub import HUB_PEER_SECRET_KEY, DeviceRegistry, mcp_base_url, normalize_mcp_url
-from .engines import EngineState
+from .engines import EngineState, find_node, find_uvx
 from .help_content import (
     HELP_CONNECTION_INFO,
     HELP_CONNECTION_METHOD,
@@ -86,6 +88,7 @@ from .oauth_provider import get_or_create_gemini_client
 from .project_manager import ProjectManager
 from .project_secrets import (
     activate_project_access_token,
+    clear_project_tunnel_token,
     ensure_project_access_token,
     get_project_access_token,
     get_project_tunnel_token,
@@ -98,6 +101,13 @@ from .selftest import SelftestResult, run_selftest
 from .shell import get_shell_info
 from .shell import run_program as _run_program
 from .tunnel_manager import ConnectionMethod
+from .update_manager import (
+    ReleaseInfo,
+    download_installer,
+    fetch_latest_release,
+    is_newer,
+    launch_update,
+)
 
 # 权限模式（与命令执行档位合二为一）：
 #   只读     = read_only  + safe        （只读安全操作）
@@ -236,6 +246,9 @@ class MainWindow(QMainWindow):
         self._force_exit = False
         self._tray_hint_shown = False
         self._device_heartbeat_busy = False
+        self._latest_release: ReleaseInfo | None = None
+        self._update_check_busy = False
+        self._update_notice_shown = False
         self._test_outputs: dict[str, str] = {}
         self._diag_outputs: dict[str, str] = {}
         self._tunnel_token_default = ""
@@ -255,6 +268,12 @@ class MainWindow(QMainWindow):
         self._device_timer.start(15000)
         QTimer.singleShot(1500, self._resume_upgrade_if_requested)
         QTimer.singleShot(3000, self._send_device_heartbeat)
+        QTimer.singleShot(5000, self._check_for_updates)
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self._check_for_updates)
+        self._update_timer.start(12 * 60 * 60 * 1000)
+        QTimer.singleShot(1000, self._sanitize_remote_replica_configuration)
+        QTimer.singleShot(2000, self._runtime_preflight)
 
     def _help_label(self, text: str, html: str) -> QWidget:
         holder = QWidget()
@@ -294,6 +313,15 @@ class MainWindow(QMainWindow):
         title_col.addWidget(title)
         title_col.addWidget(subtitle)
         header.addLayout(title_col, 1)
+        self.update_btn = QToolButton()
+        self.update_btn.setText("↑")
+        self.update_btn.setObjectName("UpdateButton")
+        self.update_btn.setToolTip("发现新版本")
+        self.update_btn.setFixedSize(30, 30)
+        self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_btn.setVisible(False)
+        self.update_btn.clicked.connect(self._show_update_dialog)
+        header.addWidget(self.update_btn)
         version = QLabel(f"v{__version__}")
         version.setObjectName("VersionBadge")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -416,8 +444,8 @@ class MainWindow(QMainWindow):
         gemini_form.addRow("Client Secret:", secret_row)
 
 
-        self.gemini_id_copy.clicked.connect(lambda: self._copy_text(self.gemini_id_edit.text()))
-        self.gemini_secret_copy.clicked.connect(lambda: self._copy_text(self._gemini_secret))
+        self.gemini_id_copy.clicked.connect(lambda: self._copy_with_feedback(self.gemini_id_copy, self.gemini_id_edit.text()))
+        self.gemini_secret_copy.clicked.connect(lambda: self._copy_with_feedback(self.gemini_secret_copy, self._gemini_secret))
         cfg_form.addRow("", self.gemini_box)
 
         if self.gemini_uri_edit.text():
@@ -503,9 +531,9 @@ class MainWindow(QMainWindow):
         self.token_copy_btn = QPushButton("复制令牌")
         self.token_regenerate_btn = QPushButton("重新生成")
         self.url_copy_btn = QPushButton("复制地址")
-        self.token_copy_btn.clicked.connect(lambda: self._copy_to_clipboard(self._current_token))
+        self.token_copy_btn.clicked.connect(lambda: self._copy_with_feedback(self.token_copy_btn, self._current_token))
         self.token_regenerate_btn.clicked.connect(self._regenerate_token)
-        self.url_copy_btn.clicked.connect(lambda: self._copy_to_clipboard(self._display_url()))
+        self.url_copy_btn.clicked.connect(lambda: self._copy_with_feedback(self.url_copy_btn, self._display_url()))
         tok_row.addWidget(self.token_copy_btn)
         tok_row.addWidget(self.token_regenerate_btn)
         tok_row.addWidget(self.url_copy_btn)
@@ -540,7 +568,7 @@ class MainWindow(QMainWindow):
         service_row.setSpacing(8)
         service_row.addWidget(self.service_url_edit, 1)
         self.service_url_copy_btn = QPushButton("复制 Gateway 地址")
-        self.service_url_copy_btn.clicked.connect(lambda: self._copy_text(self._service_url_text()))
+        self.service_url_copy_btn.clicked.connect(lambda: self._copy_with_feedback(self.service_url_copy_btn, self._service_url_text()))
         service_row.addWidget(self.service_url_copy_btn)
         tok_layout.addLayout(service_row)
 
@@ -661,6 +689,24 @@ class MainWindow(QMainWindow):
                 problems.append((
                     "找不到项目文件夹",
                     "回到工作台移除这个项目，再重新添加正确的项目目录。",
+                ))
+
+            node_exe = find_node()
+            if node_exe:
+                ok_items.append("项目引擎运行组件已经就绪")
+                details.append(f"Node.js：{node_exe}")
+            else:
+                problems.append((
+                    "安装包缺少项目引擎运行组件",
+                    "请重新安装 MCP DevBridge 正式版；正式安装包会自带 Node.js，不需要单独安装或修改 PATH。",
+                ))
+            uvx_exe = find_uvx()
+            if uvx_exe:
+                details.append(f"uvx：{uvx_exe}")
+            elif project.windows_enabled:
+                problems.append((
+                    "Windows 控制运行组件不完整",
+                    "请重新安装 MCP DevBridge 正式版；安装包会自带 uv/uvx。首次启用 Windows 控制时仍需要联网获取锁定的 Windows-MCP 组件。",
                 ))
 
             access_value = get_project_access_token(project.id) or ""
@@ -947,7 +993,7 @@ class MainWindow(QMainWindow):
         join_form.addRow("状态", self.hub_status_label)
         layout.addWidget(join_box)
 
-        connected_box = QGroupBox("已连接的电脑")
+        connected_box = QGroupBox("在线设备")
         connected_v = QVBoxLayout(connected_box)
         connected_v.setContentsMargins(14, 18, 14, 14)
         self.device_table = QTableWidget(0, 4)
@@ -965,6 +1011,48 @@ class MainWindow(QMainWindow):
         self._refresh_device_table()
         self._update_hub_status()
 
+    @staticmethod
+    def _host_of(value: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        try:
+            return (urlsplit(raw if "://" in raw else f"https://{raw}").hostname or "").casefold()
+        except ValueError:
+            return ""
+
+    def _named_tunnel_conflicts_with_hub(self, hub_mcp: str) -> bool:
+        project = self._project_config()
+        return bool(
+            project
+            and project.connection == ConnectionMethod.CLOUDFLARE.value
+            and self._host_of(project.public_hostname)
+            and self._host_of(project.public_hostname) == self._host_of(hub_mcp)
+        )
+
+    def _sanitize_remote_replica_configuration(self) -> None:
+        peer = SecretsStore().get(HUB_PEER_SECRET_KEY) or ""
+        hub = self._app_config.hub_url.strip()
+        hub_host = self._host_of(hub)
+        if not peer or not hub_host:
+            return
+        changed = False
+        for project in self.pm.list():
+            if (
+                project.connection == ConnectionMethod.CLOUDFLARE.value
+                and self._host_of(project.public_hostname) == hub_host
+            ):
+                project.connection = ConnectionMethod.QUICK.value
+                project.public_hostname = ""
+                self.pm.update(project)
+                clear_project_tunnel_token(project.id)
+                changed = True
+        if changed:
+            self._append_log(
+                "检测到远端设备复用了主 Hub 的 Cloudflare Tunnel；已自动改为 Quick Tunnel，避免 OAuth 请求被分流到错误电脑。"
+            )
+            self._apply_selected_project()
+
     def _save_device_name(self) -> None:
         name = self.device_name_edit.text().strip() or socket.gethostname() or "本机"
         self.device_name_edit.setText(name)
@@ -979,6 +1067,7 @@ class MainWindow(QMainWindow):
         until = datetime.datetime.fromtimestamp(expires).strftime("%H:%M")
         self.pair_code_edit.setToolTip(f"此配对码将在 {until} 过期，并且成功使用一次后立即失效。")
         QApplication.clipboard().setText(code)
+        self._flash_button_success(self.pair_code_btn, "已复制")
         self._append_log("已生成一次性设备配对码，并复制到剪贴板。")
 
     def _entry_project(self) -> ProjectConfig | None:
@@ -1019,25 +1108,41 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Hub 地址不正确", str(exc))
             return
         public_url, token = public
+        if self._named_tunnel_conflicts_with_hub(hub_mcp):
+            QMessageBox.warning(
+                self,
+                "不能复用主 Hub 的 Cloudflare Tunnel",
+                "这台电脑正在使用与主 Hub 相同的固定域名/Tunnel。这样会让 Cloudflare 把同一 OAuth 请求随机送到两台电脑，导致 Client ID not found。\n\n"
+                "请把这台远端电脑的连接方式改为 Quick Tunnel、ngrok 或它自己的独立域名。ChatGPT 仍然只连接主 Hub 的固定地址。",
+            )
+            return
         self.join_hub_btn.setEnabled(False)
         self.hub_status_label.setText("正在配对…")
 
         def work() -> dict[str, Any]:
-            response = httpx.post(
-                f"{hub_base}/device/register",
-                json={
-                    "pair_code": pair_code,
-                    "device_id": self._app_config.device_id,
-                    "name": self._app_config.device_name,
-                    "mcp_url": public_url,
-                    "bearer": token,
-                },
-                timeout=20.0,
-            )
-            payload = response.json()
-            if response.status_code >= 400 or not payload.get("ok"):
-                raise RuntimeError(str(payload.get("message") or f"HTTP {response.status_code}"))
-            return {"hub_mcp": hub_mcp, "peer": str(payload.get("peer_secret") or "")}
+            last_error: Exception | None = None
+            for attempt in range(3):
+                try:
+                    response = httpx.post(
+                        f"{hub_base}/device/register",
+                        json={
+                            "pair_code": pair_code,
+                            "device_id": self._app_config.device_id,
+                            "name": self._app_config.device_name,
+                            "mcp_url": public_url,
+                            "bearer": token,
+                        },
+                        timeout=12.0,
+                    )
+                    payload = response.json()
+                    if response.status_code >= 400 or not payload.get("ok"):
+                        raise RuntimeError(str(payload.get("message") or f"HTTP {response.status_code}"))
+                    return {"hub_mcp": hub_mcp, "peer": str(payload.get("peer_secret") or "")}
+                except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                    last_error = exc
+                    if attempt < 2:
+                        time.sleep(1.0)
+            raise RuntimeError(str(last_error or "配对请求失败"))
 
         def done(result: Any) -> None:
             self.join_hub_btn.setEnabled(True)
@@ -1054,7 +1159,10 @@ class MainWindow(QMainWindow):
             self.hub_url_edit.setText(self._app_config.hub_url)
             self.hub_pair_edit.clear()
             self._update_hub_status()
-            self._append_log("这台电脑已加入 Multi-Device Hub。")
+            self.hub_status_label.setText(
+                "已连接主 Hub。下一步：在 ChatGPT 继续使用主 Hub 插件，需要时切换到这台电脑。"
+            )
+            self._append_log("这台电脑已加入 Multi-Device Hub；ChatGPT 无需新增第二个同域名插件。")
             self._send_device_heartbeat()
 
         _run_async(work, done)
@@ -1062,7 +1170,7 @@ class MainWindow(QMainWindow):
     def _update_hub_status(self) -> None:
         peer = SecretsStore().get(HUB_PEER_SECRET_KEY)
         if self._app_config.hub_url and peer:
-            self.hub_status_label.setText(f"已加入 Hub：{self._app_config.hub_url}")
+            self.hub_status_label.setText(f"已连接主 Hub：{self._app_config.hub_url}")
         else:
             self.hub_status_label.setText("未加入其它 Hub")
 
@@ -1264,6 +1372,104 @@ class MainWindow(QMainWindow):
         self._app_config.close_behavior = "exit" if value == "exit" else "tray"
         save_app_config(self._app_config)
 
+    def _flash_button_success(self, button: QPushButton | QToolButton, text: str = "复制成功") -> None:
+        original = button.text()
+        old_style = button.styleSheet()
+        button.setText(text)
+        button.setStyleSheet("background:#dcfce7;color:#15803d;border:1px solid #86efac;font-weight:600;")
+        QTimer.singleShot(1300, lambda: (button.setText(original), button.setStyleSheet(old_style)))
+
+    def _copy_with_feedback(self, button: QPushButton | QToolButton, text: str) -> None:
+        value = (text or "").strip()
+        if not value or value in {"—", "选择项目后显示"}:
+            return
+        QApplication.clipboard().setText(value)
+        self._flash_button_success(button)
+
+    def _check_for_updates(self) -> None:
+        if self._update_check_busy:
+            return
+        self._update_check_busy = True
+
+        def work() -> ReleaseInfo:
+            return fetch_latest_release()
+
+        def done(result: Any) -> None:
+            self._update_check_busy = False
+            if isinstance(result, Exception):
+                return
+            if is_newer(result.version, __version__):
+                self._latest_release = result
+                self.update_btn.setVisible(True)
+                self.update_btn.setToolTip(f"发现 v{result.version}，点击更新")
+                if not self._update_notice_shown and self.tray_icon.isVisible():
+                    self.tray_icon.showMessage(
+                        "MCP DevBridge 有新版本",
+                        f"v{result.version} 已发布，点击主窗口右上角 ↑ 可安装。",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        5000,
+                    )
+                    self._update_notice_shown = True
+            else:
+                self._latest_release = None
+                self.update_btn.setVisible(False)
+
+        _run_async(work, done)
+
+    def _show_update_dialog(self) -> None:
+        info = self._latest_release
+        if info is None:
+            self._check_for_updates()
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"更新 MCP DevBridge · v{info.version}")
+        dialog.resize(620, 430)
+        layout = QVBoxLayout(dialog)
+        title = QLabel(f"发现新版本 v{info.version}")
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
+        desc = QLabel("安装会自动关闭当前 MCP DevBridge、保留配置并重新启动。")
+        desc.setObjectName("MutedText")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+        notes = QTextBrowser()
+        notes.setPlainText(info.notes or "此版本没有附加说明。")
+        layout.addWidget(notes, 1)
+        buttons = QDialogButtonBox()
+        install_btn = buttons.addButton("下载并安装", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_btn = buttons.addButton("稍后", QDialogButtonBox.ButtonRole.RejectRole)
+        cancel_btn.clicked.connect(dialog.reject)
+        install_btn.clicked.connect(lambda: (dialog.accept(), self._download_and_install_update(info)))
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def _download_and_install_update(self, info: ReleaseInfo) -> None:
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("…")
+        self._append_log(f"正在下载 v{info.version} 更新…")
+
+        def work() -> Path:
+            return download_installer(info)
+
+        def done(result: Any) -> None:
+            if isinstance(result, Exception):
+                self.update_btn.setEnabled(True)
+                self.update_btn.setText("↑")
+                QMessageBox.warning(self, "更新失败", str(result))
+                return
+            try:
+                root = self._service_root or self._selected_root() or (self._app_config.active_workspace or "")
+                launch_update(result, project_root=root)
+            except Exception as exc:
+                self.update_btn.setEnabled(True)
+                self.update_btn.setText("↑")
+                QMessageBox.warning(self, "无法启动安装", str(exc))
+                return
+            self._append_log("安装程序已就绪，MCP DevBridge 将自动重启。")
+            self.update_btn.setToolTip("正在更新…")
+
+        _run_async(work, done)
+
     def _setup_tray(self) -> None:
         self.tray_icon = QSystemTrayIcon(self)
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
@@ -1271,13 +1477,13 @@ class MainWindow(QMainWindow):
         self.tray_icon.setIcon(icon)
         self.tray_icon.setToolTip("MCP DevBridge")
         menu = QMenu(self)
-        show_action = QAction("显示主窗口", self)
-        show_action.triggered.connect(self._show_from_tray)
-        exit_action = QAction("退出 MCP DevBridge", self)
-        exit_action.triggered.connect(self._quit_from_tray)
-        menu.addAction(show_action)
+        self.tray_show_action = QAction("显示主窗口", self)
+        self.tray_show_action.triggered.connect(self._show_from_tray)
+        self.tray_exit_action = QAction("退出 MCP DevBridge", self)
+        self.tray_exit_action.triggered.connect(self._quit_from_tray)
+        menu.addAction(self.tray_show_action)
         menu.addSeparator()
-        menu.addAction(exit_action)
+        menu.addAction(self.tray_exit_action)
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._tray_activated)
         self.tray_icon.show()
@@ -1295,8 +1501,19 @@ class MainWindow(QMainWindow):
             self._show_from_tray()
 
     def _quit_from_tray(self) -> None:
+        if self._closing:
+            return
         self._force_exit = True
-        self.close()
+        self.tray_exit_action.setEnabled(False)
+        self.tray_exit_action.setText("正在退出…")
+        QTimer.singleShot(0, self.close)
+        QTimer.singleShot(12000, self._shutdown_watchdog)
+
+    def _shutdown_watchdog(self) -> None:
+        if not self._closing:
+            return
+        self.tray_icon.hide()
+        QApplication.quit()
 
     def _build_process_log_tab(self) -> None:
         proc_tab = QWidget()
@@ -1465,7 +1682,7 @@ class MainWindow(QMainWindow):
                     svc_btn.setEnabled(False)
                 elif state_obj == EngineState.ERROR:
                     svc_btn.setText("重新启动")
-                if busy:
+                if busy and state_obj not in (EngineState.READY, EngineState.IDLE, EngineState.ERROR):
                     svc_btn.setEnabled(False)
                 svc_btn.setToolTip(f"启动或停止 {view.name}")
                 svc_btn.clicked.connect(
@@ -1571,6 +1788,19 @@ class MainWindow(QMainWindow):
     def _selected_execution_profile(self) -> str:
         """Command profile follows the selected permission mode."""
         return PERMISSION_PROFILE.get(self._selected_permission_mode(), "full_system")
+
+    def _runtime_preflight(self) -> None:
+        missing: list[str] = []
+        if not find_node():
+            missing.append("Node.js")
+        if any(project.windows_enabled for project in self.pm.list()) and not find_uvx():
+            missing.append("uv/uvx")
+        if missing:
+            self._append_log(
+                "运行组件自检发现缺失：" + "、".join(missing) + "。正式安装包应内置这些组件，请重新安装最新版。"
+            )
+        else:
+            self._append_log("运行组件自检通过；无需额外安装 Node.js 或 uv。")
 
     def _run_env_check(self) -> None:
         """Detect the default shell and probe the toolchain; no server needed."""
@@ -2244,6 +2474,9 @@ class MainWindow(QMainWindow):
         selected_unit = self.pm.unit(selected.id) if selected is not None else None
         state = self._project_state(selected)
         busy = self._is_project_busy(selected.id) if selected is not None else False
+        if selected is not None and state in (EngineState.IDLE, EngineState.READY, EngineState.ERROR):
+            self._busy_project_ids.discard(selected.id)
+            busy = False
         is_entry = bool(
             selected is not None
             and self._service_root
@@ -2265,9 +2498,7 @@ class MainWindow(QMainWindow):
         elif state == EngineState.STOPPING:
             self.start_btn.setText("停止中…")
         self.start_btn.setEnabled(
-            selected is not None
-            and not busy
-            and state not in (EngineState.STARTING, EngineState.STOPPING)
+            selected is not None and state not in (EngineState.STARTING, EngineState.STOPPING)
         )
         self.add_project_btn.setEnabled(True)
         self.remove_project_btn.setEnabled(
@@ -2657,10 +2888,22 @@ class MainWindow(QMainWindow):
 
         _run_async(cleanup, done)
 
+_APP_LOCK: QLockFile | None = None
+
 def main() -> int:
+    global _APP_LOCK
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    constants.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(constants.CONFIG_DIR / "desktop-instance.lock"))
+    lock.setStaleLockTime(30_000)
+    if not lock.tryLock(100):
+        lock.removeStaleLockFile()
+        if not lock.tryLock(100):
+            QMessageBox.information(None, "MCP DevBridge 已在运行", "只能运行一个 MCP DevBridge。请从任务栏或系统托盘打开已运行的窗口。")
+            return 0
+    _APP_LOCK = lock
     font = QFont(app.font())
     font.setPointSize(10)
     app.setFont(font)
@@ -2679,6 +2922,8 @@ def main() -> int:
         QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 12px; top: 2px; padding: 0 5px; background: #f5f7fa; }
         QToolButton { border: 1px solid rgba(100,116,139,0.35); color: rgba(71,85,105,0.72); background: rgba(241,245,249,0.75); border-radius: 9px; font-weight: 700; }
         QToolButton:hover { color: #2563eb; border-color: rgba(37,99,235,0.5); background: #eef4ff; }
+        QToolButton#UpdateButton { color:#ffffff; background:#2563eb; border:none; border-radius:15px; font-size:18px; font-weight:700; }
+        QToolButton#UpdateButton:hover { background:#1d4ed8; color:#ffffff; }
         QLineEdit, QComboBox, QSpinBox, QPlainTextEdit { background: #ffffff; border: 1px solid #d7dde5; border-radius: 7px; padding: 6px 8px; color: #111827; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border: 1px solid #7aa2f7; }
         QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background: #f3f4f6; color: #9ca3af; }

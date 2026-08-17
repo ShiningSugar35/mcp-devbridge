@@ -151,17 +151,32 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
     ManualTopic(
         "multi-device",
         "两台或多台电脑：Multi-Device Hub",
-        ("多设备", "hub", "朋友", "电脑", "配对", "心跳"),
+        ("多设备", "hub", "朋友", "电脑", "配对", "心跳", "client id"),
         """<h2>Multi-Device Hub</h2>
-        <p>目标是：<b>ChatGPT 永远只连接主 Hub 的一个固定 MCP 地址</b>，但同一个聊天可以切换到你或朋友的不同电脑。</p>
+        <p>正确目标是：<b>ChatGPT 只创建一个 App，只连接主 Hub 的固定 MCP 地址</b>。连接成功后，再在同一个会话里切换电脑和工作区。</p>
         <h3>主 Hub 电脑</h3>
-        <ol><li>建议用 <b>Cloudflare 固定地址</b>或 ngrok 固定地址启动公网服务，让 ChatGPT 永远连接同一个 Hub URL。</li><li>到“设备”页生成 6 位配对码。</li><li>把主 Hub 的 MCP 地址和配对码发给朋友。</li></ol>
-        <p>主 Hub 也可以临时用 Quick Tunnel 测试，但 Hub 自己一旦重启换了地址，ChatGPT 和已经加入它的远端电脑都需要更新 Hub 地址，所以不适合长期多设备使用。</p>
+        <ol><li>用 <b>Cloudflare 固定地址</b>或 ngrok 固定地址运行 Hub，例如 <code>https://mcp.example.com/mcp</code>。</li>
+        <li>这个固定域名和它的 Cloudflare Tunnel Token <b>只能部署在主 Hub 电脑</b>。</li>
+        <li>到“设备”页生成 6 位配对码，把“主 Hub MCP 地址 + 配对码”发给朋友。</li></ol>
         <h3>朋友电脑</h3>
-        <ol><li>安装 MCP DevBridge，添加项目，并先启动一个公网服务（Quick Tunnel 也可以）。</li>
-        <li>到“设备”页填写主 Hub MCP 地址和配对码，点击“加入 Hub”。</li></ol>
-        <p>之后朋友电脑每隔约 15 秒向 Hub 报告在线状态和当前公网地址。即使朋友使用 Quick Tunnel，
-        重启后随机地址改变，Hub 也会自动更新。只有一台电脑在线时，ChatGPT 自动使用它；多台在线时可以切换设备。</p>""",
+        <ol><li>安装 MCP DevBridge，添加并启动项目。</li>
+        <li>给朋友电脑准备一个<b>独立的回传地址</b>：推荐 Quick Tunnel，也可以使用 ngrok 或朋友自己的独立域名。不要复制主 Hub 的 Tunnel Token。</li>
+        <li>到“设备”页输入主 Hub MCP 地址和配对码。<b>只需要首次配对一次</b>：成功后的 Hub 地址与设备凭据会安全持久化，之后双方电脑或软件重启都会自动恢复心跳，不需要再次输入配对码。</li></ol>
+        <p>如果首次注册的 HTTP 响应刚好丢失，同一个“配对码 + 设备 ID”在成功后的 <b>30 分钟</b>内可以安全重试，Hub 会返回同一设备凭据，不会重复注册。</p>
+        <h3>ChatGPT 怎么用</h3>
+        <p>ChatGPT 仍然只连接主 Hub，例如 <code>https://mcp.example.com/mcp</code>，不要给朋友电脑再创建第二个同 URL App。</p>
+        <p>之后可以让 AI 依次使用：<b>查看在线设备 → 切换设备 → 查看工作区 → 切换工作区</b>。只有一台设备或只有一个运行中的工作区时会自动选择，减少不必要的询问。</p>
+        <p>朋友使用 Quick Tunnel 时，临时地址变化会通过心跳自动更新到主 Hub，因此 ChatGPT 中的固定 Hub URL 不需要跟着改。</p>""",
+    ),
+    ManualTopic(
+        "runtime",
+        "安装与运行组件",
+        ("安装", "依赖", "node", "uv", "uvx", "cloudflared", "环境"),
+        """<h2>安装与运行组件</h2>
+        <p>MCP DevBridge 正式安装包已经自带项目引擎所需的 <b>Node.js</b>、Windows 控制启动器 <b>uv/uvx</b> 和 <b>cloudflared</b>，普通用户不需要另外安装这些程序，也不需要手工修改 PATH。</p>
+        <p>软件启动时会自动检查关键运行组件；“诊断”页也会显示组件状态。如果正式安装版提示 Node.js/uvx/cloudflared 缺失，通常意味着安装文件不完整，优先重新安装最新版，而不是自行修改系统环境。</p>
+        <p><b>Windows 控制是可选功能。</b>首次启用时，内置 uvx 会联网获取项目锁定版本的 Windows-MCP；这一步只进入 uv 的用户缓存，不会把 Node.js/uv 全局安装到系统。</p>
+        <p>“开发环境检测”里的 Python、Git、pytest、pyright 是给开发项目本身使用的工具链，不是启动 MCP DevBridge 桌面程序的前置依赖。</p>""",
     ),
     ManualTopic(
         "permissions",
@@ -201,7 +216,8 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         """<h2>常见问题</h2>
         <p><b>为什么 Quick Tunnel 重启后连不上？</b><br>因为临时地址换了。复制工作台的新地址到 ChatGPT；如果它是 Hub 的远端设备则会自动更新。</p>
         <p><b>为什么某些设置在运行时变灰？</b><br>端口、权限和连接方式会决定服务如何启动，运行中修改会造成“界面和实际服务不一致”，所以只锁当前正在运行项目的这些启动参数。停止服务仍然可以点击，别的项目也不会被锁住。</p>
-        <p><b>朋友电脑离线会怎样？</b><br>Hub 会把它显示为离线，不会把请求发过去。只有一台设备在线时会自动选择在线设备。</p>""",
+        <p><b>朋友电脑离线会怎样？</b><br>Hub 会把它显示为离线，不会把请求发过去。只有一台设备在线时会自动选择在线设备。</p>
+        <p><b>为什么出现 Client ID not found？</b><br>最常见原因是把主 Hub 的同一个 Cloudflare Tunnel Token 又部署到了另一台电脑。同一个固定域名此时会把 OAuth 请求分流到不同机器，而每台机器保存的 OAuth Client ID 不同。请先停止远端电脑上的主 Hub Named Tunnel，改用 Quick Tunnel/ngrok/独立域名作为回传链路；然后在 ChatGPT 删除并重新创建一次主 Hub App，之后只保留这一个固定域名 App。</p>""",
     ),
 )
 

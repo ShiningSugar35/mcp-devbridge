@@ -43,6 +43,8 @@ WINDOWS_BRIDGE_PORT = constants.DEFAULT_WINDOWS_MCP_PORT
 # 锁定 Windows-MCP 发布版本：上游迭代频繁（0.8.5 起 requires-python >=3.14），
 # 白名单/协议均按锁定版本验证。升级必须通过兼容性测试后人工修改此常量。
 WINDOWS_MCP_PINNED_VERSION = "0.8.2"
+BUNDLED_NODE_VERSION = "22.19.0"
+BUNDLED_UV_VERSION = "0.11.25"
 DEFAULT_ENGINE_START_TIMEOUT_SECONDS = 90
 DEFAULT_WINDOWS_START_TIMEOUT_SECONDS = 240  # first uvx run may fetch the package
 READY_POLL_INTERVAL_SECONDS = 0.15
@@ -218,12 +220,52 @@ def wait_port(
     return False
 
 
+def _runtime_candidates(filename: str) -> list[Path]:
+    """Return private portable runtime locations in priority order."""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "runtime" / filename)
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend(
+            (
+                exe_dir / "_internal" / "runtime" / filename,
+                exe_dir / "runtime" / filename,
+            )
+        )
+    candidates.append(Path(__file__).resolve().parents[2] / ".tools" / filename)
+    return candidates
+
+
+def _find_runtime(filename: str, *, env_var: str, path_names: tuple[str, ...]) -> str:
+    explicit = os.environ.get(env_var, "").strip()
+    if explicit and Path(explicit).is_file():
+        return str(Path(explicit).resolve())
+    for candidate in _runtime_candidates(filename):
+        if candidate.is_file():
+            return str(candidate.resolve())
+    for name in path_names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
 def find_node() -> str:
-    return shutil.which("node") or shutil.which("node.exe") or ""
+    return _find_runtime(
+        "node.exe",
+        env_var="MCPDEVBRIDGE_NODE_EXE",
+        path_names=("node", "node.exe"),
+    )
 
 
 def find_uvx() -> str:
-    return shutil.which("uvx") or shutil.which("uvx.exe") or ""
+    return _find_runtime(
+        "uvx.exe",
+        env_var="MCPDEVBRIDGE_UVX_EXE",
+        path_names=("uvx", "uvx.exe"),
+    )
 
 
 def build_codex_env(
@@ -369,7 +411,7 @@ class CodexProManager(EngineManager):
     ) -> None:
         super().__init__(node_exe or find_node(), "CodexPro")
         if not self.executable:
-            raise SpawnError("未找到 node.exe。请安装 Node.js 20+ 并加入 PATH。")
+            raise SpawnError("未找到 Node.js 运行组件。正式安装版已内置 Node.js；请重新安装 MCP DevBridge，源码开发环境可设置 MCPDEVBRIDGE_NODE_EXE 或加入 PATH。")
         self._explicit_dist_dir = dist_dir
         self.log_dir = Path(log_dir or constants.process_log_dir())
         self.port = port
@@ -499,7 +541,7 @@ class WindowsBridgeManager(EngineManager):
     ) -> None:
         super().__init__(uvx_exe or find_uvx(), "Windows-MCP")
         if not self.executable:
-            raise SpawnError("未找到 uvx.exe。请安装 uv（https://astral.sh/uv）。")
+            raise SpawnError("未找到 uv/uvx 运行组件。正式安装版已内置；请重新安装 MCP DevBridge，源码开发环境可设置 MCPDEVBRIDGE_UVX_EXE 或加入 PATH。")
         self.log_dir = Path(log_dir or constants.process_log_dir())
         self.port = port
         self.timeout = timeout_seconds
@@ -554,6 +596,8 @@ __all__ = [
     "CODEXPRO_LOCAL_PORT",
     "WINDOWS_BRIDGE_PORT",
     "WINDOWS_MCP_PINNED_VERSION",
+    "BUNDLED_NODE_VERSION",
+    "BUNDLED_UV_VERSION",
     "EngineState",
     "ProcessLog",
     "SpawnError",

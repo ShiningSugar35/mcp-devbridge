@@ -1,10 +1,10 @@
-name: Release build (PyInstaller onedir)
+name: Release build (Windows installer)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (default: read from pyproject.toml)"
+        description: "Version (default: read from pyproject.toml)"
         required: false
         default: ""
 
@@ -25,20 +25,68 @@ jobs:
         with:
           python-version: 3.12
 
-      - name: Install dependencies
-        run: uv pip install -e ".[dev,package]"
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: third_party/codexpro/package-lock.json
 
-      - name: Build onedir (PyInstaller)
-        run: python -m PyInstaller packaging/local-dev-mcp-bridge.spec --noconfirm --clean
-
-      - name: Smoke check artifact
+      - name: Setup Python environment
         run: |
-          if (-not (Test-Path "dist/MCPDevBridge/MCPDevBridge.exe")) { throw "artifact missing" }
-          Get-ChildItem dist/MCPDevBridge | Select-Object Name, Length
+          uv venv --python 3.12
+          uv pip install -p .venv -e ".[dev,package]"
 
-      - name: Upload artifact
+      - name: Build CodexPro engine
+        working-directory: third_party/codexpro
+        run: npm ci && npm run build
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Build and verify installer
+        shell: powershell
+        run: |
+          $version = "${{ inputs.version }}"
+          if ($version) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version $version
+          } else {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify frozen payload
+        shell: powershell
+        run: |
+          $dist = Get-ChildItem -Directory dist -Filter "staging-*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $dist) { throw "staging dist missing" }
+          $app = Join-Path $dist.FullName "MCPDevBridge"
+          foreach ($relative in @(
+            "MCPDevBridge.exe",
+            "cloudflared.exe",
+            "_internal/runtime/node.exe",
+            "_internal/runtime/uv.exe",
+            "_internal/runtime/uvx.exe",
+            "_internal/scripts/live_upgrade.ps1"
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $app $relative))) { throw "missing frozen payload: $relative" }
+          }
+
+      - name: Installer SHA-256
+        shell: powershell
+        run: Get-FileHash release\MCPDevBridge-Setup-*.exe -Algorithm SHA256
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCPDevBridge-Windows-Installer
+          path: release/MCPDevBridge-Setup-*.exe
+          retention-days: 30
+
+      - name: Upload frozen onedir
         uses: actions/upload-artifact@v4
         with:
           name: MCPDevBridge-onedir
-          path: dist/MCPDevBridge
+          path: dist/staging-*/MCPDevBridge
           retention-days: 14

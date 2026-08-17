@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -9,7 +9,7 @@ from starlette.testclient import TestClient
 
 from local_dev_mcp_bridge.audit import AuditLogger, AuditQuery, query_logs
 from local_dev_mcp_bridge.config_store import save_projects
-from local_dev_mcp_bridge.device_hub import DeviceRegistry
+from local_dev_mcp_bridge.device_hub import PAIR_RECEIPT_TTL_SECONDS, DeviceRegistry
 from local_dev_mcp_bridge.gateway import OAuthGateway, _inject_tools
 from local_dev_mcp_bridge.models import ProjectConfig
 
@@ -192,3 +192,16 @@ def test_gateway_writes_real_tool_audit(tmp_path: Path, monkeypatch: pytest.Monk
     assert len(rows) == 1
     assert rows[0]["success"] is True
     assert rows[0]["parameter_summary"]["path"] == "README.md"
+
+
+def test_pair_registration_retry_is_idempotent(monkeypatch, tmp_path):
+    store = MemoryStore()
+    registry = DeviceRegistry(local_device_id="main-pc", local_device_name="Main", store=store)
+    monkeypatch.setattr("local_dev_mcp_bridge.device_hub.load_devices", lambda: [])
+    monkeypatch.setattr("local_dev_mcp_bridge.device_hub.upsert_device", lambda _device: None)
+    code, _expires = registry.generate_pair_code()
+    kwargs = dict(pair_code=code, device_id="friend-pc", name="Friend", endpoint_url="https://friend.example/mcp", bearer="b" * 32)
+    first = registry.register_remote(**kwargs)
+    second = registry.register_remote(**kwargs)
+    assert second == first
+    assert PAIR_RECEIPT_TTL_SECONDS == 1800

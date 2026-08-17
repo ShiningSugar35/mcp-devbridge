@@ -21,6 +21,7 @@ from .models import DeviceConfig
 from .secrets import SecretsStore, generate_token
 
 PAIR_CODE_TTL_SECONDS = 10 * 60
+PAIR_RECEIPT_TTL_SECONDS = 30 * 60
 REMOTE_ONLINE_TTL_SECONDS = 45
 DEVICE_BEARER_PREFIX = "LocalDevMCPBridge/DeviceBearer:"
 DEVICE_HEARTBEAT_PREFIX = "LocalDevMCPBridge/DeviceHeartbeat:"
@@ -92,6 +93,9 @@ class DeviceRegistry:
         self.store = store or SecretsStore()
         self.online_ttl = max(5.0, float(online_ttl_seconds))
         self._pair_codes: dict[str, float] = {}
+        # Short-lived idempotency receipts let a joining device retry when the
+        # first HTTP response is lost after the Hub already consumed the code.
+        self._pair_receipts: dict[tuple[str, str], tuple[float, str]] = {}
         self._lock = threading.RLock()
         self._paired_ids = {
             device.id
@@ -128,13 +132,24 @@ class DeviceRegistry:
         if expires <= time.time():
             raise ValueError("配对码无效或已过期，请在 Hub 电脑重新生成。")
 
+    def _pair_receipt(self, code: str, device_id: str) -> str | None:
+        now = time.time()
+        key = (code.strip(), device_id.strip())
+        with self._lock:
+            self._pair_receipts = {k: v for k, v in self._pair_receipts.items() if v[0] > now}
+            receipt = self._pair_receipts.get(key)
+        return receipt[1] if receipt else None
+
     def register_remote(
         self, *, pair_code: str, device_id: str, name: str, endpoint_url: str, bearer: str
     ) -> str:
-        self._consume_pair_code(pair_code)
         device_id = device_id.strip()
         if not device_id:
             raise ValueError("远程设备缺少 device_id。")
+        previous = self._pair_receipt(pair_code, device_id)
+        if previous:
+            return previous
+        self._consume_pair_code(pair_code)
         if device_id == self.local_device_id:
             raise ValueError("不能把本机重复注册为远程设备。")
         bearer = bearer.strip()
@@ -156,6 +171,10 @@ class DeviceRegistry:
             peer_secret = generate_token(256)
             self.store.set(self._heartbeat_key(device_id), peer_secret)
             self._paired_ids.add(device_id)
+            self._pair_receipts[(pair_code.strip(), device_id)] = (
+                time.time() + PAIR_RECEIPT_TTL_SECONDS,
+                peer_secret,
+            )
         return peer_secret
 
     def heartbeat(
@@ -263,6 +282,7 @@ __all__ = [
     "normalize_mcp_url",
     "mcp_base_url",
     "PAIR_CODE_TTL_SECONDS",
+    "PAIR_RECEIPT_TTL_SECONDS",
     "REMOTE_ONLINE_TTL_SECONDS",
     "HUB_PEER_SECRET_KEY",
     "SecretStoreLike",

@@ -19,16 +19,25 @@ jobs:
         with:
           python-version: 3.12
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: 3.12
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: third_party/codexpro/package-lock.json
 
       - name: Setup venv
-        run: uv venv
+        run: uv venv --python 3.12
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: uv pip install -p .venv -e ".[dev,package]"
+
+      - name: Build CodexPro engine
+        working-directory: third_party/codexpro
+        run: npm ci && npm run build
+
+      - name: Prepare private portable runtimes
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_runtime.ps1
 
       - name: Lint (ruff)
         run: .venv\Scripts\python.exe -m ruff check src tests
@@ -39,17 +48,29 @@ jobs:
       - name: Unit tests (pytest)
         run: .venv\Scripts\python.exe -m pytest tests/ -q --disable-warnings
 
-      - name: CodexPro engine build (TypeScript)
-        working-directory: third_party/codexpro
-        run: npm ci && npm run build
-
       - name: CodexPro async task smoke
         working-directory: third_party/codexpro
         run: node scripts/async-task-smoke.mjs
 
-      - name: Verify build script syntax
+      - name: Verify PowerShell script syntax
+        shell: powershell
         run: |
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            "scripts/build.ps1", [ref]$null, [ref]$errors) | Out-Null
-          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          $failed = $false
+          foreach ($path in @("scripts/build.ps1", "scripts/prepare_runtime.ps1", "scripts/live_upgrade.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "Syntax errors in $path"
+              $errors | ForEach-Object { Write-Error $_ }
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Verify prepared runtime files
+        shell: powershell
+        run: |
+          foreach ($path in @(".tools/node.exe", ".tools/uv.exe", ".tools/uvx.exe", ".tools/cloudflared.exe")) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "missing runtime: $path" }
+          }

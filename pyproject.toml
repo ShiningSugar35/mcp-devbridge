@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-dev-mcp-bridge"
-version = "0.7.2"
+version = "0.8.0"
 description = "MCP DevBridge - desktop bridge that connects ChatGPT / Gemini MCP clients to local dev workspaces via a fixed Cloudflare Named Tunnel endpoint"
 readme = "README.md"
 requires-python = ">=3.12"

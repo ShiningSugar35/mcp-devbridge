@@ -113,6 +113,12 @@ def remember_project_tunnel_token(
     secrets.set(_key(PROJECT_TUNNEL_TOKEN_PREFIX, project_id), token)
 
 
+def clear_project_tunnel_token(project_id: str, *, store: Any | None = None) -> None:
+    """Delete one project's persisted Cloudflare Tunnel token."""
+    secrets = store or SecretsStore()
+    secrets.delete(_key(PROJECT_TUNNEL_TOKEN_PREFIX, project_id))
+
+
 def load_project_ui_secrets(project_id: str, *, store: Any | None = None) -> tuple[str, str]:
     """Return (access, tunnel) values for one project, applying legacy migration."""
     secrets = store or SecretsStore()
@@ -131,5 +137,6 @@ __all__ = [
     "regenerate_project_access_token",
     "get_project_tunnel_token",
     "remember_project_tunnel_token",
+    "clear_project_tunnel_token",
     "load_project_ui_secrets",
 ]

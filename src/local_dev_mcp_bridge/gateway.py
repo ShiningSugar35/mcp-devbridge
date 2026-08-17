@@ -184,28 +184,25 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>MCP DevBridge - 工作区授权</title>
+<head><meta charset="utf-8"><title>MCP DevBridge - 访问授权</title>
 <style>
 body{{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 16px;color:#1f2328}}
 h1{{font-size:20px}}
 dl{{background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:12px 16px}}
 dt{{color:#57606a;font-size:12px;text-transform:uppercase;margin-top:8px}}
 dd{{margin:2px 0 8px;word-break:break-all}}
-select{{font-size:14px;padding:6px 10px;border:1px solid #d0d7de;border-radius:6px;width:100%;margin:8px 0}}
-form{{margin-top:16px;display:flex;gap:12px}}
+form{{margin-top:16px;display:flex;gap:12px;align-items:center}}
 button{{font-size:15px;padding:8px 22px;border-radius:6px;cursor:pointer}}
 .allow{{background:#1f883d;color:#fff;border:1px solid #1f883d}}
 .cancel{{background:#fff;border:1px solid #d0d7de}}
-.workspace-label{{font-weight:600;margin-top:12px}}
+.note{{color:#57606a;font-size:13px;line-height:1.55}}
 </style></head>
-<body><h1>MCP DevBridge - 工作区授权</h1>
-<p>AI 客户端正在请求访问你的本地开发环境。请选择要绑定的项目工作区。</p>
+<body><h1>MCP DevBridge - 访问授权</h1>
+<p>AI 客户端正在请求访问这个 MCP DevBridge Hub。</p>
 <dl>{rows}</dl>
+<p class="note">授权后无需在这里选择项目。连接成功后可以在同一个 ChatGPT / Gemini 会话中切换在线电脑和工作区；只有一个可用目标时会自动选择。</p>
 <form method="post" action="/consent">
 <input type="hidden" name="id" value="{cid}">
-<div class="workspace-label">选择工作区：</div>
-<select name="workspace_id">{workspace_options}</select>
-<p style="color:#57606a;font-size:13px">所选工作区将绑定到此客户端的 OAuth 授权中。不同客户端可以绑定不同工作区。</p>
 <button type="submit" name="decision" value="allow" class="allow">允许访问</button>
 <button type="submit" name="decision" value="deny" class="cancel">取消</button>
 </form></body></html>"""
@@ -603,15 +600,12 @@ class OAuthGateway:
             )
         rows = [
             _row("MCP Server", self.resource_url),
-            _row("项目目录", self._provider.workspace or "（当前项目）"),
+            _row("访问范围", "此 Hub 下的在线设备与工作区（连接后按会话切换）"),
             _row("请求的权限范围", ", ".join(consent["scopes"])),
             _row("调用方 Client ID", consent["client_id"]),
         ]
-        workspace_options = self._build_workspace_options()
         cid = html.escape(request.query_params.get("id", ""))
-        return HTMLResponse(
-            _PAGE.format(rows="".join(rows), cid=cid, workspace_options=workspace_options)
-        )
+        return HTMLResponse(_PAGE.format(rows="".join(rows), cid=cid))
 
     def _build_workspace_options(self) -> str:
         """Build <option> tags for available projects (for consent page dropdown)."""
@@ -645,43 +639,9 @@ class OAuthGateway:
         form = await request.form()
         consent_id = str(form.get("id", ""))
         decision = str(form.get("decision", "deny"))
-        workspace_id = str(form.get("workspace_id", ""))
-        _write_diag_entry(
-            path="/consent",
-            method="POST",
-            decision=decision,
-            workspace_hash=_diag_short_hash(workspace_id),
-        )
+        _write_diag_entry(path="/consent", method="POST", decision=decision)
         try:
             if decision == "allow":
-                if self._workspace_registry is not None:
-                    if not workspace_id:
-                        _write_diag_entry(
-                            path="/consent",
-                            method="POST",
-                            event="consent_missing_workspace",
-                            error="workspace_id is empty - no workspace selected",
-                        )
-                        return HTMLResponse(
-                            "<html><body><p>请选择一个正在运行的项目后再授权。</p>"
-                            "<p>请返回 MCP DevBridge 启动目标项目，然后重新发起连接。</p></body></html>",
-                            status_code=400,
-                        )
-                    if not self._workspace_registry(workspace_id):
-                        _write_diag_entry(
-                            path="/consent",
-                            method="POST",
-                            event="consent_workspace_not_ready",
-                            workspace_hash=_diag_short_hash(workspace_id),
-                            error="Selected workspace CodexPro is not running",
-                        )
-                        return HTMLResponse(
-                            "<html><body><p>所选项目尚未运行，授权已阻止。</p>"
-                            "<p>请先在 MCP DevBridge 中启动该项目服务，再重新发起连接。</p></body></html>",
-                            status_code=409,
-                        )
-                if workspace_id:
-                    self._provider.bind_workspace(consent_id, workspace_id)
                 target = self._provider.approve(consent_id)
             else:
                 target = self._provider.deny(consent_id)
@@ -763,6 +723,7 @@ class OAuthGateway:
 
         proxy_token: str | None = None
         workspace_id = ""
+        direct_workspace = ""
         upstream_target: str | None = None
         if bearer:
             direct_workspace = self._workspace_for_credential(bearer)
@@ -800,9 +761,9 @@ class OAuthGateway:
             upstream_target = remote.base_url
             proxy_token = remote.bearer
         else:
-            with self._session_lock:
-                if session_id and session_id in self._session_workspaces:
-                    workspace_id = self._session_workspaces[session_id]
+            workspace_id = self._effective_workspace(
+                workspace_id, session_id, pinned=bool(direct_workspace)
+            )
             if workspace_id:
                 upstream_target = self._resolve_upstream(workspace_id)
                 if not upstream_target:
@@ -1142,7 +1103,8 @@ class OAuthGateway:
             raise ValueError(f"电脑“{target.name}”当前离线。")
         with self._session_lock:
             self._session_devices[session_id] = device_id
-        return f"已切换到电脑：{target.name}\n仅影响当前 MCP 会话。"
+            self._session_workspaces.pop(session_id, None)
+        return f"已切换到电脑：{target.name}\n该电脑会自动选择唯一运行的工作区；有多个时可继续切换工作区。\n仅影响当前 MCP 会话。"
 
     def _audit_gateway_tool(
         self,
@@ -1229,6 +1191,67 @@ class OAuthGateway:
         sid = request.headers.get("mcp-session-id", "")
         return sid.strip()
 
+    def _running_workspace_ids(self) -> list[str]:
+        if self._workspace_registry is None:
+            return []
+        try:
+            from .config_store import load_projects
+
+            return [
+                project.id
+                for project in load_projects()
+                if project.id and self._workspace_registry(project.id) is not None
+            ]
+        except Exception:
+            return []
+
+    def _entry_workspace_id(self, running: list[str]) -> str:
+        if not self._workspace or not running:
+            return ""
+        try:
+            target = self._workspace.expanduser().resolve()
+            from .config_store import load_projects
+
+            for project in load_projects():
+                if project.id not in running:
+                    continue
+                try:
+                    if Path(project.root_path).expanduser().resolve() == target:
+                        return project.id
+                except OSError:
+                    if project.root_path.casefold() == str(self._workspace).casefold():
+                        return project.id
+        except Exception:
+            return ""
+        return ""
+
+    def _effective_workspace(self, token_workspace: str, session_id: str, *, pinned: bool = False) -> str:
+        """Resolve a workspace without binding OAuth identity to one project.
+
+        Direct per-project Bearer credentials remain pinned for backward compatibility.
+        OAuth sessions can switch freely. With no explicit selection, one running
+        workspace is auto-selected; otherwise the Hub entry project is preferred.
+        """
+        if pinned and token_workspace:
+            return token_workspace
+        running = self._running_workspace_ids()
+        with self._session_lock:
+            selected = self._session_workspaces.get(session_id, "") if session_id else ""
+            if selected and selected in running:
+                return selected
+            if selected and selected not in running and session_id:
+                self._session_workspaces.pop(session_id, None)
+        if token_workspace and (not running or token_workspace in running):
+            chosen = token_workspace
+        elif len(running) == 1:
+            chosen = running[0]
+        else:
+            chosen = self._entry_workspace_id(running) or (running[0] if running else "")
+        if chosen and session_id:
+            with self._session_lock:
+                self._session_workspaces[session_id] = chosen
+        return chosen
+
     def _list_workspaces(self) -> str:
         """Build a text report of all registered projects with status."""
         lines = ["已注册的工作区：", ""]
@@ -1253,16 +1276,10 @@ class OAuthGateway:
         return "\n".join(lines)
 
     def _get_current_workspace(self, workspace_id: str, session_id: str) -> str:
-        """Return info about the current session's workspace."""
-        with self._session_lock:
-            effective = (
-                self._session_workspaces.get(session_id, workspace_id)
-                if session_id
-                else workspace_id
-            )
+        """Return the current session workspace, applying automatic selection."""
+        effective = self._effective_workspace(workspace_id, session_id)
         if not effective:
-            default_root = str(self._workspace) if self._workspace else "（未设置）"
-            return f"当前工作区：默认（{default_root}）"
+            return "当前没有运行中的工作区。请先在 MCP DevBridge 桌面启动一个项目服务。"
         root = str(self._resolve_workspace_path(effective) or "未知")
         return f"当前工作区：id={effective}\n路径：{root}"
 

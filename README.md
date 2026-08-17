@@ -100,6 +100,40 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.8.0 单域名 Hub 路由与桌面可靠性
+
+- **一个固定域名、一个 OAuth App、任意设备/工作区**：OAuth 授权页不再绑定单个工作区。ChatGPT 只连接主 Hub 的固定 URL，连接后用 `devbridge_switch_device` / `devbridge_switch_workspace` 按会话切换目标。
+- **自动默认**：只有一个在线设备或一个运行工作区时自动选择；本机同时运行多个项目时优先使用当前公网入口项目，避免每次连接都询问。
+- **禁止同一 Named Tunnel 多机复用**：主 Hub 的 Cloudflare Tunnel Token 只允许主 Hub 使用。远端设备使用 Quick Tunnel/ngrok/独立域名作为回传链路，避免 OAuth `Client ID not found`。
+- **一次配对、长期记忆**：首次配对成功后，Hub 地址、设备目录与心跳凭据安全持久化；双方电脑或软件重启后自动恢复心跳，不需要再次配对。同一个“配对码 + device_id”在成功后的 **1800 秒（30 分钟）**内可幂等重试并返回同一凭据，解决首次 HTTP 响应丢失场景。
+- **单实例桌面**：同一 Windows 用户只能运行一个 MCP DevBridge；首次升级会清理旧版本遗留的重复进程。
+- **服务状态修复**：稳定状态会清除残留 busy 标记，READY 项目的“停止服务”始终可点；托盘退出提供即时反馈和清理 watchdog。
+- **复制反馈**：地址、令牌、Gateway 地址、Gemini 凭据等复制按钮短暂变绿并显示“复制成功”。
+- **内置更新**：启动后与每 **12 小时**检查 GitHub Release。仅发现新版本时显示右上角更新图标，点击可查看说明、下载、校验 SHA-256、静默安装并自动重启。v0.8.0 之前的版本仍需手动安装 v0.8.0 一次。
+- **安装包自带运行组件**：正式 Windows 安装包内置固定版本 Node.js、uv/uvx 与 cloudflared，普通用户无需预装这些组件或修改 PATH；启动和诊断会自动检查完整性。可选 Windows 控制首次启用时由内置 uvx 获取锁定版本的 Windows-MCP，不做系统级静默安装。
+
+### 多设备正确拓扑
+
+```text
+ChatGPT / Gemini
+       │
+       │  唯一固定 URL
+       ▼
+https://mcp.example.com/mcp
+       │
+       ▼
+主 Hub（唯一持有该 Named Tunnel Token）
+       │
+       ├─ 本机工作区 A / B / C
+       │
+       └─ 远端设备 ── Quick Tunnel / ngrok / 独立域名
+                    └─ 远端工作区 X / Y
+```
+
+**不要**把主 Hub 的 `cloudflared.exe service install ey...` Token 复制到朋友电脑。那会把两台机器变成同一 Tunnel 的 replicas，使 OAuth 注册和授权请求可能落在不同机器，导致 `Client ID not found`。
+
+---
+
 ## v0.7.2 默认异步命令任务
 
 > **v0.7.1 已被 v0.7.2 取代。** v0.7.1 首次发布后真机验收发现任务目录绑定在单个 MCP Server/session 实例：`bash` 返回 task_id 后，另一次 MCP 调用可能无法找到任务。v0.7.2 将 `BashTaskManager` 提升为 CodexPro 进程级共享，同时继续按 workspace 隔离，并新增跨 HTTP MCP session 回归测试。

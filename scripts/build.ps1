@@ -57,6 +57,10 @@ if (-not $SkipVersionCheck) {
     }
 }
 
+Step "1b/6 prepare private portable runtimes"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:root "scripts\prepare_runtime.ps1")
+if ($LASTEXITCODE -ne 0) { throw "portable runtime preparation failed" }
+
 # --- 2. Unit tests ----------------------------------------------------------
 if (-not $SkipTests) {
     Step "2/6 unit tests (pytest)"
@@ -117,7 +121,19 @@ if (-not $SkipInstaller) {
 
 # --- 6. Artifacts ------------------------------------------------------------
 Step "6/6 artifacts"
+$requiredBundledFiles = @(
+    "_internal\runtime\node.exe",
+    "_internal\runtime\uv.exe",
+    "_internal\runtime\uvx.exe",
+    "_internal\scripts\live_upgrade.ps1",
+    "cloudflared.exe"
+)
+foreach ($relative in $requiredBundledFiles) {
+    $candidate = Join-Path $script:distDir $relative
+    if (-not (Test-Path -LiteralPath $candidate)) { throw "Bundled artifact missing: $relative" }
+}
 Get-ChildItem $script:distDir | Select-Object Name, Length | Format-Table -AutoSize
 Write-Host "App: $script:appExe"
 if (-not $SkipInstaller) { Write-Host "Installer: $script:setupExe" }
+Write-Host "Bundled runtimes + live_upgrade.ps1 verified."
 Write-Host "Build OK (version $script:version)"

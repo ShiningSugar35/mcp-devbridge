@@ -7,7 +7,7 @@ Output: dist/MCPDevBridge/
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.7.2"
+PROJECT_VERSION = "0.8.0"
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry_desktop.py")],
@@ -16,7 +16,11 @@ a = Analysis(
 datas=[
         (str(ROOT / "third_party" / "codexpro" / "dist"), "third_party/codexpro/dist"),
         (str(ROOT / "third_party" / "codexpro" / "node_modules"), "third_party/codexpro/node_modules"),
+        (str(ROOT / ".tools" / "node.exe"), "runtime"),
+        (str(ROOT / ".tools" / "uv.exe"), "runtime"),
+        (str(ROOT / ".tools" / "uvx.exe"), "runtime"),
         (str(ROOT / "THIRD_PARTY_LICENSES.md"), "THIRD_PARTY_LICENSES.md"),
+        (str(ROOT / "scripts" / "live_upgrade.ps1"), "scripts"),
     ],
     hiddenimports=[
         "local_dev_mcp_bridge.models",
@@ -25,6 +29,7 @@ datas=[
         "local_dev_mcp_bridge.project_secrets",
         "local_dev_mcp_bridge.device_hub",
         "local_dev_mcp_bridge.help_content",
+        "local_dev_mcp_bridge.update_manager",
         "local_dev_mcp_bridge.audit",
         "local_dev_mcp_bridge.shell",
         "local_dev_mcp_bridge.processes",

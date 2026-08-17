@@ -27,6 +27,15 @@ Windows-MCP 子进程（仅回环 127.0.0.1）。版本锁定在 `engines.py` �
 |---|---|---|---|
 | cloudflared.exe (`.tools/`, 随安装包分发) | 2026.7.3 | 以官方仓库 LICENSE 为准 | https://github.com/cloudflare/cloudflared |
 
+## Bundled private runtimes
+
+| Component | Version | License | Source |
+|---|---|---|---|
+| Node.js Windows x64 runtime (`node.exe`) | 22.19.0 | Node.js license / bundled third-party notices | https://nodejs.org/ |
+| uv / uvx Windows x64 runtime | 0.11.25 | MIT OR Apache-2.0 | https://github.com/astral-sh/uv |
+
+These executables are bundled privately for MCP DevBridge and are not installed system-wide or added to the user's PATH.
+
 ## Desktop runtime (打包进 PyInstaller 产物)
 
 | Component | Version | License |

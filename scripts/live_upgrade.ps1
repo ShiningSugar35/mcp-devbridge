@@ -97,8 +97,7 @@ if (-not $Worker) {
             $ProjectRoot = [string]$cfg.active_workspace
         }
     }
-    if (-not $ProjectRoot) { throw "ProjectRoot is required and active_workspace is empty." }
-    $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
+    if ($ProjectRoot) { $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot) }
     if ($OldPid -le 0) {
         $candidate = Get-CimInstance Win32_Process |
             Where-Object { $_.Name -ieq "MCPDevBridge.exe" } |
@@ -158,22 +157,32 @@ try {
     }
 
     $installer = [IO.Path]::GetFullPath([string]$request.installer_path)
-    $projectRoot = [IO.Path]::GetFullPath([string]$request.project_root)
+    $projectRoot = [string]$request.project_root
+    if ($projectRoot) { $projectRoot = [IO.Path]::GetFullPath($projectRoot) }
     $oldPidValue = [int]$request.old_pid
     $fallback = [string]$request.fallback_exe
     $resumePath = Join-Path $ConfigDir "upgrade-resume.json"
-    Write-JsonAtomic -Path $resumePath -Value ([ordered]@{
-        project_root = $projectRoot
-        requested_at = (Get-Date).ToString("o")
-    })
-    Write-UpgradeLog "Resume request written for project: $projectRoot"
+    if ($projectRoot) {
+        Write-JsonAtomic -Path $resumePath -Value ([ordered]@{
+            project_root = $projectRoot
+            requested_at = (Get-Date).ToString("o")
+        })
+        Write-UpgradeLog "Resume request written for project: $projectRoot"
+    } else {
+        Remove-Item -LiteralPath $resumePath -Force -ErrorAction SilentlyContinue
+        Write-UpgradeLog "No active project; update will restart the desktop without restoring a service."
+    }
 
     Start-Sleep -Seconds 2
-    if ($oldPidValue -gt 0 -and (Get-Process -Id $oldPidValue -ErrorAction SilentlyContinue)) {
-        Write-UpgradeLog "Stopping old MCP DevBridge process tree: PID=$oldPidValue"
-        & taskkill.exe /PID $oldPidValue /T /F | Out-Null
-        Start-Sleep -Seconds 2
+    $oldProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ieq "MCPDevBridge.exe" }
+    foreach ($proc in @($oldProcesses)) {
+        $pidValue = [int]$proc.ProcessId
+        if ($pidValue -le 0) { continue }
+        Write-UpgradeLog "Stopping old MCP DevBridge process tree: PID=$pidValue"
+        & taskkill.exe /PID $pidValue /T /F | Out-Null
     }
+    if (@($oldProcesses).Count -gt 0) { Start-Sleep -Seconds 2 }
 
     $installArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/TASKS=desktopicon")
     Write-UpgradeLog "Installing: $installer"
@@ -210,6 +219,10 @@ try {
             Write-UpgradeLog "New MCP DevBridge exited early: $($newProcess.ExitCode)"
             break
         }
+        if (-not $projectRoot) {
+            $ready = $true
+            break
+        }
         $expectedPort = Get-ExpectedPort -Root $projectRoot
         if (Test-LoopbackPort -Port $expectedPort) {
             $ready = $true
@@ -228,7 +241,7 @@ try {
         finished_at = (Get-Date).ToString("o")
     })
     if (-not $ready) { throw "New bridge did not become ready before timeout." }
-    Write-UpgradeLog "Upgrade completed; loopback port $expectedPort is ready."
+    Write-UpgradeLog $(if ($expectedPort -gt 0) { "Upgrade completed; loopback port $expectedPort is ready." } else { "Upgrade completed; desktop restarted successfully." })
 }
 catch {
     Write-UpgradeLog "Upgrade worker failed: $($_.Exception.Message)"
