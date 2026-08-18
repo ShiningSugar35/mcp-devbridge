@@ -1,9 +1,12 @@
-"""GitHub Release update discovery and installer download for the desktop app."""
+"""GitHub Release discovery and platform-specific update handoff."""
+
 from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,8 +15,13 @@ from pathlib import Path
 
 import httpx
 
+from .platform_support import IS_LINUX, IS_WINDOWS, platform_key, popen_platform_kwargs
+
 RELEASE_API = "https://api.github.com/repos/ShiningSugar35/mcp-devbridge/releases/latest"
-INSTALLER_PREFIX = "MCPDevBridge-Setup-"
+WINDOWS_INSTALLER_PREFIX = "MCPDevBridge-Setup-"
+LINUX_PACKAGE_PREFIX = "MCPDevBridge-Linux-x86_64-"
+# Backward-compatible public name used by older callers/tests.
+INSTALLER_PREFIX = WINDOWS_INSTALLER_PREFIX
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,8 @@ class ReleaseInfo:
     download_url: str
     size: int
     sha256: str
+    asset_name: str = ""
+    platform: str = ""
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -39,6 +49,20 @@ def is_newer(latest: str, current: str) -> bool:
     return left + (0,) * (width - len(left)) > right + (0,) * (width - len(right))
 
 
+def _release_asset_prefix() -> str:
+    if IS_WINDOWS:
+        return WINDOWS_INSTALLER_PREFIX
+    if IS_LINUX:
+        machine = platform.machine().lower()
+        if machine not in {"x86_64", "amd64"}:
+            raise RuntimeError(
+                f"当前 Linux 架构 {machine or 'unknown'} 暂无 MCP DevBridge 桌面发布包；"
+                "SteamOS/Steam Machine x86_64 已支持。"
+            )
+        return LINUX_PACKAGE_PREFIX
+    raise RuntimeError(f"当前平台 {platform_key()} 暂不支持应用内升级。")
+
+
 def fetch_latest_release(*, timeout: float = 10.0) -> ReleaseInfo:
     response = httpx.get(
         RELEASE_API,
@@ -49,12 +73,14 @@ def fetch_latest_release(*, timeout: float = 10.0) -> ReleaseInfo:
     response.raise_for_status()
     payload = response.json()
     assets = payload.get("assets") or []
+    prefix = _release_asset_prefix()
     asset = next(
-        (item for item in assets if str(item.get("name") or "").startswith(INSTALLER_PREFIX)),
+        (item for item in assets if str(item.get("name") or "").startswith(prefix)),
         None,
     )
     if not asset:
-        raise RuntimeError("最新 Release 没有 Windows 安装包。")
+        platform_name = "Windows" if IS_WINDOWS else "Linux/SteamOS"
+        raise RuntimeError(f"最新 Release 没有 {platform_name} 安装包。")
     digest = str(asset.get("digest") or "")
     sha256 = digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else ""
     return ReleaseInfo(
@@ -65,13 +91,24 @@ def fetch_latest_release(*, timeout: float = 10.0) -> ReleaseInfo:
         download_url=str(asset.get("browser_download_url") or ""),
         size=int(asset.get("size") or 0),
         sha256=sha256,
+        asset_name=str(asset.get("name") or ""),
+        platform=platform_key(),
     )
 
 
 def download_installer(info: ReleaseInfo, *, target_dir: Path | None = None) -> Path:
+    """Download the current platform's installer/package and verify size/digest."""
     directory = target_dir or (Path(tempfile.gettempdir()) / "MCPDevBridge-Updates")
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / f"MCPDevBridge-Setup-{info.version}.exe"
+    if info.asset_name:
+        filename = info.asset_name
+    elif IS_WINDOWS:
+        filename = f"MCPDevBridge-Setup-{info.version}.exe"
+    elif IS_LINUX:
+        filename = f"MCPDevBridge-Linux-x86_64-{info.version}.tar.gz"
+    else:
+        raise RuntimeError(f"当前平台 {platform_key()} 暂不支持应用内升级。")
+    target = directory / filename
     digest = hashlib.sha256()
     size = 0
     with httpx.stream(
@@ -99,34 +136,55 @@ def download_installer(info: ReleaseInfo, *, target_dir: Path | None = None) -> 
 
 
 def bundled_upgrade_script() -> Path:
+    script_name = "live_upgrade.ps1" if IS_WINDOWS else "live_upgrade.sh"
     if getattr(sys, "frozen", False):
         base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-        candidate = base / "scripts" / "live_upgrade.ps1"
+        candidate = base / "scripts" / script_name
         if candidate.is_file():
             return candidate
-    return Path(__file__).resolve().parents[2] / "scripts" / "live_upgrade.ps1"
+    return Path(__file__).resolve().parents[2] / "scripts" / script_name
 
 
 def launch_update(installer: Path, *, project_root: str = "") -> None:
     script = bundled_upgrade_script()
     if not script.is_file():
         raise RuntimeError("找不到内置升级脚本。")
-    args = [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(script),
-        "-InstallerPath",
-        str(installer),
-        "-OldPid",
-        str(os.getpid()),
-    ]
-    if project_root:
-        args += ["-ProjectRoot", project_root]
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen(args, creationflags=flags, close_fds=True)  # noqa: S603
+    if IS_WINDOWS:
+        args = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-InstallerPath",
+            str(installer),
+            "-OldPid",
+            str(os.getpid()),
+        ]
+        if project_root:
+            args += ["-ProjectRoot", project_root]
+    elif IS_LINUX:
+        bash = shutil.which("bash") or "/bin/bash"
+        args = [
+            bash,
+            str(script),
+            "--package",
+            str(installer),
+            "--old-pid",
+            str(os.getpid()),
+        ]
+        if project_root:
+            args += ["--project-root", project_root]
+    else:
+        raise RuntimeError(f"当前平台 {platform_key()} 暂不支持应用内升级。")
+    subprocess.Popen(
+        args,
+        close_fds=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **popen_platform_kwargs(detached=True),
+    )  # noqa: S603
 
 
 __all__ = [
@@ -136,4 +194,7 @@ __all__ = [
     "download_installer",
     "launch_update",
     "bundled_upgrade_script",
+    "INSTALLER_PREFIX",
+    "WINDOWS_INSTALLER_PREFIX",
+    "LINUX_PACKAGE_PREFIX",
 ]

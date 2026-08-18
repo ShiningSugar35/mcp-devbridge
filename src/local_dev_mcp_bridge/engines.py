@@ -36,6 +36,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from . import constants
+from .platform_support import popen_platform_kwargs, runtime_filename
 
 # 端口默认值集中维护（constants.DEFAULT_*_PORT）；下列为引擎层兼容别名。
 CODEXPRO_LOCAL_PORT = constants.DEFAULT_CODEXPRO_PORT
@@ -146,11 +147,7 @@ class BaseEngineProcess:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=(
-                subprocess.CREATE_NO_WINDOW
-                if hasattr(subprocess, "CREATE_NO_WINDOW")
-                else 0
-            ),
+            **popen_platform_kwargs(new_session=True),
         )
         self._file = log_file
         if self._file is not None:
@@ -254,7 +251,7 @@ def _find_runtime(filename: str, *, env_var: str, path_names: tuple[str, ...]) -
 
 def find_node() -> str:
     return _find_runtime(
-        "node.exe",
+        runtime_filename("node"),
         env_var="MCPDEVBRIDGE_NODE_EXE",
         path_names=("node", "node.exe"),
     )
@@ -262,7 +259,7 @@ def find_node() -> str:
 
 def find_uvx() -> str:
     return _find_runtime(
-        "uvx.exe",
+        runtime_filename("uvx"),
         env_var="MCPDEVBRIDGE_UVX_EXE",
         path_names=("uvx", "uvx.exe"),
     )

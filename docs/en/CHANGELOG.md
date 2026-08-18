@@ -2,6 +2,17 @@
 
 All dates are local development dates.
 
+## 0.9.1 (2026-08-18) — global device connection and reliable multi-project controls
+
+- Add a device-level connection profile in the Workbench so connection mode, public hostname and the encrypted Cloudflare tunnel credential can be entered once, applied to every existing project, and inherited by new projects.
+- Treat the public Gateway port as device-global (default 8786), matching the fixed Cloudflare hostname → localhost service mapping; project CodexPro/Windows ports remain independent.
+- Remove the duplicate Current Project service card; keep per-project start/stop in the project table and move Advanced Settings into Project Settings.
+- Add a single Start All / Stop All control beside Remove Project. One coordinator owns the public Gateway/Tunnel; remaining project engines are started/stopped concurrently with bounded workers and aggregated errors.
+- Fix intermittent repeated stop clicks by retaining table button widgets across polling refreshes and keeping busy flags until the asynchronous lifecycle callback actually completes.
+- Add native Linux/SteamOS Desktop Mode support: XDG state paths, POSIX/bash command execution and process-tree control, platform protected secrets, user-local install/autostart, Linux Node/cloudflared private runtimes, Linux PyInstaller package and in-app Linux updater.
+- Add a first-class Agent Orchestrator above Agent Pool: persistent logical Agents with continuation messages plus Teams with parallel worktree-isolated workers, automatic read-only Reviewer, and a dedicated integration-worktree Merger.
+- Add formal cross-device/project routing to the Orchestrator tools so a Hub can spawn an Agent or Team directly on a remote online project.
+
 ## 0.9.0 (2026-08-17) — per-device fixed endpoints and local Agent Pool
 
 - Promote remote-device routing from session-only state to formal `device_id` parameters on workspace-management tools, so the Hub can query/switch a specific computer after ChatGPT recreates the MCP transport.

@@ -14,10 +14,11 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from . import constants
-from .shell import CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, kill_process_tree
+from .platform_support import popen_platform_kwargs, run_platform_kwargs
+from .shell import kill_process_tree
 
 AgentState = Literal[
     "queued",
@@ -57,6 +58,7 @@ class AgentTask:
     log_path: str = ""
     error: str = ""
     cleaned: bool = False
+    isolate: bool = True
 
 
 CommandBuilder = Callable[[AgentTask, str, Path], list[str]]
@@ -92,7 +94,7 @@ def _run_capture(argv: list[str], *, cwd: Path | None = None, timeout: int = 30)
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
-        creationflags=CREATE_NO_WINDOW,
+        **run_platform_kwargs(),
         check=False,
     )
 
@@ -135,7 +137,7 @@ class AgentPool:
         self._lock = threading.RLock()
         self._tasks: dict[str, AgentTask] = {}
         self._prompts: dict[str, str] = {}
-        self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._processes: dict[str, subprocess.Popen[Any]] = {}
         self._futures: dict[str, Future[None]] = {}
         self._executor = ThreadPoolExecutor(max_workers=self.max_parallel, thread_name_prefix="mcp-agent")
         self._load_history()
@@ -151,7 +153,7 @@ class AgentPool:
                 encoding="utf-8",
                 errors="replace",
                 timeout=5,
-                creationflags=CREATE_NO_WINDOW,
+                **run_platform_kwargs(),
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -189,7 +191,7 @@ class AgentPool:
                 encoding="utf-8",
                 errors="replace",
                 timeout=8,
-                creationflags=CREATE_NO_WINDOW,
+                **run_platform_kwargs(),
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -331,6 +333,16 @@ class AgentPool:
         if not task.write:
             return workspace
         repo, base_sha = self._git_repo_root(workspace)
+        if not task.isolate:
+            branch_result = _run_capture(
+                ["git", "-C", str(workspace), "branch", "--show-current"], timeout=20
+            )
+            task.repo_root = str(repo)
+            task.base_sha = base_sha
+            task.branch = branch_result.stdout.strip()
+            task.worktree = str(workspace)
+            self._persist(task)
+            return workspace
         branch = f"mcp-agent/{task.id[:12]}"
         worktree = (self.worktree_dir / task.id).resolve()
         worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -371,6 +383,7 @@ class AgentPool:
         executor: str = "auto",
         model: str = "",
         write: bool = True,
+        isolate: bool | None = None,
     ) -> dict[str, object]:
         prompt = prompt.strip()
         if not prompt:
@@ -412,6 +425,7 @@ class AgentPool:
             created_at=time.time(),
             prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             log_path=str((self.log_dir / f"{task_id}.log").resolve()),
+            isolate=bool(write) if isolate is None else bool(isolate),
         )
         with self._lock:
             self._tasks[task.id] = task
@@ -420,6 +434,30 @@ class AgentPool:
             future = self._executor.submit(self._run_task, task.id)
             self._futures[task.id] = future
         return self.get(task.id)
+
+    def append_prompt(self, task_id: str, message: str) -> bool:
+        """Append an instruction to a queued task before its executor starts.
+
+        Returns False once the executor has consumed the prompt.  The Agent
+        Orchestrator uses that signal to schedule a continuation turn instead of
+        pretending one-shot CLIs support live stdin.
+        """
+        message = message.strip()
+        if not message:
+            raise ValueError("message 不能为空。")
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise ValueError(f"找不到 Agent 任务：{task_id}")
+            prompt = self._prompts.get(task_id)
+            if task.state != "queued" or prompt is None:
+                return False
+            self._prompts[task_id] = (
+                prompt.rstrip()
+                + "\n\nFOLLOW-UP INSTRUCTION FROM ORCHESTRATOR:\n"
+                + message
+            )
+            return True
 
     def spawn_batch(
         self,
@@ -473,7 +511,8 @@ class AgentPool:
                     stdout=output,
                     stderr=subprocess.STDOUT,
                     env=environment,
-                    creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                    text=False,
+                    **popen_platform_kwargs(new_session=True),
                 )
                 with self._lock:
                     self._processes[task_id] = process
@@ -602,7 +641,7 @@ class AgentPool:
                 raise ValueError(f"找不到 Agent 任务：{task_id}")
             if task.state in {"queued", "running"}:
                 raise ValueError("Agent 仍在运行，不能清理。请先等待或取消。")
-        if task.worktree and task.repo_root:
+        if task.isolate and task.worktree and task.repo_root:
             worktree = Path(task.worktree)
             repo = Path(task.repo_root)
             if worktree.exists():

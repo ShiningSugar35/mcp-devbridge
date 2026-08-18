@@ -39,6 +39,7 @@ from .engines import (
     WindowsBridgeManager,
 )
 from .models import ProjectConfig
+from .platform_support import IS_WINDOWS
 
 WINDOWS_START_TIMEOUT_SECONDS = 240
 
@@ -119,6 +120,7 @@ class ProjectUnit:
         was constructed (ports are fixed per manager); callers use
         :meth:`ProjectManager.ensure_ports` to backfill first.
         """
+        windows_enabled = bool(windows_enabled and IS_WINDOWS)
         root = str(Path(self.project.root_path).expanduser().resolve())
         extra_env = None
         if windows_enabled and windows_token:

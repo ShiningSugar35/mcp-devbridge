@@ -5,7 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 import local_dev_mcp_bridge.desktop_main as dm
 from local_dev_mcp_bridge.engines import EngineState
@@ -20,7 +20,7 @@ def test_update_version_helpers_and_bundled_script() -> None:
     assert bundled_upgrade_script().is_file()
 
 
-def test_ready_project_stop_button_ignores_stale_busy_flag(tmp_path: Path, monkeypatch) -> None:
+def test_ready_project_stop_button_respects_inflight_busy_flag(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setattr(dm, "load_project_ui_secrets", lambda _project_id: ("", ""))
     monkeypatch.setattr(dm, "get_project_access_token", lambda _project_id: None)
@@ -40,12 +40,18 @@ def test_ready_project_stop_button_ignores_stale_busy_flag(tmp_path: Path, monke
         unit.codex._state = EngineState.READY
         window._busy_project_ids.add(project.id)
         window._poll_status()
-        assert window.start_btn.text() == "停止服务"
-        assert window.start_btn.isEnabled()
-        assert project.id not in window._busy_project_ids
+        assert project.id in window._busy_project_ids
         row = window._row_of_root(project.root_path)
         button = window.project_table.cellWidget(row, 5)
-        assert button is not None and button.isEnabled()
+        assert isinstance(button, QPushButton)
+        assert button.text() == "停止中…"
+        assert not button.isEnabled()
+        window._set_project_busy(project.id, False)
+        button_after = window.project_table.cellWidget(row, 5)
+        assert button_after is button
+        assert isinstance(button_after, QPushButton)
+        assert button_after.text() == "停止服务"
+        assert button_after.isEnabled()
     finally:
         window._force_exit = True
         window.coord._state = EngineState.IDLE

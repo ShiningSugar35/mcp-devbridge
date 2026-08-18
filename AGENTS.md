@@ -146,6 +146,13 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-18 · **v0.9.1 全局连接配置 / 全部启停 / Stop 可靠性**：
+  - 固定连接提升为设备级默认值：工作台一次填写连接方式、hostname、Cloudflare credential 并同步现有/未来项目；Gateway port 以设备全局值为准。
+  - 工作台移除“当前项目”重复服务卡；项目表保留单项目按钮，新增 Start All / Stop All；高级设置移到项目设置。
+  - 项目表刷新改为原位更新 cellWidget，busy 只由异步 callback 清除；修复多项目连续停止时后续点击被 1s polling 吞掉/重复 stop race。
+  - SteamOS/Arch Linux Desktop Mode 改为原生支持：XDG/user-local install、POSIX shell/process tree、Linux private Node/cloudflared、Secret Service/AES-GCM protected secrets、Linux CI/Release artifact；Linux 不启动 Windows-MCP。
+  - 在 Agent Pool 之上新增 Agent Orchestrator：logical Agent 多轮 continuation、`spawn_agent_team` 并行 worker、自动 Reviewer、独立 integration worktree Merger；全部支持 formal device/project route，禁止自动 push。
+
 - 2026-08-17 · **v0.9.0 双固定域名 / Multi-Device 显式路由 / Agent Pool**：
   - 工作区管理工具正式支持 `device_id`，共享 Hub 可跨 ChatGPT transport 无状态指定远端电脑；Quick heartbeat 继续更新动态回传 URL，但直接绑定 Quick URL 的 App 只作为临时连接。
   - 多人长期使用推荐每台电脑独立 Cloudflare Tunnel UUID/Token/hostname；不同电脑均可绑定各自 `localhost:8786`，严禁两台独立 OAuth Gateway 复用同一 Tunnel replica 身份。

@@ -21,6 +21,7 @@ from typing import Any
 from . import constants
 from .config_store import load_runtime_config, save_runtime_config
 from .models import RuntimeConfig
+from .platform_support import popen_platform_kwargs
 from .secrets import SecretsStore, generate_token
 from .server_main import ensure_access_token
 
@@ -118,7 +119,7 @@ class BackendManager:
             encoding="utf-8",
             errors="replace",
             env=env,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **popen_platform_kwargs(new_session=True),
         )
         self._proc = proc
 

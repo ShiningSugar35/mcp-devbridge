@@ -5,13 +5,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .platform_support import IS_WINDOWS
+
 APP_IDENT = "LocalDevMCPBridge"
 
 
 def _base_config_dir() -> Path:
     if os.environ.get("LOCALDEV_MCP_CONFIG_DIR"):
-        return Path(os.environ["LOCALDEV_MCP_CONFIG_DIR"]).resolve()
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / APP_IDENT
+        return Path(os.environ["LOCALDEV_MCP_CONFIG_DIR"]).expanduser().resolve()
+    if IS_WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / APP_IDENT
+    # SteamOS/Arch and other Linux desktops follow XDG. Keeping all mutable
+    # state under the user's home also avoids SteamOS' read-only base system.
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return (Path(xdg).expanduser() if xdg else Path.home() / ".config") / APP_IDENT
 
 
 def config_dir() -> Path:

@@ -129,6 +129,11 @@ class AppConfig(BaseModel):
     device_id: str = ""
     device_name: str = ""
     hub_url: str = ""
+    # v0.9.1：设备级公网连接默认值。一个设备只有一个公网 Gateway/Tunnel 入口，
+    # 因此固定域名/连接方式应能一次配置后批量应用到所有项目；项目字段继续保留，
+    # 兼容已有配置并允许高级用户在项目级覆盖。
+    device_connection: str = ""
+    device_public_hostname: str = ""
     # 端口配置（集中维护默认值，见 constants.DEFAULT_*_PORT）：
     gateway_port: int = constants.DEFAULT_GATEWAY_PORT
     codexpro_port: int = constants.DEFAULT_CODEXPRO_PORT

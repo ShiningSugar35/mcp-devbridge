@@ -100,6 +100,20 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.9.1 全局连接配置与多项目服务可靠性
+
+- **固定域名只填一次**：工作台「连接信息」新增“设备全局连接配置”。连接方式、公网域名和 Cloudflare Tunnel 凭据一次保存后同步到本设备全部现有项目；后续新项目自动继承，不再为 C:/D:/E:/F: 重复输入同一套 `jerry.shiningsugar.shop` 配置。
+- **Gateway 真正设备级**：Cloudflare Published Application 指向的是一台设备上的单一 Gateway，所以公网入口端口现在以设备全局配置为准（默认 `127.0.0.1:8786`）；CodexPro / Windows-MCP 端口仍按项目独立。
+- **工作台去重**：删除重复的“当前项目”卡片和第二个单项目启停按钮。单项目启停只保留项目列表每行的“启动服务 / 停止服务”；“高级设置…”移动到项目设置。
+- **一键全部启停**：在“移除项目”右侧新增总控按钮。全部未启动时显示“一键启动所有服务”，任一项目运行时自动变为“一键停止所有服务”。公网入口只启动一份，其余项目引擎并行启动/停止。
+- **修复连续停止偶发无响应**：项目 busy 状态不再被 1 秒状态轮询提前清除；项目表按钮不再每秒销毁重建，而是原位更新同一个 QWidget。这样连续停止四个项目时，后续点击不会被轮询重建吞掉，也不会在同一项目上产生重复异步 stop。
+- **安全存储不变**：全局 Cloudflare 凭据仍只进入平台受保护的凭据存储；`projects.json` 只保存非敏感的连接方式/hostname。项目级凭据槽继续保留用于兼容旧配置与高级覆盖。
+- **SteamOS / Linux Desktop 原生支持**：不是通过 Wine/Proton 跑 Windows EXE。Linux 使用 XDG 用户目录、bash/POSIX 进程树、用户态安装目录 `~/.local/opt/MCPDevBridge`、Desktop Entry/autostart，并随包内置 Linux Node.js 22.19.0 与 cloudflared。Windows-MCP 在 Linux 自动禁用；文件/Shell/Git/Agent 能力走 Linux 原生路径。
+- **Linux 凭据保护**：优先使用 freedesktop Secret Service（`secret-tool`）；桌面 Secret Service 不可用时使用 AES-GCM 加密 fallback，master key 与密文均限制为当前 Unix 用户读取，不把 OAuth/Tunnel secret 写入普通配置 JSON。
+- **完整 Agent Orchestrator / Spawner**：在 `agent_pool_*` 低层队列之上新增 `spawn_agent / spawn_agent_team / list_agents / get_agent / get_agent_team / message_agent / cancel_agent / wait_agents`。逻辑 Agent 可多轮 continuation；Team 先并行 worker，再自动 Reviewer，最后在独立 integration worktree 运行 Merger。
+- **Reviewer / Merger 安全边界**：写 worker 默认独立 `mcp-agent/*` branch/worktree，每一轮成功后本地 commit；Reviewer 只读 worker diff；Merger 使用独立 `mcp-team/*` integration branch，负责合并、处理冲突和测试，永不自动 push 主分支。未解决 Git conflict 会让 Team 失败而不是伪装成功。
+- **跨设备编排**：上述 Orchestrator 工具同样支持正式 `device_id`，`spawn_agent`/`spawn_agent_team` 再支持 `project_id`；主 Hub 可直接把一个 Agent Team 发到朋友电脑指定项目，而无需先切设备/切工作区。
+
 ## v0.9.0 双固定域名、多设备显式路由与 Agent Pool
 
 - **朋友重启不再依赖旧 Quick App**：Quick Tunnel 仍会在重新建立时更换 `trycloudflare.com` 地址；已配对设备会通过 heartbeat 把新地址更新给主 Hub，但直接绑定旧 Quick URL 的 ChatGPT App 本身不会自动改 URL。长期直连请使用固定域名。

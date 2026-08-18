@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .constants import MAX_PROCESS_LOG_BYTES, PROCESS_LOG_DIR
-from .shell import CREATE_NO_WINDOW, kill_process_tree
+from .platform_support import popen_platform_kwargs
+from .shell import kill_process_tree
 
 MAX_POLL_DEFAULT = 4000
 
@@ -60,7 +61,7 @@ class ProcessRegistry:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=environment,
-            creationflags=CREATE_NO_WINDOW,
+            **popen_platform_kwargs(new_session=True),
         )
         process_id = uuid.uuid4().hex[:12]
         log_file = self.log_dir / f"{process_id}.log"

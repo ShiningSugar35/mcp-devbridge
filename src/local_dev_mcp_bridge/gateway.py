@@ -46,11 +46,13 @@ from starlette.responses import (
 from starlette.routing import Route
 
 from . import constants
+from .agent_orchestrator import AgentOrchestrator
 from .agent_pool import AgentPool
 from .audit import AuditLogger
 from .constants import LOG_DIR as _LOG_DIR
 from .device_hub import DeviceRegistry
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
+from .platform_support import run_platform_kwargs
 from .secrets import SecretsStore
 from .shell import detect_binaries, get_shell_info, run_command, run_program
 
@@ -81,8 +83,23 @@ _AGENT_POOL_TOOL_NAMES = frozenset(
         "agent_pool_cleanup",
     }
 )
-_FORMAL_DEVICE_ROUTE_TOOL_NAMES = _REMOTE_WORKSPACE_TOOL_NAMES | _AGENT_POOL_TOOL_NAMES
 _AGENT_POOL_SPAWN_TOOL_NAMES = frozenset({"agent_pool_spawn", "agent_pool_spawn_batch"})
+_AGENT_ORCHESTRATOR_TOOL_NAMES = frozenset(
+    {
+        "spawn_agent",
+        "spawn_agent_team",
+        "list_agents",
+        "get_agent",
+        "get_agent_team",
+        "message_agent",
+        "cancel_agent",
+        "wait_agents",
+    }
+)
+_AGENT_ORCHESTRATOR_SPAWN_TOOL_NAMES = frozenset({"spawn_agent", "spawn_agent_team"})
+_FORMAL_DEVICE_ROUTE_TOOL_NAMES = (
+    _REMOTE_WORKSPACE_TOOL_NAMES | _AGENT_POOL_TOOL_NAMES | _AGENT_ORCHESTRATOR_TOOL_NAMES
+)
 _LOCAL_TOOL_NAMES = (
     frozenset(
         {
@@ -96,6 +113,7 @@ _LOCAL_TOOL_NAMES = (
     )
     | _DEVICE_TOOL_NAMES
     | _AGENT_POOL_TOOL_NAMES
+    | _AGENT_ORCHESTRATOR_TOOL_NAMES
 )
 
 _ROUTE_WORKSPACE_ARG = "devbridge_workspace_id"
@@ -335,6 +353,102 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
             },
             "required": ["task_id"],
         },
+    },
+    {
+        "name": "spawn_agent",
+        "description": "Spawn one persistent logical coding Agent. Write agents run in an isolated Git worktree/branch. Use message_agent for later instructions; running one-shot CLIs receive them as a continuation turn on the same branch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Bounded assignment."},
+                "title": {"type": "string"},
+                "role": {"type": "string", "enum": ["worker", "reviewer", "merger"], "description": "Defaults worker."},
+                "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "model": {"type": "string"},
+                "write": {"type": "boolean", "description": "Defaults true. Write mode creates an isolated Git worktree."},
+                "device_id": {"type": "string", "description": "Optional target device ID."},
+                "project_id": {"type": "string", "description": "Optional running project ID on the target device."}
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "spawn_agent_team",
+        "description": "Spawn a MiniMax-style coding team: parallel isolated workers, then optional automatic read-only Reviewer, then an isolated integration branch with a Merger agent. Returns immediately.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "objective": {"type": "string", "description": "Overall team objective."},
+                "title": {"type": "string"},
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string"},
+                            "title": {"type": "string"},
+                            "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                            "model": {"type": "string"},
+                            "write": {"type": "boolean"}
+                        },
+                        "required": ["prompt"]
+                    }
+                },
+                "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "model": {"type": "string"},
+                "reviewer": {"type": "boolean", "description": "Run an automatic Reviewer after workers. Defaults true."},
+                "merger": {"type": "boolean", "description": "Run an automatic Merger in an integration worktree after review. Defaults true for write teams."},
+                "reviewer_prompt": {"type": "string", "description": "Optional additional review policy."},
+                "merger_prompt": {"type": "string", "description": "Optional additional merge policy."},
+                "reviewer_executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "reviewer_model": {"type": "string"},
+                "merger_executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "merger_model": {"type": "string"},
+                "device_id": {"type": "string", "description": "Optional target device ID."},
+                "project_id": {"type": "string", "description": "Optional running project ID on the target device."}
+            },
+            "required": ["objective", "tasks"]
+        }
+    },
+    {
+        "name": "list_agents",
+        "description": "List logical Agents and Agent Teams with roles, states, branches and current turns.",
+        "inputSchema": {"type": "object", "properties": {"team_id": {"type": "string"}, "device_id": {"type": "string", "description": "Optional target device ID."}}}
+    },
+    {
+        "name": "get_agent",
+        "description": "Get one logical Agent including role, team, branch/worktree, messages, current turn and output tail.",
+        "inputSchema": {"type": "object", "properties": {"agent_id": {"type": "string"}, "device_id": {"type": "string", "description": "Optional target device ID."}}, "required": ["agent_id"]}
+    },
+    {
+        "name": "get_agent_team",
+        "description": "Get one Agent Team including worker/reviewer/merger states and the final integration branch/worktree when available.",
+        "inputSchema": {"type": "object", "properties": {"team_id": {"type": "string"}, "device_id": {"type": "string", "description": "Optional target device ID."}}, "required": ["team_id"]}
+    },
+    {
+        "name": "message_agent",
+        "description": "Send a follow-up instruction to a logical Agent. If its executor turn is still queued, the prompt is amended; if already running/finished, a continuation turn is queued on the same branch/worktree.",
+        "inputSchema": {"type": "object", "properties": {"agent_id": {"type": "string"}, "message": {"type": "string"}, "device_id": {"type": "string", "description": "Optional target device ID."}}, "required": ["agent_id", "message"]}
+    },
+    {
+        "name": "cancel_agent",
+        "description": "Cancel the logical Agent's current executor turn, clear queued follow-up messages and terminate its process tree.",
+        "inputSchema": {"type": "object", "properties": {"agent_id": {"type": "string"}, "device_id": {"type": "string", "description": "Optional target device ID."}}, "required": ["agent_id"]}
+    },
+    {
+        "name": "wait_agents",
+        "description": "Wait up to 30 seconds for selected logical Agents or a whole Team. Worker/model processes continue in the background after the polling wait returns.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_ids": {"type": "array", "items": {"type": "string"}},
+                "team_id": {"type": "string"},
+                "wait_seconds": {"type": "integer", "minimum": 1, "maximum": 30},
+                "device_id": {"type": "string", "description": "Optional target device ID."}
+            }
+        }
     },
 ]
 
@@ -771,6 +885,7 @@ class OAuthGateway:
         self._initialize_requests: dict[str, bytes] = {}
         self._session_lock = threading.Lock()
         self._agent_pool: AgentPool | None = None
+        self._agent_orchestrator: AgentOrchestrator | None = None
 
     # ------------------------------------------------------------ build
     @property
@@ -954,7 +1069,7 @@ class OAuthGateway:
             route_device_id = str(call_arguments.get("device_id") or "").strip()
         if (
             not route_workspace_id
-            and tool_name in _AGENT_POOL_SPAWN_TOOL_NAMES
+            and tool_name in (_AGENT_POOL_SPAWN_TOOL_NAMES | _AGENT_ORCHESTRATOR_SPAWN_TOOL_NAMES)
             and (not route_device_id or route_device_id == self._local_device_id)
         ):
             route_workspace_id = str(call_arguments.get("project_id") or "").strip()
@@ -1213,6 +1328,11 @@ class OAuthGateway:
             self._agent_pool = AgentPool()
         return self._agent_pool
 
+    def _get_agent_orchestrator(self) -> AgentOrchestrator:
+        if self._agent_orchestrator is None:
+            self._agent_orchestrator = AgentOrchestrator(self._get_agent_pool())
+        return self._agent_orchestrator
+
     # ---------------------------------------------------- local tools
     async def _exec_local_tool(
         self,
@@ -1287,7 +1407,7 @@ class OAuthGateway:
                             ["python", "-m", tool, "--version"],
                             capture_output=True,
                             timeout=30,
-                            creationflags=0x08000000 if hasattr(_sp, "CREATE_NO_WINDOW") else 0,
+                            **run_platform_kwargs(),
                         )
                         out = r.stdout.decode("utf-8", errors="replace").strip().splitlines()
                         lines.append(f"[✓] {tool}: {out[0] if out else 'ok'} (python -m {tool})")
@@ -1400,6 +1520,74 @@ class OAuthGateway:
                 result = self._get_agent_pool().cleanup(
                     str(arguments.get("task_id") or ""),
                     remove_branch=bool(arguments.get("remove_branch", False)),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "spawn_agent":
+                result = self._get_agent_orchestrator().spawn_agent(
+                    workspace=workspace,
+                    prompt=str(arguments.get("prompt") or ""),
+                    title=str(arguments.get("title") or ""),
+                    role=str(arguments.get("role") or "worker"),
+                    executor=str(arguments.get("executor") or "auto"),
+                    model=str(arguments.get("model") or ""),
+                    write=bool(arguments.get("write", True)),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "spawn_agent_team":
+                raw_tasks = arguments.get("tasks") or []
+                if not isinstance(raw_tasks, list):
+                    raise ValueError("tasks 必须是数组。")
+                result = self._get_agent_orchestrator().spawn_agent_team(
+                    workspace=workspace,
+                    objective=str(arguments.get("objective") or ""),
+                    tasks=raw_tasks,
+                    title=str(arguments.get("title") or ""),
+                    executor=str(arguments.get("executor") or "auto"),
+                    model=str(arguments.get("model") or ""),
+                    reviewer=bool(arguments.get("reviewer", True)),
+                    merger=bool(arguments.get("merger", True)),
+                    reviewer_prompt=str(arguments.get("reviewer_prompt") or ""),
+                    merger_prompt=str(arguments.get("merger_prompt") or ""),
+                    reviewer_executor=str(arguments.get("reviewer_executor") or "auto"),
+                    reviewer_model=str(arguments.get("reviewer_model") or ""),
+                    merger_executor=str(arguments.get("merger_executor") or "auto"),
+                    merger_model=str(arguments.get("merger_model") or ""),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "list_agents":
+                result = self._get_agent_orchestrator().list_agents(
+                    team_id=str(arguments.get("team_id") or "")
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "get_agent":
+                result = self._get_agent_orchestrator().get_agent(
+                    str(arguments.get("agent_id") or "")
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "get_agent_team":
+                result = self._get_agent_orchestrator().get_team(
+                    str(arguments.get("team_id") or "")
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "message_agent":
+                result = self._get_agent_orchestrator().message_agent(
+                    str(arguments.get("agent_id") or ""),
+                    str(arguments.get("message") or ""),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "cancel_agent":
+                result = self._get_agent_orchestrator().cancel_agent(
+                    str(arguments.get("agent_id") or "")
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, result))
+            elif name == "wait_agents":
+                raw_ids = arguments.get("agent_ids") or []
+                if raw_ids and not isinstance(raw_ids, list):
+                    raise ValueError("agent_ids 必须是数组。")
+                result = self._get_agent_orchestrator().wait_agents(
+                    agent_ids=[str(item) for item in raw_ids] if isinstance(raw_ids, list) else [],
+                    team_id=str(arguments.get("team_id") or ""),
+                    wait_seconds=int(arguments.get("wait_seconds") or 15),
                 )
                 return JSONResponse(_jsonrpc_result(rpc_id, result))
             else:
@@ -1829,6 +2017,8 @@ class OAuthGateway:
         self._thread.start()
 
     def stop(self) -> None:
+        if self._agent_orchestrator is not None:
+            self._agent_orchestrator.shutdown()
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:

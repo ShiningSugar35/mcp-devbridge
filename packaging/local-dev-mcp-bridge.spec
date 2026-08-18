@@ -1,26 +1,42 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec: MCP DevBridge desktop (onedir).
+"""Cross-platform PyInstaller spec for MCP DevBridge desktop (onedir).
 
-Build:  pyinstaller packaging/local-dev-mcp-bridge.spec --noconfirm
-Output: dist/MCPDevBridge/
+Windows output: dist/.../MCPDevBridge/MCPDevBridge.exe
+Linux output:   dist/.../MCPDevBridge/MCPDevBridge
 """
 from pathlib import Path
+from shutil import copy2
+import sys
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.9.0"
+PROJECT_VERSION = "0.9.1"
+IS_WINDOWS = sys.platform == "win32"
+TOOLS = ROOT / ".tools"
+RUNTIME = TOOLS if IS_WINDOWS else TOOLS / "linux"
+
+runtime_datas = []
+if IS_WINDOWS:
+    for name in ("node.exe", "uv.exe", "uvx.exe"):
+        candidate = RUNTIME / name
+        if candidate.is_file():
+            runtime_datas.append((str(candidate), "runtime"))
+    upgrade_script = ROOT / "scripts" / "live_upgrade.ps1"
+else:
+    candidate = RUNTIME / "node"
+    if candidate.is_file():
+        runtime_datas.append((str(candidate), "runtime"))
+    upgrade_script = ROOT / "scripts" / "live_upgrade.sh"
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry_desktop.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
-datas=[
+    datas=[
         (str(ROOT / "third_party" / "codexpro" / "dist"), "third_party/codexpro/dist"),
         (str(ROOT / "third_party" / "codexpro" / "node_modules"), "third_party/codexpro/node_modules"),
-        (str(ROOT / ".tools" / "node.exe"), "runtime"),
-        (str(ROOT / ".tools" / "uv.exe"), "runtime"),
-        (str(ROOT / ".tools" / "uvx.exe"), "runtime"),
         (str(ROOT / "THIRD_PARTY_LICENSES.md"), "THIRD_PARTY_LICENSES.md"),
-        (str(ROOT / "scripts" / "live_upgrade.ps1"), "scripts"),
+        (str(upgrade_script), "scripts"),
+        *runtime_datas,
     ],
     hiddenimports=[
         "local_dev_mcp_bridge.models",
@@ -30,6 +46,9 @@ datas=[
         "local_dev_mcp_bridge.device_hub",
         "local_dev_mcp_bridge.help_content",
         "local_dev_mcp_bridge.update_manager",
+        "local_dev_mcp_bridge.platform_support",
+        "local_dev_mcp_bridge.agent_pool",
+        "local_dev_mcp_bridge.agent_orchestrator",
         "local_dev_mcp_bridge.audit",
         "local_dev_mcp_bridge.shell",
         "local_dev_mcp_bridge.processes",
@@ -80,9 +99,12 @@ coll = COLLECT(
     name="MCPDevBridge",
 )
 
-# Bundle the cloudflared binary next to the executable.
-from shutil import copy2
-
-TOOLS = ROOT / ".tools"
-if (TOOLS / "cloudflared.exe").is_file():
-    copy2(TOOLS / "cloudflared.exe", str(Path(DISTPATH) / "MCPDevBridge" / "cloudflared.exe"))
+# The tunnel manager intentionally looks next to the desktop executable. Keep
+# cloudflared there on both platforms; this also makes manual diagnostics easy.
+cloudflared_name = "cloudflared.exe" if IS_WINDOWS else "cloudflared"
+cloudflared = RUNTIME / cloudflared_name
+if cloudflared.is_file():
+    target = Path(DISTPATH) / "MCPDevBridge" / cloudflared_name
+    copy2(cloudflared, target)
+    if not IS_WINDOWS:
+        target.chmod(0o755)

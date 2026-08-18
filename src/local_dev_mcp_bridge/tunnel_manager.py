@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import constants
 from .engines import READY_POLL_INTERVAL_SECONDS, EngineManager, EngineState, SpawnError
+from .platform_support import runtime_filename
 
 QUICK_TUNNEL_URL_RE = re.compile(r"https://[a-z0-9][a-z0-9\-]*\.trycloudflare\.com")
 NGROK_URL_RE = re.compile(
@@ -44,13 +45,16 @@ class ConnectionMethod(StrEnum):
 
 
 def default_cloudflared() -> str:
+    filename = runtime_filename("cloudflared")
     if getattr(sys, "frozen", False):
-        packaged = Path(sys.executable).resolve().parent / "cloudflared.exe"
+        packaged = Path(sys.executable).resolve().parent / filename
         if packaged.is_file():
             return str(packaged)
     project_root = Path(__file__).resolve().parents[2]
-    local = project_root / ".tools" / "cloudflared.exe"
-    return str(local) if local.is_file() else (shutil.which("cloudflared") or "")
+    for local in (project_root / ".tools" / filename, project_root / ".tools" / "linux" / filename):
+        if local.is_file():
+            return str(local)
+    return shutil.which("cloudflared") or ""
 
 
 def default_ngrok() -> str:
@@ -82,11 +86,11 @@ class TunnelManager(EngineManager):
     def _apply_executable(self) -> None:
         if self.kind == ConnectionMethod.NGROK:
             if not self.ngrok:
-                raise SpawnError("未找到 ngrok.exe，请安装 ngrok 并加入 PATH。")
+                raise SpawnError("未找到 ngrok，请安装后加入 PATH。")
             self.executable = self.ngrok
         else:
             if not self.cloudflared:
-                raise SpawnError("未找到 cloudflared.exe（项目 .tools 目录或 PATH）。")
+                raise SpawnError("未找到 cloudflared（应用私有运行时、项目 .tools 或 PATH）。")
             self.executable = self.cloudflared
 
     def start(

@@ -74,8 +74,9 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
         window._select_root(project_b.root_path)
         window._apply_selected_project()
         window._poll_status()
-        assert window.start_btn.text() == "启动服务"
-        assert window.start_btn.isEnabled()
+        assert not hasattr(window, "start_btn")
+        assert window.all_services_btn.text() == "一键停止所有服务"
+        assert window.all_services_btn.isEnabled()
         assert window.permission_combo.isEnabled()
         assert window.client_combo.isEnabled()
         assert window.connection_combo.isEnabled()
@@ -84,8 +85,7 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
         window._select_root(project_a.root_path)
         window._apply_selected_project()
         window._poll_status()
-        assert window.start_btn.text() == "停止服务"
-        assert window.start_btn.isEnabled()
+        assert window.all_services_btn.text() == "一键停止所有服务"
         assert not window.permission_combo.isEnabled()
     finally:
         _close(app, window)

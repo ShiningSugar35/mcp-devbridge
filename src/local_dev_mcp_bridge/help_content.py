@@ -160,6 +160,15 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         <li>朋友电脑先启动自己的公网回传（Quick/ngrok/独立域名），再用 6 位配对码加入主 Hub。</li>
         <li>首次成功后 Hub 地址、设备凭据和心跳身份会持久化；重启无需再次配对。Quick 地址变化会由 heartbeat 自动更新到主 Hub。</li></ol>
         <p>共享 Hub 下可以直接让 AI 用 <code>device_id</code> 查询某台电脑的工作区，不必依赖上一次 transport 的设备切换状态。</p>
+        <h3>v0.9.1：SteamOS / Linux Desktop</h3>
+        <p>SteamOS/Linux 使用原生桌面版，不需要 Wine/Proton。配置放在 XDG 用户目录；程序安装到用户目录并创建 Desktop Entry/autostart；Node.js 与 cloudflared 使用应用私有 Linux runtime。Windows 控制桥在 Linux 自动禁用，文件、Shell、Git、进程与 Agent 使用 Linux 原生工具。</p>
+        <p>Linux 凭据优先写入桌面 Secret Service；不可用时进入 AES-GCM 加密 fallback。不要把 Tunnel Token 写进 shell 脚本或 projects.json。</p>
+        <h3>v0.9.1：Agent Orchestrator</h3>
+        <p><b>Agent Pool 是底层执行器；Agent Orchestrator 是上层编排器。</b>单 Agent 用 <code>spawn_agent</code>，后续可用 <code>message_agent</code> 继续派指令；Team 用 <code>spawn_agent_team</code> 一次提交多个 worker，系统在 worker 完成后自动启动 Reviewer，再在独立 integration worktree 启动 Merger。</p>
+        <p>写 Agent 默认拥有独立 Git branch/worktree。Orchestrator 不会自动 push；最终 integration branch 仍由主会话/用户审阅后决定是否合并到正式分支。OpenCode/Claude CLI 是 one-shot executor，所以 running Agent 收到 message 后会在同一 branch/worktree 排一个 continuation turn，而不是伪装成实时 stdin 对话。</p>
+        <h3>v0.9.1：一台电脑多个项目怎么配</h3>
+        <p>不要再给 C:/D:/E:/F: 四个项目分别填写同一个域名和 Tunnel Token。到工作台 → 连接信息 → <b>设备全局连接配置</b>，一次保存连接方式、固定域名和本设备专属 Tunnel 凭据；现有项目会同步，后续新增项目自动继承。</p>
+        <p>Cloudflare Published Application 的 Service URL 对应的是这台设备唯一的 Gateway（默认 <code>http://localhost:8786</code>），不是每个项目各一套公网 Gateway。项目之间保持独立的是 CodexPro/Windows 内部端口。</p>
         <h3>方式 B：每台电脑一个固定 App（推荐两个人长期并行）</h3>
         <p>主机继续使用 <code>mcp.example.com</code>。朋友在 Cloudflare 新建<b>另一个独立 Tunnel</b>，例如发布 <code>jerry.example.com → http://localhost:8786</code>，并把这个新 Tunnel 自己的 Token 填到朋友电脑。</p>
         <p><b>两台电脑都写 localhost:8786 完全没问题</b>：localhost 属于各自电脑。真正禁止的是两台独立 Gateway 共用同一个 Tunnel UUID/Token；那会形成 replicas，Cloudflare 可能把 OAuth 请求送到不同机器。</p>

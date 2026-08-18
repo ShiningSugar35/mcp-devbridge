@@ -16,6 +16,7 @@ from .secrets import SecretsStore, generate_token
 
 PROJECT_ACCESS_TOKEN_PREFIX = f"{APP_IDENT}/ProjectAccessToken/"
 PROJECT_TUNNEL_TOKEN_PREFIX = f"{APP_IDENT}/ProjectCloudflareTunnelToken/"
+GLOBAL_TUNNEL_TOKEN_CRED_NAME = f"{APP_IDENT}/GlobalCloudflareTunnelToken"
 LEGACY_TUNNEL_TOKEN_CRED_NAME = f"{APP_IDENT}/CloudflareTunnelToken"
 LEGACY_ACCESS_OWNER_CRED_NAME = "LocalDevMCPBridge/LegacyAccessMigrationOwner"
 
@@ -80,6 +81,33 @@ def regenerate_project_access_token(project_id: str, *, store: Any | None = None
     return value
 
 
+def get_global_tunnel_token(*, store: Any | None = None) -> str | None:
+    """Return the device-level Cloudflare token, migrating the historical global slot once."""
+    secrets = store or SecretsStore()
+    value = secrets.get(GLOBAL_TUNNEL_TOKEN_CRED_NAME)
+    if value:
+        return value
+    legacy = secrets.get(LEGACY_TUNNEL_TOKEN_CRED_NAME)
+    if legacy:
+        secrets.set(GLOBAL_TUNNEL_TOKEN_CRED_NAME, legacy)
+        return legacy
+    return None
+
+
+def remember_global_tunnel_token(token: str, *, store: Any | None = None) -> None:
+    """Persist the device-level Cloudflare token in encrypted storage."""
+    token = token.strip()
+    if not token:
+        return
+    secrets = store or SecretsStore()
+    secrets.set(GLOBAL_TUNNEL_TOKEN_CRED_NAME, token)
+
+
+def clear_global_tunnel_token(*, store: Any | None = None) -> None:
+    secrets = store or SecretsStore()
+    secrets.delete(GLOBAL_TUNNEL_TOKEN_CRED_NAME)
+
+
 def get_project_tunnel_token(
     project_id: str,
     *,
@@ -93,10 +121,10 @@ def get_project_tunnel_token(
     if value:
         return value
     if migrate_legacy:
-        legacy = secrets.get(LEGACY_TUNNEL_TOKEN_CRED_NAME)
-        if legacy:
-            secrets.set(key, legacy)
-            return legacy
+        shared = get_global_tunnel_token(store=secrets)
+        if shared:
+            secrets.set(key, shared)
+            return shared
     return None
 
 
@@ -131,10 +159,14 @@ def load_project_ui_secrets(project_id: str, *, store: Any | None = None) -> tup
 __all__ = [
     "PROJECT_ACCESS_TOKEN_PREFIX",
     "PROJECT_TUNNEL_TOKEN_PREFIX",
+    "GLOBAL_TUNNEL_TOKEN_CRED_NAME",
     "get_project_access_token",
     "ensure_project_access_token",
     "activate_project_access_token",
     "regenerate_project_access_token",
+    "get_global_tunnel_token",
+    "remember_global_tunnel_token",
+    "clear_global_tunnel_token",
     "get_project_tunnel_token",
     "remember_project_tunnel_token",
     "clear_project_tunnel_token",
