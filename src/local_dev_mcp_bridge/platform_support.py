@@ -43,20 +43,19 @@ def popen_platform_kwargs(*, new_session: bool = False, detached: bool = False) 
     """
     if IS_WINDOWS:
         flags = 0
-        if hasattr(subprocess, "CREATE_NO_WINDOW"):
-            flags |= int(subprocess.CREATE_NO_WINDOW)
-        if new_session and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-            flags |= int(subprocess.CREATE_NEW_PROCESS_GROUP)
-        if detached and hasattr(subprocess, "DETACHED_PROCESS"):
-            flags |= int(subprocess.DETACHED_PROCESS)
+        flags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if new_session:
+            flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        if detached:
+            flags |= int(getattr(subprocess, "DETACHED_PROCESS", 0))
         return {"creationflags": flags}
     return {"start_new_session": bool(new_session or detached)}
 
 
 def run_platform_kwargs() -> dict[str, Any]:
     """Cross-platform kwargs for short ``subprocess.run`` probes."""
-    if IS_WINDOWS and hasattr(subprocess, "CREATE_NO_WINDOW"):
-        return {"creationflags": int(subprocess.CREATE_NO_WINDOW)}
+    if IS_WINDOWS:
+        return {"creationflags": int(getattr(subprocess, "CREATE_NO_WINDOW", 0))}
     return {}
 
 

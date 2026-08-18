@@ -2,7 +2,7 @@
 
 > **让 ChatGPT、Gemini Spark 等支持 MCP 的网页端，直接连接你的本地开发项目。**
 
-MCP DevBridge 是一款面向 Windows 的可视化本地开发桥接工具。  
+MCP DevBridge 是一款面向 Windows 与 Linux/SteamOS Desktop Mode 的可视化本地开发桥接工具。
 你在桌面选择一个项目目录并启动服务后，ChatGPT、Gemini Spark 等 MCP 客户端就可以通过一个固定的 HTTPS MCP 地址读取项目、搜索代码、修改文件、执行测试和 Git 操作。
 
 它本身**不调用任何大模型 API**，也不需要你为 MCP DevBridge 配置 OpenAI / Gemini 模型 API Key。  

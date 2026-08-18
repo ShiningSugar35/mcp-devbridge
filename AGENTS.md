@@ -15,7 +15,7 @@
 
 ## 二、项目一句话
 
-**MCP DevBridge**（原 LocalDev MCP Bridge）：一款 Windows 桌面程序（PySide6 单窗口），让用户在桌面选定一个本地开发项目，
+**MCP DevBridge**（原 LocalDev MCP Bridge）：一款 Windows / Linux（含 SteamOS Desktop Mode）桌面程序（PySide6 单窗口），让用户在桌面选定一个本地开发项目，
 一键启动独立的 MCP Server 子进程（仅监听 127.0.0.1），并通过 **Cloudflare Named Tunnel** 提供一个
 **长期固定、永不变化的 HTTPS MCP 地址**，供 ChatGPT / Gemini 等支持自定义 MCP 的客户端接入。
 

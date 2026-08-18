@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import importlib
 import json
 import os
 import secrets
@@ -226,7 +227,7 @@ class SecretsStore:
     def set(self, key: str, value: str) -> None:
         if self._use_native and IS_WINDOWS:
             try:
-                import win32cred
+                win32cred = importlib.import_module("win32cred")
 
                 win32cred.CredWrite(
                     {
@@ -249,7 +250,7 @@ class SecretsStore:
     def get(self, key: str) -> str | None:
         if self._use_native and IS_WINDOWS:
             try:
-                import win32cred
+                win32cred = importlib.import_module("win32cred")
 
                 cred = win32cred.CredRead(key, win32cred.CRED_TYPE_GENERIC)
                 blob = cred["CredentialBlob"]
@@ -271,7 +272,7 @@ class SecretsStore:
     def delete(self, key: str) -> None:
         if self._use_native and IS_WINDOWS:
             try:
-                import win32cred
+                win32cred = importlib.import_module("win32cred")
 
                 win32cred.CredDelete(key, win32cred.CRED_TYPE_GENERIC)
             except Exception:
