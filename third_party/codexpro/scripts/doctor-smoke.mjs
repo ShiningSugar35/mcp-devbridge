@@ -79,19 +79,26 @@ const invalidDoctor = spawnSync(process.execPath, [
   String(await getFreePort())
 ], {
   cwd: path.resolve('.'),
-  env: { ...process.env, CODEXPRO_HOME: home },
+  // Remove option env overrides so this checks the invalid saved profile itself
+  // identically on Windows and Linux rather than inheriting the parent engine.
+  env: Object.fromEntries(Object.entries({ ...process.env, CODEXPRO_HOME: home }).filter(([key]) => ![
+    'CODEXPRO_BASH_MODE',
+    'CODEXPRO_WRITE_MODE',
+    'CODEXPRO_TOOL_MODE'
+  ].includes(key))),
   encoding: 'utf8'
 });
 const invalidOutput = `${invalidDoctor.stdout}\n${invalidDoctor.stderr}`;
 if (
-  invalidDoctor.status !== 0 ||
+  invalidDoctor.status === 0 ||
   !invalidOutput.includes('Bash mode') ||
-  !invalidOutput.includes('full') ||
+  !invalidOutput.includes('--bash must be off, safe, or full') ||
   !invalidOutput.includes('Write mode') ||
-  !invalidOutput.includes('workspace') ||
-  !invalidOutput.includes('Tool mode')
+  !invalidOutput.includes('--write must be off, handoff, or workspace') ||
+  !invalidOutput.includes('Tool mode') ||
+  !invalidOutput.includes('--tool-mode must be minimal, standard, or full')
 ) {
-  throw new Error(`doctor did not safely normalize invalid saved profile values\nstdout:\n${invalidDoctor.stdout}\nstderr:\n${invalidDoctor.stderr}`);
+  throw new Error(`doctor did not reject invalid saved profile values deterministically\nstdout:\n${invalidDoctor.stdout}\nstderr:\n${invalidDoctor.stderr}`);
 }
 
 console.log('✓ doctor smoke test passed');

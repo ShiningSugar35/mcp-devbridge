@@ -468,11 +468,23 @@ export class BashTaskManager {
       task.truncated = task.truncated || next.truncated;
       task.finishedAtMs = Date.now();
     });
+    child.on("exit", (exitCode, signal) => {
+      // On Windows, taskkill /T /F can terminate the process tree before Node's
+      // stdio streams emit `close`. Cancellation is a process-lifecycle state,
+      // so mark it terminal as soon as the child actually exits instead of
+      // leaving the task stuck in `cancelling` while pipe cleanup catches up.
+      task.exitCode = exitCode;
+      task.signal = signal;
+      if (task.status === "cancelling") {
+        task.status = "cancelled";
+        task.finishedAtMs = Date.now();
+      }
+    });
     child.on("close", (exitCode, signal) => {
       task.exitCode = exitCode;
       task.signal = signal;
-      task.finishedAtMs = Date.now();
-      if (task.status === "cancelling") {
+      task.finishedAtMs = task.finishedAtMs ?? Date.now();
+      if (task.status === "cancelling" || task.status === "cancelled") {
         task.status = "cancelled";
       } else if (task.status !== "failed") {
         task.status = exitCode === 0 ? "completed" : "failed";

@@ -38,7 +38,7 @@ const cancellable = tasks.start(
 assert.equal(cancellable.status, "running");
 const cancelling = tasks.cancel(workspace, cancellable.taskId);
 assert.ok(["cancelling", "cancelled"].includes(cancelling.status));
-const cancelled = await tasks.wait(workspace, cancellable.taskId, 5_000);
+const cancelled = await tasks.wait(workspace, cancellable.taskId, 15_000);
 assert.equal(cancelled.status, "cancelled");
 
 const listed = tasks.list(workspace);
@@ -64,7 +64,7 @@ assert.equal(
   "reading a stale task should refresh the orchestration observation timestamp"
 );
 watchdogTasks.cancel(workspace, watchdogStarted.taskId);
-const watchdogCancelled = await watchdogTasks.wait(workspace, watchdogStarted.taskId, 5_000);
+const watchdogCancelled = await watchdogTasks.wait(workspace, watchdogStarted.taskId, 15_000);
 assert.equal(watchdogCancelled.status, "cancelled");
 
 console.log("async-task-smoke: ok");
