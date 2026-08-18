@@ -16,7 +16,7 @@ def test_update_version_helpers_and_bundled_script() -> None:
     assert version_tuple("v0.8.0") == (0, 8, 0)
     assert is_newer("0.8.0", "0.7.2")
     assert not is_newer("0.7.2", "0.8.0")
-    assert bundled_upgrade_script().name == "live_upgrade.ps1"
+    assert bundled_upgrade_script().name == ("live_upgrade.ps1" if os.name == "nt" else "live_upgrade.sh")
     assert bundled_upgrade_script().is_file()
 
 

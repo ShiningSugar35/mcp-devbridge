@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import cast
@@ -117,12 +118,15 @@ def test_normalize_first_word():
 def test_default_shell_never_wsl():
     shell = default_shell()
     assert shell.kind != "wsl"
-    assert shell.executable, "windows powershell (or pwsh/cmd) must exist on CI"
+    assert shell.executable, "the platform default shell must exist on CI"
 
 
 def test_detect_reports_powershell_family():
     kinds = {s.kind for s in detect_shells()}
-    assert "windows_powershell" in kinds or "pwsh" in kinds or "cmd" in kinds
+    if os.name == "nt":
+        assert "windows_powershell" in kinds or "pwsh" in kinds or "cmd" in kinds
+    else:
+        assert kinds & {"bash", "sh", "dash", "zsh", "fish"}
 
 
 def test_get_shell_info_json():

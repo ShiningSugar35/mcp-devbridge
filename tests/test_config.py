@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -153,5 +154,6 @@ class TestSecrets:
         monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(isolated_config))
         store = SecretsStore(use_credential_manager=False)
         store.set(constants.ACCESS_TOKEN_CRED_NAME, "super-secret-token-value")
-        raw = (isolated_config / "secrets.dpapi.json").read_bytes()
+        filename = "secrets.dpapi.json" if os.name == "nt" else "secrets.aesgcm"
+        raw = (isolated_config / filename).read_bytes()
         assert b"super-secret-token-value" not in raw
