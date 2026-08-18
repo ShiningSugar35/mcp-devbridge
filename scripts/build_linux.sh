@@ -23,6 +23,9 @@ PACKAGE="$ROOT/release/MCPDevBridge-Linux-x86_64-$VERSION.tar.gz"
 echo "== Linux 1/7 portable runtimes =="
 bash scripts/prepare_runtime_linux.sh
 
+echo "== Linux 1b/7 CodexPro build =="
+( cd third_party/codexpro && npm run build )
+
 echo "== Linux 2/7 tests =="
 QT_QPA_PLATFORM=offscreen "$PY" -m pytest tests/ -q
 
@@ -30,8 +33,8 @@ echo "== Linux 3/7 lint/typecheck =="
 "$PY" -m ruff check src tests
 "$PY" -m pyright --pythonpath "$PY" src tests
 
-echo "== Linux 4/7 CodexPro =="
-( cd third_party/codexpro && npm run build && npm run smoke )
+echo "== Linux 4/7 CodexPro smoke =="
+( cd third_party/codexpro && npm run smoke )
 
 echo "== Linux 5/7 PyInstaller =="
 rm -rf "$DIST_ROOT" "$WORK_DIR"
