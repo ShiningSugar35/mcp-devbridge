@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -68,6 +69,7 @@ from . import APP_NAME, __version__, constants
 from .app_state import ServiceCoordinator, StartOptions
 from .audit import AuditQuery, available_tool_names, query_logs
 from .backend_manager import port_in_use
+from .chatgpt_desktop import bridge_status, prepare_chatgpt_bridge, restore_normal_chatgpt_launch
 from .config_store import (
     load_app_config,
     load_projects,
@@ -228,6 +230,288 @@ def _remember_tunnel_token(token: str) -> None:
         SecretsStore().set(TUNNEL_TOKEN_CRED_NAME, token)
 
 
+class AgentPanel(QDialog):
+    """Live view/controller for the Gateway-owned logical Agent orchestrator."""
+
+    def __init__(
+        self,
+        orchestrator_provider: Callable[[], Any | None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._orchestrator_provider = orchestrator_provider
+        self.setWindowTitle("Agent 管理")
+        self.resize(1080, 700)
+        self.setMinimumSize(820, 520)
+
+        layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.summary = QLabel("Agent 控制器状态：检查中…")
+        top.addWidget(self.summary, 1)
+        self.refresh_btn = QPushButton("刷新")
+        self.message_btn = QPushButton("发消息")
+        self.cancel_btn = QPushButton("取消")
+        self.cleanup_btn = QPushButton("清理")
+        for button in (self.refresh_btn, self.message_btn, self.cancel_btn, self.cleanup_btn):
+            top.addWidget(button)
+        layout.addLayout(top)
+
+        bridge_row = QHBoxLayout()
+        self.chatgpt_bridge_label = QLabel("ChatGPT Chat Agent：检查中…")
+        self.chatgpt_bridge_label.setWordWrap(True)
+        bridge_row.addWidget(self.chatgpt_bridge_label, 1)
+        self.prepare_chatgpt_btn = QPushButton("准备 Chat Agent")
+        self.prepare_chatgpt_btn.setToolTip(
+            "显式重启 ChatGPT Desktop，并仅在 127.0.0.1 打开 CDP 调试端口，用于创建普通 Chat 子 Agent。"
+        )
+        self.restore_chatgpt_btn = QPushButton("恢复普通启动")
+        self.restore_chatgpt_btn.setToolTip("关闭 Chat Agent bridge，并按普通方式重启 ChatGPT Desktop。")
+        bridge_row.addWidget(self.prepare_chatgpt_btn)
+        bridge_row.addWidget(self.restore_chatgpt_btn)
+        layout.addLayout(bridge_row)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(
+            ["类型", "名称", "角色/阶段", "状态", "执行器 / 模型", "目标工作区", "隔离 / 分支", "耗时"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.itemSelectionChanged.connect(self._show_selected)
+        layout.addWidget(self.table, 3)
+
+        self.detail = QPlainTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setPlaceholderText("选择一个 Team 或 Agent 查看状态、错误、输出与完成回执。")
+        layout.addWidget(self.detail, 2)
+
+        self.refresh_btn.clicked.connect(self.refresh)
+        self.message_btn.clicked.connect(self._message_selected)
+        self.cancel_btn.clicked.connect(self._cancel_selected)
+        self.cleanup_btn.clicked.connect(self._cleanup_selected)
+        self.prepare_chatgpt_btn.clicked.connect(self._prepare_chatgpt_bridge)
+        self.restore_chatgpt_btn.clicked.connect(self._restore_chatgpt_bridge)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.refresh)
+        self._timer.start(1500)
+        self.refresh()
+
+    def _orchestrator(self) -> Any | None:
+        try:
+            return self._orchestrator_provider()
+        except Exception:
+            return None
+
+    def _prepare_chatgpt_bridge(self) -> None:
+        if QMessageBox.question(
+            self,
+            "准备 ChatGPT Chat Agent",
+            "这会关闭并重启本机 ChatGPT Desktop，并打开一个只监听 127.0.0.1 的 CDP 调试端口。\n\n"
+            "它仅用于自动创建、提交和观察普通 Chat 子 Agent；实际本地开发仍通过你已连接的 MCP DevBridge 完成。\n\n"
+            "当前 ChatGPT Desktop 窗口会短暂重启。继续吗？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.prepare_chatgpt_btn.setEnabled(False)
+        _run_async(
+            lambda: prepare_chatgpt_bridge(restart=True),
+            lambda result: self._bridge_action_done("准备", result),
+        )
+
+    def _restore_chatgpt_bridge(self) -> None:
+        if QMessageBox.question(
+            self,
+            "恢复普通 ChatGPT 启动",
+            "将关闭 Chat Agent bridge 并重启 ChatGPT Desktop，不再保留 CDP 调试端口。继续吗？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.restore_chatgpt_btn.setEnabled(False)
+        _run_async(
+            restore_normal_chatgpt_launch,
+            lambda result: self._bridge_action_done("恢复", result),
+        )
+
+    def _bridge_action_done(self, action: str, result: Any) -> None:
+        if isinstance(result, Exception):
+            QMessageBox.warning(self, f"ChatGPT Chat Agent {action}失败", str(result))
+        self.refresh()
+
+    def _selected_ref(self) -> tuple[str, str] | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        if item is None:
+            return None
+        value = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if ":" not in value:
+            return None
+        kind, object_id = value.split(":", 1)
+        return kind, object_id
+
+    @staticmethod
+    def _seconds(value: object) -> str:
+        try:
+            number = float(str(value or 0.0))
+        except (TypeError, ValueError):
+            return "—"
+        return f"{number:.1f}s" if number > 0 else "—"
+
+    def refresh(self) -> None:
+        bridge = bridge_status()
+        ready = bool(bridge.get("ready"))
+        enabled = bool(bridge.get("enabled"))
+        port = bridge.get("debug_port") or "—"
+        if ready:
+            self.chatgpt_bridge_label.setText(
+                f"ChatGPT Chat Agent：就绪 · 普通 Chat · 127.0.0.1:{port} · auto 优先使用"
+            )
+        elif enabled:
+            self.chatgpt_bridge_label.setText(
+                f"ChatGPT Chat Agent：已启用但 Desktop 未就绪 · 预期 127.0.0.1:{port}"
+            )
+        else:
+            self.chatgpt_bridge_label.setText("ChatGPT Chat Agent：未启用 · auto 将回退 OpenCode / Claude")
+        self.prepare_chatgpt_btn.setEnabled(not ready)
+        self.restore_chatgpt_btn.setEnabled(enabled or ready)
+
+        orchestrator = self._orchestrator()
+        if orchestrator is None:
+            self.summary.setText("Agent 控制器：服务未启动；启动任一项目服务后可实时管理 Agent。")
+            self.table.setRowCount(0)
+            self.detail.clear()
+            return
+        try:
+            payload = orchestrator.list_agents()
+        except Exception as exc:
+            self.summary.setText(f"Agent 控制器读取失败：{exc}")
+            return
+        agents = payload.get("agents") if isinstance(payload, dict) else []
+        teams = payload.get("teams") if isinstance(payload, dict) else []
+        agents = agents if isinstance(agents, list) else []
+        teams = teams if isinstance(teams, list) else []
+        self.summary.setText(
+            f"Agent：{len(agents)} · Team：{len(teams)} · 运行 {payload.get('running', 0)} · "
+            f"排队 {payload.get('queued', 0)} · 并发上限 {payload.get('max_parallel', '—')}"
+        )
+        selected = self._selected_ref()
+        rows: list[tuple[str, dict[str, Any]]] = []
+        rows.extend(("team", item) for item in teams if isinstance(item, dict))
+        rows.extend(("agent", item) for item in agents if isinstance(item, dict))
+        self.table.setRowCount(len(rows))
+        select_row = -1
+        for row, (kind, item) in enumerate(rows):
+            object_id = str(item.get("id") or "")
+            role_stage = str(item.get("role") or item.get("stage") or "—")
+            executor = str(item.get("executor") or "")
+            model = str(item.get("model") or "")
+            executor_model = " / ".join(part for part in (executor, model) if part) or "—"
+            isolation = str(item.get("isolation_mode") or "")
+            branch = str(item.get("branch") or item.get("integration_branch") or "")
+            isolation_branch = " / ".join(part for part in (isolation, branch) if part) or "—"
+            values = [
+                "Team" if kind == "team" else "Agent",
+                str(item.get("title") or object_id[:8]),
+                role_stage,
+                str(item.get("state") or "—"),
+                executor_model,
+                str(item.get("workspace") or "—"),
+                isolation_branch,
+                self._seconds(item.get("duration_seconds")),
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, f"{kind}:{object_id}")
+                self.table.setItem(row, column, cell)
+            if selected == (kind, object_id):
+                select_row = row
+        if select_row >= 0:
+            self.table.selectRow(select_row)
+        elif rows:
+            self.table.selectRow(0)
+        self._sync_buttons()
+
+    def _snapshot(self) -> dict[str, Any] | None:
+        selected = self._selected_ref()
+        orchestrator = self._orchestrator()
+        if selected is None or orchestrator is None:
+            return None
+        kind, object_id = selected
+        try:
+            value = orchestrator.get_team(object_id) if kind == "team" else orchestrator.get_agent(object_id)
+        except Exception as exc:
+            self.detail.setPlainText(f"读取失败：{exc}")
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _show_selected(self) -> None:
+        snapshot = self._snapshot()
+        self.detail.setPlainText(json.dumps(snapshot, ensure_ascii=False, indent=2, default=str) if snapshot else "")
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        selected = self._selected_ref()
+        is_agent = selected is not None and selected[0] == "agent"
+        snapshot = self._snapshot() if selected is not None else None
+        terminal = bool(snapshot and snapshot.get("terminal"))
+        self.message_btn.setEnabled(is_agent and bool(snapshot) and snapshot.get("state") != "cancelled")
+        self.cancel_btn.setEnabled(is_agent and bool(snapshot) and not terminal)
+        self.cleanup_btn.setEnabled(bool(snapshot) and terminal)
+
+    def _message_selected(self) -> None:
+        selected = self._selected_ref()
+        orchestrator = self._orchestrator()
+        if selected is None or selected[0] != "agent" or orchestrator is None:
+            return
+        message, ok = QInputDialog.getMultiLineText(self, "发消息给 Agent", "追加指令：")
+        if not ok or not message.strip():
+            return
+        agent_id = selected[1]
+        _run_async(
+            lambda: orchestrator.message_agent(agent_id, message),
+            lambda result: self._action_done("消息", result),
+        )
+
+    def _cancel_selected(self) -> None:
+        selected = self._selected_ref()
+        orchestrator = self._orchestrator()
+        if selected is None or selected[0] != "agent" or orchestrator is None:
+            return
+        agent_id = selected[1]
+        _run_async(
+            lambda: orchestrator.cancel_agent(agent_id),
+            lambda result: self._action_done("取消", result),
+        )
+
+    def _cleanup_selected(self) -> None:
+        selected = self._selected_ref()
+        orchestrator = self._orchestrator()
+        if selected is None or orchestrator is None:
+            return
+        kind, object_id = selected
+        if QMessageBox.question(
+            self,
+            "清理 Agent 记录",
+            "将删除终态元数据和隔离 worktree/分支；不会删除主工作区文件。继续吗？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        operation = (
+            (lambda: orchestrator.cleanup_team(object_id, remove_branches=True))
+            if kind == "team"
+            else (lambda: orchestrator.cleanup_agent(object_id, remove_branch=True))
+        )
+        _run_async(operation, lambda result: self._action_done("清理", result))
+
+    def _action_done(self, action: str, result: Any) -> None:
+        if isinstance(result, Exception):
+            QMessageBox.warning(self, f"Agent {action}失败", str(result))
+        self.refresh()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -274,6 +558,7 @@ class MainWindow(QMainWindow):
         self._tunnel_token_default = ""
         self._global_tunnel_token = ""
         self._all_services_busy = False
+        self._agent_panel: AgentPanel | None = None
         self._initialize_global_connection_defaults()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_status)
@@ -297,6 +582,20 @@ class MainWindow(QMainWindow):
         self._update_timer.start(12 * 60 * 60 * 1000)
         QTimer.singleShot(1000, self._sanitize_remote_replica_configuration)
         QTimer.singleShot(2000, self._runtime_preflight)
+
+    def _current_agent_orchestrator(self) -> Any | None:
+        gateway = self.coord.gateway
+        if gateway is None or not gateway.is_running:
+            return None
+        return gateway._get_agent_orchestrator()
+
+    def _show_agent_panel(self) -> None:
+        if self._agent_panel is None:
+            self._agent_panel = AgentPanel(self._current_agent_orchestrator, self)
+        self._agent_panel.refresh()
+        self._agent_panel.show()
+        self._agent_panel.raise_()
+        self._agent_panel.activateWindow()
 
     def _initialize_global_connection_defaults(self) -> None:
         """Migrate one existing project's fixed connection into device-wide defaults."""
@@ -441,6 +740,15 @@ class MainWindow(QMainWindow):
         title_col.addWidget(title)
         title_col.addWidget(subtitle)
         header.addLayout(title_col, 1)
+        self.agent_btn = QPushButton("Agent 管理")
+        self.agent_btn.setToolTip("查看和管理 Agent / Team（Ctrl+Shift+A）")
+        self.agent_btn.clicked.connect(self._show_agent_panel)
+        header.addWidget(self.agent_btn)
+        self.agent_action = QAction("Agent 管理", self)
+        self.agent_action.setShortcut("Ctrl+Shift+A")
+        self.agent_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.agent_action.triggered.connect(self._show_agent_panel)
+        self.addAction(self.agent_action)
         self.update_btn = QToolButton()
         self.update_btn.setText("↑")
         self.update_btn.setObjectName("UpdateButton")

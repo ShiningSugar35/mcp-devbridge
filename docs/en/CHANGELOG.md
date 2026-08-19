@@ -2,6 +2,26 @@
 
 All dates are local development dates.
 
+## 0.9.3 (2026-08-19) — ordinary ChatGPT Chat as the primary local Agent executor
+
+- Add an opt-in Windows ChatGPT Desktop bridge that launches `mode=chat` child conversations and submits the real composer Send control through loopback-only CDP; it does not use private ChatGPT HTTP APIs or extract account tokens.
+- Let ordinary Chat child agents perform local development through the user's already-connected MCP DevBridge app; when the bridge is ready, `auto` prefers `chatgpt`, with OpenCode/Claude retained as fallbacks.
+- Require a task-id JSON receipt written and read back through MCP before Chat Agent completion is trusted; logical cancellation opens the exact child conversation and presses its real Stop control.
+- Propagate both routed drive root and formal `devbridge_workspace_id` into each child Agent contract so every MCP call remains stateless across C:/D: and transport recreation.
+- Keep Git worktree isolation for Chat writers by placing managed worktrees under the routed drive where the child MCP session can access them.
+- Add Agent Panel controls plus MCP status/prepare/restore controls for the Chat bridge.
+- Real local validation: one direct managed Chat writer completed with verified receipt; a Git worktree writer changed only its isolated checkout; a 3-Agent direct-write batch completed 3/3 with ~92s wall time versus ~231s summed individual durations.
+
+## 0.9.2 (2026-08-18) — reliable Agent control, non-Git writes and lean packaging
+
+- Return MCP-compliant `content` / `structuredContent` envelopes for Gateway-local Agent tools.
+- Add `target_path` plus `auto / git_worktree / direct` write isolation so drive roots and ordinary non-Git folders can run write agents while Git repositories keep worktree isolation.
+- Require machine-readable success receipts from real executors and make Agent Teams `all_required` by default; partial worker success no longer becomes a successful Team.
+- Add logical Agent/Team cleanup, a desktop Agent management panel with `Ctrl+Shift+A`, and model/isolation/output visibility.
+- Run OpenCode with `--pure` and default unspecified OpenCode tasks to the free Zen model `opencode/nemotron-3-ultra-free` (environment override supported).
+- Split Agent argument dispatch out of the OAuth Gateway and reduce the main local-tool dispatch complexity substantially.
+- Build a production-only CodexPro runtime from package-lock metadata so TypeScript/esbuild/tsx dev dependencies are excluded from installers without changing the developer checkout.
+
 ## 0.9.1 (2026-08-18) — global device connection and reliable multi-project controls
 
 - Add a device-level connection profile in the Workbench so connection mode, public hostname and the encrypted Cloudflare tunnel credential can be entered once, applied to every existing project, and inherited by new projects.

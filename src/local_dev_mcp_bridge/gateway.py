@@ -46,9 +46,11 @@ from starlette.responses import (
 from starlette.routing import Route
 
 from . import constants
+from .agent_gateway import execute_agent_tool
 from .agent_orchestrator import AgentOrchestrator
 from .agent_pool import AgentPool
 from .audit import AuditLogger
+from .chatgpt_desktop import bridge_status, prepare_chatgpt_bridge, restore_normal_chatgpt_launch
 from .constants import LOG_DIR as _LOG_DIR
 from .device_hub import DeviceRegistry
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
@@ -94,6 +96,8 @@ _AGENT_ORCHESTRATOR_TOOL_NAMES = frozenset(
         "message_agent",
         "cancel_agent",
         "wait_agents",
+        "cleanup_agent",
+        "cleanup_agent_team",
     }
 )
 _AGENT_ORCHESTRATOR_SPAWN_TOOL_NAMES = frozenset({"spawn_agent", "spawn_agent_team"})
@@ -106,6 +110,9 @@ _LOCAL_TOOL_NAMES = (
             "run_command",
             "run_program",
             "shell_self_test",
+            "chatgpt_bridge_status",
+            "prepare_chatgpt_bridge",
+            "restore_chatgpt_bridge",
             "devbridge_list_workspaces",
             "devbridge_get_current_workspace",
             "devbridge_switch_workspace",
@@ -247,6 +254,27 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "chatgpt_bridge_status",
+        "description": "Show whether the local ChatGPT Desktop ordinary-Chat Agent bridge is enabled and ready. This is read-only.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "prepare_chatgpt_bridge",
+        "description": "Prepare local ChatGPT Desktop ordinary Chat as an MCP-backed Agent executor. By default it will not restart ChatGPT; pass restart=true only with explicit user approval because current ChatGPT Desktop windows will restart.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "restart": {"type": "boolean", "description": "Explicitly allow restarting ChatGPT Desktop if CDP is not already ready. Defaults false."},
+                "debug_port": {"type": "integer", "minimum": 1024, "maximum": 65535, "description": "Optional loopback CDP port. Usually omit."},
+            },
+        },
+    },
+    {
+        "name": "restore_chatgpt_bridge",
+        "description": "Disable the ChatGPT ordinary-Chat Agent bridge and relaunch ChatGPT Desktop normally without the CDP port. This restarts ChatGPT Desktop.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "agent_pool_capabilities",
         "description": "Show local Agent Pool executor availability, physical concurrency limits, and worktree-isolation support.",
         "inputSchema": {
@@ -264,7 +292,7 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
             "properties": {
                 "prompt": {"type": "string", "description": "Detailed bounded task for the worker agent."},
                 "title": {"type": "string", "description": "Short task title."},
-                "executor": {"type": "string", "enum": ["auto", "opencode", "claude"], "description": "Local executor. auto uses the preferred available CLI."},
+                "executor": {"type": "string", "enum": ["auto", "chatgpt", "opencode", "claude"], "description": "Local executor. auto uses the preferred available CLI."},
                 "model": {"type": "string", "description": "Optional provider/model identifier understood by OpenCode."},
                 "write": {"type": "boolean", "description": "Allow code changes. Defaults true and requires a Git repository/worktree."},
                 "device_id": {"type": "string", "description": "Optional target device ID."},
@@ -287,7 +315,7 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
                         "properties": {
                             "prompt": {"type": "string"},
                             "title": {"type": "string"},
-                            "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                            "executor": {"type": "string", "enum": ["auto", "chatgpt", "opencode", "claude"]},
                             "model": {"type": "string"},
                             "write": {"type": "boolean"},
                         },
@@ -356,16 +384,16 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "spawn_agent",
-        "description": "Spawn one persistent logical coding Agent. Write agents run in an isolated Git worktree/branch. Use message_agent for later instructions; running one-shot CLIs receive them as a continuation turn on the same branch.",
+        "description": "Spawn one persistent logical coding Agent. Write agents use Git worktree isolation when available, or direct mode for non-Git targets. Use message_agent for later instructions; running one-shot CLIs receive them as a continuation turn on the same branch.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "Bounded assignment."},
                 "title": {"type": "string"},
                 "role": {"type": "string", "enum": ["worker", "reviewer", "merger"], "description": "Defaults worker."},
-                "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "executor": {"type": "string", "enum": ["auto", "chatgpt", "opencode", "claude"]},
                 "model": {"type": "string"},
-                "write": {"type": "boolean", "description": "Defaults true. Write mode creates an isolated Git worktree."},
+                "write": {"type": "boolean", "description": "Defaults true. auto uses a Git worktree in repositories and direct mode otherwise."},
                 "device_id": {"type": "string", "description": "Optional target device ID."},
                 "project_id": {"type": "string", "description": "Optional running project ID on the target device."}
             },
@@ -389,22 +417,22 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
                         "properties": {
                             "prompt": {"type": "string"},
                             "title": {"type": "string"},
-                            "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                            "executor": {"type": "string", "enum": ["auto", "chatgpt", "opencode", "claude"]},
                             "model": {"type": "string"},
                             "write": {"type": "boolean"}
                         },
                         "required": ["prompt"]
                     }
                 },
-                "executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "executor": {"type": "string", "enum": ["auto", "chatgpt", "opencode", "claude"]},
                 "model": {"type": "string"},
                 "reviewer": {"type": "boolean", "description": "Run an automatic Reviewer after workers. Defaults true."},
                 "merger": {"type": "boolean", "description": "Run an automatic Merger in an integration worktree after review. Defaults true for write teams."},
                 "reviewer_prompt": {"type": "string", "description": "Optional additional review policy."},
                 "merger_prompt": {"type": "string", "description": "Optional additional merge policy."},
-                "reviewer_executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "reviewer_executor": {"type": "string", "enum": ["auto", "chatgpt", "opencode", "claude"]},
                 "reviewer_model": {"type": "string"},
-                "merger_executor": {"type": "string", "enum": ["auto", "opencode", "claude"]},
+                "merger_executor": {"type": "string", "enum": ["auto", "chatgpt", "opencode", "claude"]},
                 "merger_model": {"type": "string"},
                 "device_id": {"type": "string", "description": "Optional target device ID."},
                 "project_id": {"type": "string", "description": "Optional running project ID on the target device."}
@@ -451,6 +479,78 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
         }
     },
 ]
+
+def _augment_agent_tool_defs() -> None:
+    spawn_names = {"agent_pool_spawn", "agent_pool_spawn_batch", "spawn_agent", "spawn_agent_team"}
+    for tool in _PYTHON_TOOL_DEFS:
+        name = str(tool.get("name") or "")
+        if name not in spawn_names:
+            continue
+        schema = tool.get("inputSchema")
+        if not isinstance(schema, dict):
+            continue
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        properties["target_path"] = {
+            "type": "string",
+            "description": "Optional absolute or workspace-relative directory for this agent. Defaults to the routed C:/D:/project root.",
+        }
+        if name != "agent_pool_spawn_batch":
+            properties["isolation_mode"] = {
+                "type": "string",
+                "enum": ["auto", "git_worktree", "direct"],
+                "description": "auto uses Git worktree inside a repository and direct local-write mode otherwise.",
+            }
+        if name == "spawn_agent_team":
+            properties["success_policy"] = {
+                "type": "string",
+                "enum": ["all_required", "allow_partial"],
+                "description": "Defaults all_required so partial worker success cannot be reported as team success.",
+            }
+        tasks = properties.get("tasks")
+        if isinstance(tasks, dict):
+            items = tasks.get("items")
+            if isinstance(items, dict):
+                item_props = items.get("properties")
+                if isinstance(item_props, dict):
+                    item_props["isolation_mode"] = {
+                        "type": "string",
+                        "enum": ["auto", "git_worktree", "direct"],
+                    }
+    _PYTHON_TOOL_DEFS.extend(
+        [
+            {
+                "name": "cleanup_agent",
+                "description": "Remove a terminal logical Agent plus its executor task metadata/worktree. Does not touch the primary workspace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string"},
+                        "remove_branch": {"type": "boolean"},
+                        "device_id": {"type": "string", "description": "Optional target device ID."},
+                    },
+                    "required": ["agent_id"],
+                },
+            },
+            {
+                "name": "cleanup_agent_team",
+                "description": "Remove a terminal Agent Team, its logical agents, isolated worktrees and integration branch.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "team_id": {"type": "string"},
+                        "remove_branches": {"type": "boolean"},
+                        "device_id": {"type": "string", "description": "Optional target device ID."},
+                    },
+                    "required": ["team_id"],
+                },
+            },
+        ]
+    )
+
+
+_augment_agent_tool_defs()
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -713,6 +813,16 @@ def _inject_tools(payload: bytes) -> bytes:
 
 def _jsonrpc_result(rpc_id: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
+
+
+def _mcp_tool_payload(value: Any) -> dict[str, Any]:
+    """Return the standard MCP CallToolResult shape for Python-local tools."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    structured = value if isinstance(value, dict) else {"value": value}
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": structured,
+    }
 
 
 def _jsonrpc_error(rpc_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -1478,118 +1588,26 @@ class OAuthGateway:
                         },
                     )
                 )
-            elif name == "agent_pool_capabilities":
-                return JSONResponse(_jsonrpc_result(rpc_id, self._get_agent_pool().capabilities()))
-            elif name == "agent_pool_spawn":
-                result = self._get_agent_pool().spawn(
+            elif name == "chatgpt_bridge_status":
+                return JSONResponse(_jsonrpc_result(rpc_id, _mcp_tool_payload(bridge_status())))
+            elif name == "prepare_chatgpt_bridge":
+                result = prepare_chatgpt_bridge(
+                    restart=bool(arguments.get("restart", False)),
+                    debug_port=int(arguments.get("debug_port") or 0),
+                )
+                return JSONResponse(_jsonrpc_result(rpc_id, _mcp_tool_payload(result)))
+            elif name == "restore_chatgpt_bridge":
+                return JSONResponse(_jsonrpc_result(rpc_id, _mcp_tool_payload(restore_normal_chatgpt_launch())))
+            elif name in (_AGENT_POOL_TOOL_NAMES | _AGENT_ORCHESTRATOR_TOOL_NAMES):
+                result = execute_agent_tool(
+                    name=name,
+                    arguments=arguments,
                     workspace=workspace,
-                    prompt=str(arguments.get("prompt") or ""),
-                    title=str(arguments.get("title") or ""),
-                    executor=str(arguments.get("executor") or "auto"),
-                    model=str(arguments.get("model") or ""),
-                    write=bool(arguments.get("write", True)),
+                    workspace_id=workspace_id,
+                    pool=self._get_agent_pool(),
+                    orchestrator=self._get_agent_orchestrator(),
                 )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "agent_pool_spawn_batch":
-                raw_tasks = arguments.get("tasks") or []
-                if not isinstance(raw_tasks, list):
-                    raise ValueError("tasks 必须是数组。")
-                result = self._get_agent_pool().spawn_batch(workspace=workspace, tasks=raw_tasks)
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "agent_pool_list":
-                return JSONResponse(_jsonrpc_result(rpc_id, self._get_agent_pool().list()))
-            elif name == "agent_pool_get":
-                result = self._get_agent_pool().get(str(arguments.get("task_id") or ""))
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "agent_pool_wait":
-                result = self._get_agent_pool().wait(
-                    str(arguments.get("task_id") or ""),
-                    int(arguments.get("wait_seconds") or 15),
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "agent_pool_cancel":
-                result = self._get_agent_pool().cancel(str(arguments.get("task_id") or ""))
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "agent_pool_collect":
-                result = self._get_agent_pool().collect(
-                    str(arguments.get("task_id") or ""),
-                    include_diff=bool(arguments.get("include_diff", True)),
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "agent_pool_cleanup":
-                result = self._get_agent_pool().cleanup(
-                    str(arguments.get("task_id") or ""),
-                    remove_branch=bool(arguments.get("remove_branch", False)),
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "spawn_agent":
-                result = self._get_agent_orchestrator().spawn_agent(
-                    workspace=workspace,
-                    prompt=str(arguments.get("prompt") or ""),
-                    title=str(arguments.get("title") or ""),
-                    role=str(arguments.get("role") or "worker"),
-                    executor=str(arguments.get("executor") or "auto"),
-                    model=str(arguments.get("model") or ""),
-                    write=bool(arguments.get("write", True)),
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "spawn_agent_team":
-                raw_tasks = arguments.get("tasks") or []
-                if not isinstance(raw_tasks, list):
-                    raise ValueError("tasks 必须是数组。")
-                result = self._get_agent_orchestrator().spawn_agent_team(
-                    workspace=workspace,
-                    objective=str(arguments.get("objective") or ""),
-                    tasks=raw_tasks,
-                    title=str(arguments.get("title") or ""),
-                    executor=str(arguments.get("executor") or "auto"),
-                    model=str(arguments.get("model") or ""),
-                    reviewer=bool(arguments.get("reviewer", True)),
-                    merger=bool(arguments.get("merger", True)),
-                    reviewer_prompt=str(arguments.get("reviewer_prompt") or ""),
-                    merger_prompt=str(arguments.get("merger_prompt") or ""),
-                    reviewer_executor=str(arguments.get("reviewer_executor") or "auto"),
-                    reviewer_model=str(arguments.get("reviewer_model") or ""),
-                    merger_executor=str(arguments.get("merger_executor") or "auto"),
-                    merger_model=str(arguments.get("merger_model") or ""),
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "list_agents":
-                result = self._get_agent_orchestrator().list_agents(
-                    team_id=str(arguments.get("team_id") or "")
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "get_agent":
-                result = self._get_agent_orchestrator().get_agent(
-                    str(arguments.get("agent_id") or "")
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "get_agent_team":
-                result = self._get_agent_orchestrator().get_team(
-                    str(arguments.get("team_id") or "")
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "message_agent":
-                result = self._get_agent_orchestrator().message_agent(
-                    str(arguments.get("agent_id") or ""),
-                    str(arguments.get("message") or ""),
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "cancel_agent":
-                result = self._get_agent_orchestrator().cancel_agent(
-                    str(arguments.get("agent_id") or "")
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
-            elif name == "wait_agents":
-                raw_ids = arguments.get("agent_ids") or []
-                if raw_ids and not isinstance(raw_ids, list):
-                    raise ValueError("agent_ids 必须是数组。")
-                result = self._get_agent_orchestrator().wait_agents(
-                    agent_ids=[str(item) for item in raw_ids] if isinstance(raw_ids, list) else [],
-                    team_id=str(arguments.get("team_id") or ""),
-                    wait_seconds=int(arguments.get("wait_seconds") or 15),
-                )
-                return JSONResponse(_jsonrpc_result(rpc_id, result))
+                return JSONResponse(_jsonrpc_result(rpc_id, _mcp_tool_payload(result)))
             else:
                 raise ValueError(f"未知的本地工具: {name}")
         except ValueError as exc:

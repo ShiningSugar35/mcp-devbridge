@@ -1138,6 +1138,71 @@ def test_v081_gateway_local_tool_reads_mcp_arguments(
     assert seen["timeout_seconds"] == 20
 
 
+
+def test_agent_pool_tools_return_mcp_content_and_resolve_target_path(
+    mw_env: _MultiWorkspaceEnv, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    target = tmp_path / "child"
+    target.mkdir()
+    seen: dict[str, object] = {}
+
+    class _FakePool:
+        def capabilities(self) -> dict[str, object]:
+            return {"available": True, "max_parallel": 4}
+
+        def spawn(self, **kwargs: object) -> dict[str, object]:
+            seen.update(kwargs)
+            return {"id": "fake-task", "state": "queued", "isolation_mode": kwargs.get("isolation_mode")}
+
+    monkeypatch.setattr(mw_env.gateway, "_workspace", tmp_path)
+    monkeypatch.setattr(mw_env.gateway, "_resolve_workspace_path", lambda workspace_id: tmp_path if workspace_id == "route-test" else None)
+    monkeypatch.setattr(mw_env.gateway, "_agent_pool", _FakePool())
+
+    caps_rpc = {
+        "jsonrpc": "2.0",
+        "id": 101,
+        "method": "tools/call",
+        "params": {"name": "agent_pool_capabilities", "arguments": {}},
+    }
+    caps_response = asyncio.run(
+        mw_env.gateway._exec_local_tool(
+            "agent_pool_capabilities", caps_rpc, caps_rpc["params"], workspace_id="", session_id=""
+        )
+    )
+    caps = json.loads(bytes(caps_response.body))
+    assert caps["result"]["content"][0]["type"] == "text"
+    assert caps["result"]["structuredContent"]["available"] is True
+
+    spawn_rpc = {
+        "jsonrpc": "2.0",
+        "id": 102,
+        "method": "tools/call",
+        "params": {
+            "name": "agent_pool_spawn",
+            "arguments": {
+                "prompt": "write a local file",
+                "target_path": "child",
+                "write": True,
+                "isolation_mode": "direct",
+            },
+        },
+    }
+    response = asyncio.run(
+        mw_env.gateway._exec_local_tool(
+            "agent_pool_spawn", spawn_rpc, spawn_rpc["params"], workspace_id="route-test", session_id=""
+        )
+    )
+    data = json.loads(bytes(response.body))
+    assert "error" not in data
+    assert data["result"]["content"][0]["type"] == "text"
+    assert data["result"]["structuredContent"]["id"] == "fake-task"
+    assert Path(str(seen["workspace"])).resolve() == target.resolve()
+    assert Path(str(seen["route_root"])).resolve() == tmp_path.resolve()
+    assert seen["route_workspace_id"] == "route-test"
+    assert seen["isolation_mode"] == "direct"
+
 def test_v081_switch_workspace_returns_route_without_transport_session(
     mw_env: _MultiWorkspaceEnv,
 ) -> None:
@@ -1275,3 +1340,54 @@ def test_v081_gateway_virtualizes_per_workspace_upstream_sessions(
     assert (18788, "notifications/initialized", session_b) in [
         (p, m, s) for p, m, s, _ in events
     ]
+
+def test_chatgpt_bridge_tools_use_mcp_content_and_require_explicit_restart(
+    mw_env: _MultiWorkspaceEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "local_dev_mcp_bridge.gateway.bridge_status",
+        lambda: {"enabled": True, "ready": True, "debug_port": 19222},
+    )
+
+    def fake_prepare(*, restart: bool, debug_port: int):
+        seen["restart"] = restart
+        seen["debug_port"] = debug_port
+        return {"enabled": True, "ready": True, "debug_port": debug_port or 19222}
+
+    monkeypatch.setattr("local_dev_mcp_bridge.gateway.prepare_chatgpt_bridge", fake_prepare)
+    status_rpc = {
+        "jsonrpc": "2.0",
+        "id": 201,
+        "method": "tools/call",
+        "params": {"name": "chatgpt_bridge_status", "arguments": {}},
+    }
+    response = asyncio.run(
+        mw_env.gateway._exec_local_tool(
+            "chatgpt_bridge_status", status_rpc, status_rpc["params"], workspace_id="", session_id=""
+        )
+    )
+    data = json.loads(bytes(response.body))
+    assert data["result"]["content"][0]["type"] == "text"
+    assert data["result"]["structuredContent"]["ready"] is True
+
+    prepare_rpc = {
+        "jsonrpc": "2.0",
+        "id": 202,
+        "method": "tools/call",
+        "params": {
+            "name": "prepare_chatgpt_bridge",
+            "arguments": {"restart": True, "debug_port": 19333},
+        },
+    }
+    response = asyncio.run(
+        mw_env.gateway._exec_local_tool(
+            "prepare_chatgpt_bridge", prepare_rpc, prepare_rpc["params"], workspace_id="", session_id=""
+        )
+    )
+    data = json.loads(bytes(response.body))
+    assert "error" not in data
+    assert data["result"]["structuredContent"]["debug_port"] == 19333
+    assert seen == {"restart": True, "debug_port": 19333}

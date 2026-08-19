@@ -163,9 +163,15 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         <h3>v0.9.1：SteamOS / Linux Desktop</h3>
         <p>SteamOS/Linux 使用原生桌面版，不需要 Wine/Proton。配置放在 XDG 用户目录；程序安装到用户目录并创建 Desktop Entry/autostart；Node.js 与 cloudflared 使用应用私有 Linux runtime。Windows 控制桥在 Linux 自动禁用，文件、Shell、Git、进程与 Agent 使用 Linux 原生工具。</p>
         <p>Linux 凭据优先写入桌面 Secret Service；不可用时进入 AES-GCM 加密 fallback。不要把 Tunnel Token 写进 shell 脚本或 projects.json。</p>
-        <h3>v0.9.1：Agent Orchestrator</h3>
-        <p><b>Agent Pool 是底层执行器；Agent Orchestrator 是上层编排器。</b>单 Agent 用 <code>spawn_agent</code>，后续可用 <code>message_agent</code> 继续派指令；Team 用 <code>spawn_agent_team</code> 一次提交多个 worker，系统在 worker 完成后自动启动 Reviewer，再在独立 integration worktree 启动 Merger。</p>
-        <p>写 Agent 默认拥有独立 Git branch/worktree。Orchestrator 不会自动 push；最终 integration branch 仍由主会话/用户审阅后决定是否合并到正式分支。OpenCode/Claude CLI 是 one-shot executor，所以 running Agent 收到 message 后会在同一 branch/worktree 排一个 continuation turn，而不是伪装成实时 stdin 对话。</p>
+        <h3>v0.9.3：普通 ChatGPT Chat 多 Agent</h3>
+        <p>Windows 上可以在“Agent 管理”里显式准备 <b>ChatGPT Chat Agent</b>。准备后，AgentPool 的 <code>auto</code> 会优先创建普通“ChatGPT / 聊天”子会话；子 Chat 不切 Work/Codex，而是直接调用你已经连接的 MCP DevBridge 完成本地任务。</p>
+        <p>Deep Link 只负责创建 Chat 和预填 prompt；DevBridge 通过仅监听 <code>127.0.0.1</code> 的 CDP 精确点击真实“发送/停止”控件。它不读取 ChatGPT 登录 Token，也不调用私有 ChatGPT HTTP API。不使用时点击“恢复普通启动”即可去掉 CDP。</p>
+        <p>子 Chat 的“我完成了”不算验收。每个任务必须通过 MCP 写入带 task id 的 JSON receipt 并 read-back；外部 AgentPool 验证 receipt 后才标记完成。Git 项目仍使用独立 worktree，非 Git/盘符目录继续 direct。</p>
+        <p>为了兼容 C:/D: 盘符级服务和 ChatGPT transport 重建，子 Agent 每次 MCP 调用都固定携带 <code>devbridge_workspace_id</code>；不要依赖“上一次切到哪个工作区”的隐式状态。</p>
+        <h3>v0.9.2：Agent 控制面与可靠性</h3>
+        <p><b>Agent Pool 是底层执行器；Agent Orchestrator 是上层编排器。</b>单 Agent 用 <code>spawn_agent</code>，后续可用 <code>message_agent</code> 继续派指令；Team 用 <code>spawn_agent_team</code> 一次提交多个 worker。桌面右上角“Agent 管理”或 <code>Ctrl+Shift+A</code> 可查看状态、模型、目标目录、分支、输出，并执行消息、取消和清理。</p>
+        <p>Git 项目默认使用独立 branch/worktree；盘符根或普通非 Git 目录在 <code>auto</code> 下会改用 <code>direct</code> 本地写入。Team 默认 <code>all_required</code>，真实 executor 还必须返回结构化成功回执，避免把“模型没做任务但进程正常退出”算成功。</p>
+        <p>OpenCode 默认使用 <code>--pure</code> 隔离外部插件；未指定模型时使用免费的 <code>opencode/nemotron-3-ultra-free</code>。免费模型可能排队，因此适合保底而不是高时效任务。</p>
         <h3>v0.9.1：一台电脑多个项目怎么配</h3>
         <p>不要再给 C:/D:/E:/F: 四个项目分别填写同一个域名和 Tunnel Token。到工作台 → 连接信息 → <b>设备全局连接配置</b>，一次保存连接方式、固定域名和本设备专属 Tunnel 凭据；现有项目会同步，后续新增项目自动继承。</p>
         <p>Cloudflare Published Application 的 Service URL 对应的是这台设备唯一的 Gateway（默认 <code>http://localhost:8786</code>），不是每个项目各一套公网 Gateway。项目之间保持独立的是 CodexPro/Windows 内部端口。</p>
@@ -187,9 +193,9 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         <ul><li>本地 worker 会探测真正可非交互运行的 <b>OpenCode CLI</b> 与 <b>Claude Code CLI</b>，不会把 Electron 桌面版误判成 worker。可用 CLI 会出现在 capabilities；模型账号认证、额度和 provider 健康在任务运行时验证。</li>
         <li>单次最多排队 64 个任务；默认真实同时运行 4 个，硬上限 16。其余任务留在队列中，不会为了“看起来并发”把电脑一次拉满。</li>
         <li>长任务返回 task id 后后台执行；用 list/get/wait/cancel 查看或停止。wait 单次最多 30 秒，不会占住 ChatGPT 的长同步请求。</li></ul>
-        <h3>写代码为什么不会互相踩</h3>
-        <p>写入型任务必须在 Git 仓库里运行。每个 Agent 自动创建独立 <code>git worktree</code> 和 <code>mcp-agent/&lt;id&gt;</code> 分支；主工作区不被子 Agent 直接编辑。完成后用 collect 读取日志、status 和 bounded diff，再由主会话决定如何合并。</p>
-        <p><b>注意：</b>worktree 是 Git 文件隔离，不是 Windows 安全沙箱。OpenCode / Claude Code 进程仍继承当前用户权限；因此 Agent Pool 不自动 push，也不自动 merge 主分支。</p>
+        <h3>写入隔离怎么工作</h3>
+        <p>Git 项目默认给每个写 Agent 创建独立 <code>git worktree</code> 和 <code>mcp-agent/&lt;id&gt;</code> 分支；主 checkout 不被子 Agent 直接编辑。盘符根和普通非 Git 目录没有 branch 概念，<code>auto</code> 会使用 <code>direct</code> 模式，因此并发任务应通过 <code>target_path</code> 尽量分到不同子目录，避免两个 Agent 同时改同一文件。</p>
+        <p><b>注意：</b>worktree/direct 都不是 Windows 安全沙箱。OpenCode / Claude Code 进程仍继承当前用户权限；Agent Pool 不自动 push 主分支。</p>
         <h3>跨电脑</h3>
         <p>共享 Hub 下，Agent Pool 工具支持正式 <code>device_id</code>；spawn/spawn_batch 还支持 <code>project_id</code>。因此 manager 可以直接指定“在哪台电脑的哪个运行项目里启动 Agent”，不依赖上一条设备切换状态。</p>""",
     ),

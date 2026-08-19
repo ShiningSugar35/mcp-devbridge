@@ -159,3 +159,71 @@ def test_v081_run_async_keeps_completion_signal_alive() -> None:
     assert received == ["ready"]
     app.processEvents()
     assert not dm._ASYNC_SIGNAL_GUARDS
+
+def test_agent_panel_surface_and_shortcut(tmp_path: Path, monkeypatch) -> None:
+    app, window, _project = _window(tmp_path, monkeypatch)
+
+    class FakeOrchestrator:
+        def list_agents(self):
+            return {
+                "agents": [
+                    {
+                        "id": "agent-1",
+                        "title": "Worker A",
+                        "role": "worker",
+                        "state": "running",
+                        "executor": "opencode",
+                        "model": "opencode/nemotron-3-ultra-free",
+                        "workspace": str(tmp_path),
+                        "isolation_mode": "direct",
+                        "branch": "",
+                        "duration_seconds": 1.25,
+                        "terminal": False,
+                        "output_tail": "working",
+                    }
+                ],
+                "teams": [
+                    {
+                        "id": "team-1",
+                        "title": "Team A",
+                        "stage": "workers",
+                        "state": "running",
+                        "workspace": str(tmp_path),
+                        "integration_branch": "",
+                        "terminal": False,
+                    }
+                ],
+                "running": 1,
+                "queued": 0,
+                "max_parallel": 4,
+            }
+
+        def get_agent(self, _agent_id: str):
+            return self.list_agents()["agents"][0]
+
+        def get_team(self, _team_id: str):
+            return self.list_agents()["teams"][0]
+
+    try:
+        monkeypatch.setattr(
+            dm,
+            "bridge_status",
+            lambda: {"enabled": True, "ready": True, "debug_port": 19222},
+        )
+        fake = FakeOrchestrator()
+        panel = dm.AgentPanel(lambda: fake, window)
+        app.processEvents()
+        assert panel.table.rowCount() == 2
+        assert "并发上限 4" in panel.summary.text()
+        assert "普通 Chat" in panel.chatgpt_bridge_label.text()
+        assert "19222" in panel.chatgpt_bridge_label.text()
+        assert panel.prepare_chatgpt_btn.isEnabled() is False
+        assert panel.restore_chatgpt_btn.isEnabled() is True
+        model_item = panel.table.item(1, 4)
+        assert model_item is not None
+        assert "nemotron-3-ultra-free" in model_item.text()
+        assert window.agent_action.shortcut().toString() == "Ctrl+Shift+A"
+        assert "Ctrl+Shift+A" in window.agent_btn.toolTip()
+        panel.close()
+    finally:
+        _close(app, window)

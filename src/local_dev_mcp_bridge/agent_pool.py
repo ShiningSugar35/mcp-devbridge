@@ -12,11 +12,13 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from . import constants
+from .chatgpt_desktop import ChatGPTDesktopBridge
 from .platform_support import popen_platform_kwargs, run_platform_kwargs
 from .shell import kill_process_tree
 
@@ -35,6 +37,8 @@ _MAX_BATCH = 64
 _MAX_HISTORY = 200
 _MAX_TAIL_CHARS = 24_000
 _MAX_DIFF_CHARS = 80_000
+_RESULT_MARKER = "MCP_AGENT_RESULT:"
+_DEFAULT_OPENCODE_FREE_MODEL = "opencode/nemotron-3-ultra-free"
 
 
 @dataclass
@@ -48,6 +52,10 @@ class AgentTask:
     state: AgentState
     created_at: float
     prompt_sha256: str
+    route_root: str = ""
+    route_workspace_id: str = ""
+    external_id: str = ""
+    receipt_path: str = ""
     started_at: float = 0.0
     finished_at: float = 0.0
     exit_code: int | None = None
@@ -59,6 +67,7 @@ class AgentTask:
     error: str = ""
     cleaned: bool = False
     isolate: bool = True
+    isolation_mode: str = "auto"
 
 
 CommandBuilder = Callable[[AgentTask, str, Path], list[str]]
@@ -84,6 +93,42 @@ def _tail_text(path: Path, max_chars: int = _MAX_TAIL_CHARS) -> str:
     text = data.decode("utf-8", errors="replace")
     return text[-max_chars:]
 
+
+def _completion_receipt(text: str) -> dict[str, object] | None:
+    """Parse the last receipt from plain text or JSON/stream-JSON executor output."""
+
+    def strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            result: list[str] = []
+            for item in value.values():
+                result.extend(strings(item))
+            return result
+        if isinstance(value, list):
+            result = []
+            for item in value:
+                result.extend(strings(item))
+            return result
+        return []
+
+    decoder = json.JSONDecoder()
+    for line in reversed(text.splitlines()):
+        candidates = [line]
+        with suppress(json.JSONDecodeError):
+            candidates.extend(strings(json.loads(line)))
+        for candidate in reversed(candidates):
+            marker_index = candidate.rfind(_RESULT_MARKER)
+            if marker_index < 0:
+                continue
+            raw = candidate[marker_index + len(_RESULT_MARKER) :].strip()
+            try:
+                value, _end = decoder.raw_decode(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+    return None
 
 def _run_capture(argv: list[str], *, cwd: Path | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -133,7 +178,12 @@ class AgentPool:
         self._opencode_executable = "" if command_builder is not None else self._discover_opencode_path()
         self._claude_executable = "" if command_builder is not None else self._discover_claude_path()
         preferred = os.environ.get("MCP_DEVBRIDGE_AGENT_EXECUTOR", "").strip().lower()
-        self.preferred_executor = preferred if preferred in {"opencode", "claude"} else ""
+        self.preferred_executor = preferred if preferred in {"chatgpt", "opencode", "claude"} else ""
+        self._chatgpt_bridge = ChatGPTDesktopBridge()
+        self.default_opencode_model = (
+            os.environ.get("MCP_DEVBRIDGE_OPENCODE_FREE_MODEL", "").strip()
+            or _DEFAULT_OPENCODE_FREE_MODEL
+        )
         self._lock = threading.RLock()
         self._tasks: dict[str, AgentTask] = {}
         self._prompts: dict[str, str] = {}
@@ -218,13 +268,22 @@ class AgentPool:
     def capabilities(self) -> dict[str, object]:
         opencode = self._opencode_executable
         claude = self._claude_executable
-        executors = [name for name, path in (("opencode", opencode), ("claude", claude)) if path]
+        chatgpt = self._chatgpt_bridge.capabilities()
+        chatgpt_available = self._command_builder is None and bool(chatgpt.get("ready"))
+        executors: list[str] = []
+        if chatgpt_available:
+            executors.append("chatgpt")
+        executors.extend(name for name, path in (("opencode", opencode), ("claude", claude)) if path)
         return {
             "available": bool(executors or self._command_builder),
             "executors": executors or (["test"] if self._command_builder else []),
+            "chatgpt_desktop": chatgpt,
             "opencode_path": opencode,
             "claude_path": claude,
-            "preferred_executor": self.preferred_executor or "auto",
+            "preferred_executor": self.preferred_executor or ("chatgpt" if chatgpt_available else "auto"),
+            "default_opencode_model": self.default_opencode_model,
+            "opencode_default_is_free": self.default_opencode_model.startswith("opencode/")
+            and (self.default_opencode_model.endswith("-free") or self.default_opencode_model == "opencode/big-pickle"),
             "provider_runtime_verified": False,
             "provider_runtime_note": (
                 "CLI discovery only verifies a non-interactive command surface. "
@@ -233,7 +292,9 @@ class AgentPool:
             "max_parallel": self.max_parallel,
             "max_batch": _MAX_BATCH,
             "worktree_isolation": True,
-            "write_requires_git": True,
+            "write_requires_git": False,
+            "non_git_direct_write": True,
+            "isolation_modes": ["auto", "git_worktree", "direct"],
             "running_tasks_survive_restart": False,
         }
 
@@ -303,6 +364,7 @@ class AgentPool:
         command = [
             executable,
             "run",
+            "--pure",
             "--format",
             "json",
             "--dir",
@@ -321,19 +383,41 @@ class AgentPool:
     def _git_repo_root(workspace: Path) -> tuple[Path, str]:
         root = _run_capture(["git", "-C", str(workspace), "rev-parse", "--show-toplevel"])
         if root.returncode != 0 or not root.stdout.strip():
-            raise RuntimeError("写入型 Agent 需要 Git 仓库，以便使用独立 worktree 隔离并发修改。")
+            raise RuntimeError("目标目录不属于 Git 仓库。")
         repo = Path(root.stdout.strip()).resolve()
         sha = _run_capture(["git", "-C", str(repo), "rev-parse", "HEAD"])
         if sha.returncode != 0 or not sha.stdout.strip():
             raise RuntimeError("无法读取 Git HEAD，不能创建 Agent worktree。")
         return repo, sha.stdout.strip()
 
+    @classmethod
+    def _try_git_repo_root(cls, workspace: Path) -> tuple[Path, str] | None:
+        try:
+            return cls._git_repo_root(workspace)
+        except RuntimeError:
+            return None
+
     def _prepare_worktree(self, task: AgentTask) -> Path:
         workspace = Path(task.workspace).resolve()
         if not task.write:
+            task.isolation_mode = "read_only"
+            self._persist(task)
             return workspace
-        repo, base_sha = self._git_repo_root(workspace)
+        if task.isolation_mode == "direct":
+            task.isolate = False
+            task.isolation_mode = "direct"
+            task.worktree = str(workspace)
+            self._persist(task)
+            return workspace
+
         if not task.isolate:
+            repo_info = self._try_git_repo_root(workspace)
+            if repo_info is None:
+                task.isolation_mode = "direct"
+                task.worktree = str(workspace)
+                self._persist(task)
+                return workspace
+            repo, base_sha = repo_info
             branch_result = _run_capture(
                 ["git", "-C", str(workspace), "branch", "--show-current"], timeout=20
             )
@@ -341,10 +425,27 @@ class AgentPool:
             task.base_sha = base_sha
             task.branch = branch_result.stdout.strip()
             task.worktree = str(workspace)
+            task.isolation_mode = "git_worktree"
             self._persist(task)
             return workspace
+
+        repo_info = self._try_git_repo_root(workspace)
+        if repo_info is None:
+            if task.isolation_mode == "git_worktree":
+                raise RuntimeError("该 Agent 明确要求 Git worktree 隔离，但目标目录不属于 Git 仓库。")
+            task.isolate = False
+            task.isolation_mode = "direct"
+            task.worktree = str(workspace)
+            self._persist(task)
+            return workspace
+
+        repo, base_sha = repo_info
+        task.isolation_mode = "git_worktree"
         branch = f"mcp-agent/{task.id[:12]}"
-        worktree = (self.worktree_dir / task.id).resolve()
+        worktree_base = self.worktree_dir
+        if task.executor == "chatgpt" and task.route_root:
+            worktree_base = Path(task.route_root).resolve() / ".mcp-devbridge-agent-worktrees"
+        worktree = (worktree_base / task.id).resolve()
         worktree.parent.mkdir(parents=True, exist_ok=True)
         result = _run_capture(
             ["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree), base_sha],
@@ -361,16 +462,25 @@ class AgentPool:
 
     @staticmethod
     def _agent_prompt(task: AgentTask, user_prompt: str) -> str:
-        isolation = (
-            "You are running inside a dedicated Git worktree. Work only inside the current worktree. "
-            "Do not push, do not alter other worktrees, and do not touch the user's primary checkout. "
-            if task.write
-            else "This is a read-only/analysis assignment. Do not modify files. "
-        )
+        if task.write and task.isolation_mode == "git_worktree":
+            isolation = (
+                "You are running inside a dedicated Git worktree. Work only inside the current worktree. "
+                "Do not push, do not alter other worktrees, and do not touch the user's primary checkout. "
+            )
+        elif task.write:
+            isolation = (
+                "You are in direct local-write mode. Work only inside the current target workspace and "
+                "do not touch paths outside it. "
+            )
+        else:
+            isolation = "This is a read-only/analysis assignment. Do not modify files. "
         return (
             f"{isolation}Read and obey all applicable AGENTS.md instructions before acting. "
-            "Complete only the assigned task, run relevant tests when practical, and finish with a concise result summary.\n\n"
-            f"TASK:\n{user_prompt.strip()}"
+            "Complete only the assigned task and run relevant tests when practical. "
+            "Your final output MUST end with exactly one machine-readable line like "
+            'MCP_AGENT_RESULT: {"status":"success","summary":"short result"}. '
+            "Use status=failed when the assignment was not actually completed.\n\n"
+            f"TASK (do not omit or reinterpret):\n{user_prompt.strip()}"
         )
 
     # ---------------------------------------------------------------- lifecycle
@@ -380,23 +490,31 @@ class AgentPool:
         workspace: Path,
         prompt: str,
         title: str = "",
+        route_root: Path | None = None,
+        route_workspace_id: str = "",
         executor: str = "auto",
         model: str = "",
         write: bool = True,
         isolate: bool | None = None,
+        isolation_mode: str = "auto",
     ) -> dict[str, object]:
         prompt = prompt.strip()
         if not prompt:
             raise ValueError("prompt 不能为空。")
         requested_executor = executor.strip().lower()
+        chatgpt_ready = self._command_builder is None and self._chatgpt_bridge.ready
         if requested_executor in {"", "auto"}:
-            if self.preferred_executor == "claude" and self._claude_executable:
+            if self.preferred_executor == "chatgpt" and chatgpt_ready:
+                selected_executor = "chatgpt"
+            elif self.preferred_executor == "claude" and self._claude_executable:
                 selected_executor = "claude"
             elif self.preferred_executor == "opencode" and self._opencode_executable:
                 selected_executor = "opencode"
             else:
                 selected_executor = (
-                    "opencode"
+                    "chatgpt"
+                    if chatgpt_ready
+                    else "opencode"
                     if self._opencode_executable
                     else "claude"
                     if self._claude_executable
@@ -406,26 +524,37 @@ class AgentPool:
                 )
         else:
             selected_executor = requested_executor
-        if self._command_builder is None and selected_executor not in {"opencode", "claude"}:
-            raise ValueError("当前 Agent Pool 支持 opencode / claude 执行器。")
+        if self._command_builder is None and selected_executor not in {"chatgpt", "opencode", "claude"}:
+            raise ValueError("当前 Agent Pool 支持 chatgpt / opencode / claude 执行器。")
+        if self._command_builder is None and selected_executor == "chatgpt" and not chatgpt_ready:
+            raise RuntimeError("ChatGPT Desktop Chat Agent bridge 尚未准备好。")
         if self._command_builder is None and selected_executor == "opencode" and not self._opencode_executable:
             raise RuntimeError("未检测到可非交互运行的 OpenCode CLI。")
         if self._command_builder is None and selected_executor == "claude" and not self._claude_executable:
             raise RuntimeError("未检测到可非交互运行的 Claude Code CLI。")
+        requested_isolation = isolation_mode.strip().lower() or "auto"
+        if requested_isolation not in {"auto", "git_worktree", "direct"}:
+            raise ValueError("isolation_mode 必须是 auto / git_worktree / direct。")
+        selected_model = model.strip()
+        if selected_executor == "opencode" and not selected_model:
+            selected_model = self.default_opencode_model
         task_id = uuid.uuid4().hex
         safe_title = " ".join((title.strip() or f"Agent {task_id[:8]}").split())[:120]
         task = AgentTask(
             id=task_id,
             title=safe_title,
             executor=selected_executor,
-            model=model.strip(),
+            model=selected_model,
             workspace=str(workspace.resolve()),
             write=bool(write),
             state="queued",
             created_at=time.time(),
             prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            route_root=str((route_root or workspace).resolve()),
+            route_workspace_id=route_workspace_id.strip(),
             log_path=str((self.log_dir / f"{task_id}.log").resolve()),
-            isolate=bool(write) if isolate is None else bool(isolate),
+            isolate=(requested_isolation != "direct" and bool(write)) if isolate is None else bool(isolate),
+            isolation_mode=requested_isolation if write else "read_only",
         )
         with self._lock:
             self._tasks[task.id] = task
@@ -464,6 +593,8 @@ class AgentPool:
         *,
         workspace: Path,
         tasks: list[dict[str, object]],
+        route_root: Path | None = None,
+        route_workspace_id: str = "",
     ) -> dict[str, object]:
         if not tasks:
             raise ValueError("tasks 不能为空。")
@@ -476,11 +607,14 @@ class AgentPool:
             created.append(
                 self.spawn(
                     workspace=workspace,
+                    route_root=route_root,
+                    route_workspace_id=route_workspace_id,
                     prompt=str(item.get("prompt") or ""),
                     title=str(item.get("title") or ""),
                     executor=str(item.get("executor") or "auto"),
                     model=str(item.get("model") or ""),
                     write=bool(item.get("write", True)),
+                    isolation_mode=str(item.get("isolation_mode") or "auto"),
                 )
             )
         return {"submitted": len(created), "max_parallel": self.max_parallel, "tasks": created}
@@ -497,35 +631,87 @@ class AgentPool:
         try:
             workdir = self._prepare_worktree(task)
             full_prompt = self._agent_prompt(task, prompt)
-            builder = self._command_builder or self._default_command
-            command = builder(task, full_prompt, workdir)
             log_path = Path(task.log_path)
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            environment = dict(os.environ)
-            environment.setdefault("PYTHONIOENCODING", "utf-8")
-            environment.setdefault("PYTHONUTF8", "1")
-            with log_path.open("wb") as output:
-                process = subprocess.Popen(
-                    command,
-                    cwd=str(workdir),
-                    stdout=output,
-                    stderr=subprocess.STDOUT,
-                    env=environment,
-                    text=False,
-                    **popen_platform_kwargs(new_session=True),
+            if task.executor == "chatgpt" and self._command_builder is None:
+                def mark_started(conversation_id: str) -> None:
+                    with self._lock:
+                        if task.state == "cancelled":
+                            return
+                        task.external_id = conversation_id
+                        self._persist(task)
+
+                receipt, conversation_id, receipt_path = self._chatgpt_bridge.run_task(
+                    task_id=task.id,
+                    assignment=full_prompt,
+                    route_root=Path(task.route_root or task.workspace),
+                    target_workspace=workdir,
+                    write=task.write,
+                    route_workspace_id=task.route_workspace_id,
+                    on_started=mark_started,
+                )
+                status = str(receipt.get("status") or "").lower()
+                log_path.write_text(
+                    "ChatGPT Desktop ordinary-Chat executor completed.\n"
+                    + f"conversation_id={conversation_id}\n"
+                    + _RESULT_MARKER
+                    + " "
+                    + json.dumps(receipt, ensure_ascii=False)
+                    + "\n",
+                    encoding="utf-8",
                 )
                 with self._lock:
-                    self._processes[task_id] = process
-                exit_code = process.wait()
-            with self._lock:
-                if task.state != "cancelled":
-                    task.exit_code = exit_code
-                    task.state = "completed" if exit_code == 0 else "failed"
-                    if exit_code != 0:
-                        tail = _tail_text(log_path, 1600).strip()
-                        task.error = f"Agent executor exited with code {exit_code}."
-                        if tail:
-                            task.error += f" Output tail: {tail}"
+                    if task.state != "cancelled":
+                        task.external_id = conversation_id
+                        task.receipt_path = str(receipt_path)
+                        task.exit_code = 0 if status == "success" else 1
+                        if status == "success":
+                            task.state = "completed"
+                        else:
+                            task.state = "failed"
+                            task.error = str(receipt.get("error") or receipt.get("summary") or "ChatGPT child agent reported failure.")[:1200]
+            else:
+                builder = self._command_builder or self._default_command
+                command = builder(task, full_prompt, workdir)
+                environment = dict(os.environ)
+                environment.setdefault("PYTHONIOENCODING", "utf-8")
+                environment.setdefault("PYTHONUTF8", "1")
+                with log_path.open("wb") as output:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=str(workdir),
+                        stdout=output,
+                        stderr=subprocess.STDOUT,
+                        env=environment,
+                        text=False,
+                        **popen_platform_kwargs(new_session=True),
+                    )
+                    with self._lock:
+                        self._processes[task_id] = process
+                    exit_code = process.wait()
+                with self._lock:
+                    if task.state != "cancelled":
+                        task.exit_code = exit_code
+                        tail = _tail_text(log_path, 2400).strip()
+                        if exit_code != 0:
+                            task.state = "failed"
+                            task.error = f"Agent executor exited with code {exit_code}."
+                            if tail:
+                                task.error += f" Output tail: {tail}"
+                        elif self._command_builder is None:
+                            receipt = _completion_receipt(tail)
+                            if receipt and str(receipt.get("status", "")).lower() == "success":
+                                task.state = "completed"
+                            else:
+                                task.state = "failed"
+                                task.error = (
+                                    "Agent process exited successfully but did not provide a verified success receipt. "
+                                    "The task may have been skipped or misunderstood."
+                                )
+                                if receipt and receipt.get("summary"):
+                                    task.error += f" Receipt summary: {receipt.get('summary')}"
+                        else:
+                            task.state = "completed"
         except Exception as exc:
             with self._lock:
                 if task.state != "cancelled":
@@ -544,7 +730,14 @@ class AgentPool:
             max(0.0, (task.finished_at or time.time()) - (task.started_at or task.created_at)), 3
         )
         if include_tail:
-            row["output_tail"] = _tail_text(Path(task.log_path))
+            tail = _tail_text(Path(task.log_path))
+            row["output_tail"] = tail
+            receipt = _completion_receipt(tail)
+            row["completion_receipt"] = receipt or {}
+            row["completion_verified"] = bool(
+                task.executor == "test"
+                or (receipt and str(receipt.get("status", "")).lower() == "success")
+            )
         return row
 
     def get(self, task_id: str) -> dict[str, object]:
@@ -587,11 +780,16 @@ class AgentPool:
             task.finished_at = time.time()
             future = self._futures.get(task_id)
             process = self._processes.get(task_id)
+            executor = task.executor
+            external_id = task.external_id
             if future is not None:
                 future.cancel()
             self._persist(task)
         if process is not None and process.poll() is None:
             kill_process_tree(process.pid)
+        if executor == "chatgpt" and external_id:
+            with suppress(Exception):
+                self._chatgpt_bridge.stop_conversation(external_id)
         return self.get(task_id)
 
     def collect(self, task_id: str, *, include_diff: bool = True) -> dict[str, object]:
@@ -657,6 +855,9 @@ class AgentPool:
                 )
                 if deleted.returncode != 0:
                     raise RuntimeError(f"删除 Agent 分支失败：{(deleted.stderr or deleted.stdout).strip()[:800]}")
+        if task.receipt_path:
+            with suppress(OSError):
+                Path(task.receipt_path).unlink(missing_ok=True)
         with self._lock:
             task.cleaned = True
             self._persist(task)

@@ -170,6 +170,93 @@ print("MERGE_OK", flush=True)
         orchestrator.shutdown()
 
 
+
+def test_non_git_team_uses_direct_write_and_disables_merger(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(AgentPool, "_try_git_repo_root", classmethod(lambda cls, workspace: None))
+    monkeypatch.setattr(AgentOrchestrator, "_try_repo_base", classmethod(lambda cls, workspace: None))
+
+    def builder(task: AgentTask, _prompt: str, _workdir: Path) -> list[str]:
+        if "Reviewer" in task.title:
+            return [sys.executable, "-c", "print('DIRECT_REVIEW_OK', flush=True)"]
+        filename = "alpha.txt" if "Alpha" in task.title else "beta.txt"
+        return [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path('{filename}').write_text('ok\\n', encoding='utf-8')",
+        ]
+
+    pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=2, command_builder=builder)
+    orchestrator = AgentOrchestrator(pool, root_dir=tmp_path / "orchestrator", tick_seconds=0.05)
+    try:
+        created = orchestrator.spawn_agent_team(
+            workspace=tmp_path,
+            objective="Write two independent local files outside Git.",
+            title="Direct Team",
+            tasks=[
+                {"title": "Alpha", "prompt": "write alpha", "write": True},
+                {"title": "Beta", "prompt": "write beta", "write": True},
+            ],
+            reviewer=True,
+            merger=True,
+        )
+        team_id = str(cast(dict[str, object], created["team"])["id"])
+        deadline = time.time() + 10
+        team: dict[str, object] = {}
+        while time.time() < deadline:
+            team = orchestrator.get_team(team_id)
+            if bool(team.get("terminal")):
+                break
+            time.sleep(0.05)
+        assert team["state"] == "completed", team
+        assert team["merger_id"] == ""
+        assert team["integration_worktree"] == ""
+        assert "direct" in str(team["warning"])
+        assert (tmp_path / "alpha.txt").read_text(encoding="utf-8") == "ok\n"
+        assert (tmp_path / "beta.txt").read_text(encoding="utf-8") == "ok\n"
+        workers = [item for item in cast(list[dict[str, object]], team["agents"]) if item["role"] == "worker"]
+        assert workers and all(item["isolation_mode"] == "direct" for item in workers)
+        cleaned = orchestrator.cleanup_team(team_id)
+        assert cleaned["cleaned"] is True
+        assert not (tmp_path / "orchestrator" / "teams" / f"{team_id}.json").exists()
+    finally:
+        orchestrator.shutdown()
+
+
+def test_team_all_required_rejects_partial_worker_success(tmp_path: Path) -> None:
+    def builder(task: AgentTask, _prompt: str, _workdir: Path) -> list[str]:
+        if "Reviewer" in task.title:
+            return [sys.executable, "-c", "print('reviewed partial failure', flush=True)"]
+        if "Fail" in task.title:
+            return [sys.executable, "-c", "raise SystemExit(7)"]
+        return [sys.executable, "-c", "print('worker ok', flush=True)"]
+
+    pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=2, command_builder=builder)
+    orchestrator = AgentOrchestrator(pool, root_dir=tmp_path / "orchestrator", tick_seconds=0.05)
+    try:
+        created = orchestrator.spawn_agent_team(
+            workspace=tmp_path,
+            objective="One worker intentionally fails.",
+            tasks=[
+                {"title": "Pass", "prompt": "pass", "write": False},
+                {"title": "Fail", "prompt": "fail", "write": False},
+            ],
+            reviewer=True,
+            merger=False,
+        )
+        team_id = str(cast(dict[str, object], created["team"])["id"])
+        deadline = time.time() + 10
+        team: dict[str, object] = {}
+        while time.time() < deadline:
+            team = orchestrator.get_team(team_id)
+            if bool(team.get("terminal")):
+                break
+            time.sleep(0.05)
+        assert team["state"] == "failed", team
+        assert team["worker_failures"]
+        assert "all_required" in str(team["error"])
+    finally:
+        orchestrator.shutdown()
+
 def test_wait_and_cancel_logical_agent(tmp_path: Path) -> None:
     def builder(_task: AgentTask, _prompt: str, _workdir: Path) -> list[str]:
         return [sys.executable, "-c", "import time; print('running',flush=True); time.sleep(30)"]
@@ -200,8 +287,13 @@ def test_gateway_exposes_full_orchestrator_tool_surface() -> None:
         "message_agent",
         "cancel_agent",
         "wait_agents",
+        "cleanup_agent",
+        "cleanup_agent_team",
     }
     assert expected.issubset(defs)
     assert "device_id" in defs["spawn_agent"]["inputSchema"]["properties"]
+    assert "target_path" in defs["spawn_agent"]["inputSchema"]["properties"]
+    assert "isolation_mode" in defs["spawn_agent"]["inputSchema"]["properties"]
     assert "project_id" in defs["spawn_agent_team"]["inputSchema"]["properties"]
+    assert "success_policy" in defs["spawn_agent_team"]["inputSchema"]["properties"]
     assert defs["spawn_agent_team"]["inputSchema"]["properties"]["tasks"]["maxItems"] == 64

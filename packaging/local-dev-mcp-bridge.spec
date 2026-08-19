@@ -9,10 +9,13 @@ from shutil import copy2
 import sys
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.9.1"
+PROJECT_VERSION = "0.9.3"
 IS_WINDOWS = sys.platform == "win32"
 TOOLS = ROOT / ".tools"
 RUNTIME = TOOLS if IS_WINDOWS else TOOLS / "linux"
+CODEXPRO_RUNTIME = ROOT / "build" / "codexpro-runtime"
+if not (CODEXPRO_RUNTIME / "dist").is_dir() or not (CODEXPRO_RUNTIME / "node_modules").is_dir():
+    raise RuntimeError("Missing build/codexpro-runtime; run scripts/prepare_codexpro_runtime.py first")
 
 runtime_datas = []
 if IS_WINDOWS:
@@ -32,8 +35,8 @@ a = Analysis(
     pathex=[str(ROOT / "src")],
     binaries=[],
     datas=[
-        (str(ROOT / "third_party" / "codexpro" / "dist"), "third_party/codexpro/dist"),
-        (str(ROOT / "third_party" / "codexpro" / "node_modules"), "third_party/codexpro/node_modules"),
+        (str(CODEXPRO_RUNTIME / "dist"), "third_party/codexpro/dist"),
+        (str(CODEXPRO_RUNTIME / "node_modules"), "third_party/codexpro/node_modules"),
         (str(ROOT / "THIRD_PARTY_LICENSES.md"), "THIRD_PARTY_LICENSES.md"),
         (str(upgrade_script), "scripts"),
         *runtime_datas,
@@ -48,6 +51,7 @@ a = Analysis(
         "local_dev_mcp_bridge.update_manager",
         "local_dev_mcp_bridge.platform_support",
         "local_dev_mcp_bridge.agent_pool",
+        "local_dev_mcp_bridge.chatgpt_desktop",
         "local_dev_mcp_bridge.agent_orchestrator",
         "local_dev_mcp_bridge.audit",
         "local_dev_mcp_bridge.shell",

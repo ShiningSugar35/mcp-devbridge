@@ -26,6 +26,9 @@ bash scripts/prepare_runtime_linux.sh
 echo "== Linux 1b/7 CodexPro build =="
 ( cd third_party/codexpro && npm run build )
 
+echo "== Linux 1c/7 production-only CodexPro runtime =="
+"$PY" scripts/prepare_codexpro_runtime.py
+
 echo "== Linux 2/7 tests =="
 QT_QPA_PLATFORM=offscreen "$PY" -m pytest tests/ -q
 

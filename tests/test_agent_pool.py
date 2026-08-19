@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from local_dev_mcp_bridge.agent_pool import AgentPool, AgentTask
+from local_dev_mcp_bridge.agent_pool import AgentPool, AgentTask, _completion_receipt
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -99,16 +100,45 @@ def test_write_agent_uses_isolated_worktree_and_collects_diff(tmp_path: Path) ->
     assert not worktree.exists()
 
 
-def test_write_agent_rejects_non_git_workspace(tmp_path: Path) -> None:
+def test_write_agent_uses_direct_mode_for_non_git_workspace(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(AgentPool, "_try_git_repo_root", classmethod(lambda cls, workspace: None))
+
+    def builder(_task: AgentTask, _prompt: str, _workdir: Path) -> list[str]:
+        return [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('direct.txt').write_text('direct-ok\\n', encoding='utf-8')",
+        ]
+
+    pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=1, command_builder=builder)
+    created = pool.spawn(workspace=tmp_path, prompt="write", write=True)
+    result = _wait_terminal(pool, str(created["id"]))
+    assert result["state"] == "completed"
+    assert result["isolation_mode"] == "direct"
+    assert result["branch"] == ""
+    assert Path(str(result["worktree"])).resolve() == tmp_path.resolve()
+    assert (tmp_path / "direct.txt").read_text(encoding="utf-8") == "direct-ok\n"
+    cleaned = pool.cleanup(str(created["id"]), remove_branch=True)
+    assert cleaned["cleaned"] is True
+    assert (tmp_path / "direct.txt").is_file()
+
+
+def test_write_agent_can_require_git_worktree_explicitly(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(AgentPool, "_try_git_repo_root", classmethod(lambda cls, workspace: None))
     pool = AgentPool(
         root_dir=tmp_path / "pool",
         max_parallel=1,
         command_builder=lambda _task, _prompt, _workdir: [sys.executable, "-c", "print('x')"],
     )
-    created = pool.spawn(workspace=tmp_path, prompt="write", write=True)
+    created = pool.spawn(
+        workspace=tmp_path,
+        prompt="write",
+        write=True,
+        isolation_mode="git_worktree",
+    )
     result = _wait_terminal(pool, str(created["id"]))
     assert result["state"] == "failed"
-    assert "Git" in str(result["error"])
+    assert "Git worktree" in str(result["error"])
 
 
 def test_agent_pool_cancel_running_process(tmp_path: Path) -> None:
@@ -183,7 +213,7 @@ def test_claude_executor_command_is_noninteractive(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("MCP_DEVBRIDGE_AGENT_EXECUTOR", "claude")
     pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=1)
     caps = pool.capabilities()
-    assert caps["executors"] == ["claude"]
+    assert "claude" in cast(list[str], caps["executors"])
     assert caps["preferred_executor"] == "claude"
     assert caps["provider_runtime_verified"] is False
     task = AgentTask(
@@ -216,3 +246,142 @@ def test_agent_executor_failure_surfaces_provider_output(tmp_path: Path) -> None
     assert result["state"] == "failed"
     assert result["exit_code"] == 7
     assert "provider quota exhausted" in str(result["error"])
+
+def test_completion_receipt_parses_plain_and_json_event_output() -> None:
+    plain = 'done\nMCP_AGENT_RESULT: {"status":"success","summary":"plain"}\n'
+    assert _completion_receipt(plain) == {"status": "success", "summary": "plain"}
+    event = json.dumps(
+        {
+            "type": "text",
+            "part": {
+                "text": 'finished\nMCP_AGENT_RESULT: {"status":"success","summary":"json-event"}'
+            },
+        }
+    )
+    assert _completion_receipt(event) == {"status": "success", "summary": "json-event"}
+
+
+def test_chatgpt_executor_is_preferred_and_requires_verified_receipt(tmp_path: Path, monkeypatch) -> None:
+    import local_dev_mcp_bridge.agent_pool as agent_pool_module
+
+    class FakeBridge:
+        ready = True
+
+        def capabilities(self):
+            return {
+                "supported": True,
+                "enabled": True,
+                "ready": True,
+                "debug_port": 19222,
+                "mode": "ordinary_chat",
+                "uses_work_or_codex": False,
+            }
+
+        def run_task(
+            self, *, task_id, assignment, route_root, target_workspace, write, route_workspace_id="", timeout_seconds=None, on_started=None
+        ):
+            if on_started is not None:
+                on_started("chatgpt:child-test")
+            assert "TASK (do not omit or reinterpret)" in assignment
+            assert write is True
+            (target_workspace / "chat.txt").write_text("chat-ok\n", encoding="utf-8")
+            receipt = route_root / ".mcp-devbridge-chat-agent-receipts" / f"{task_id}.json"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"task_id": task_id, "status": "success", "summary": "chat verified"}
+            receipt.write_text(json.dumps(payload), encoding="utf-8")
+            return payload, "chatgpt:child-test", receipt
+
+    monkeypatch.setattr(agent_pool_module, "ChatGPTDesktopBridge", FakeBridge)
+    monkeypatch.setattr(AgentPool, "_discover_opencode_path", classmethod(lambda cls: "opencode.cmd"))
+    monkeypatch.setattr(AgentPool, "_discover_claude_path", classmethod(lambda cls: "claude.exe"))
+    target = tmp_path / "target"
+    target.mkdir()
+    pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=1)
+    caps = pool.capabilities()
+    assert cast(list[str], caps["executors"])[0] == "chatgpt"
+    assert caps["preferred_executor"] == "chatgpt"
+    created = pool.spawn(
+        workspace=target,
+        route_root=tmp_path,
+        prompt="write one file",
+        write=True,
+        isolation_mode="direct",
+    )
+    result = _wait_terminal(pool, str(created["id"]))
+    assert result["state"] == "completed"
+    assert result["executor"] == "chatgpt"
+    assert result["external_id"] == "chatgpt:child-test"
+    assert result["completion_verified"] is True
+    assert cast(dict[str, object], result["completion_receipt"])["summary"] == "chat verified"
+    assert (target / "chat.txt").read_text(encoding="utf-8") == "chat-ok\n"
+    receipt_path = Path(str(result["receipt_path"]))
+    assert receipt_path.is_file()
+    cleaned = pool.cleanup(str(created["id"]))
+    assert cleaned["cleaned"] is True
+    assert not receipt_path.exists()
+
+
+def test_command_builder_never_selects_live_chatgpt_executor(tmp_path: Path) -> None:
+    pool = AgentPool(
+        root_dir=tmp_path / "pool",
+        max_parallel=1,
+        command_builder=lambda _task, _prompt, _workdir: [sys.executable, "-c", "print('ok')"],
+    )
+    caps = pool.capabilities()
+    assert caps["executors"] == ["test"]
+    assert caps["preferred_executor"] == "auto"
+    created = pool.spawn(workspace=tmp_path, prompt="test", write=False)
+    assert created["executor"] == "test"
+
+
+def test_cancel_chatgpt_executor_stops_managed_conversation(tmp_path: Path, monkeypatch) -> None:
+    import local_dev_mcp_bridge.agent_pool as agent_pool_module
+
+    class BlockingBridge:
+        last = None
+
+        def __init__(self):
+            type(self).last = self
+            self.ready = True
+            self.started = threading.Event()
+            self.stopped = threading.Event()
+            self.stop_ids: list[str] = []
+
+        def capabilities(self):
+            return {"supported": True, "enabled": True, "ready": True, "mode": "ordinary_chat"}
+
+        def run_task(
+            self, *, task_id, assignment, route_root, target_workspace, write, route_workspace_id="", timeout_seconds=None, on_started=None
+        ):
+            if on_started is not None:
+                on_started("chatgpt:cancel-me")
+            self.started.set()
+            self.stopped.wait(5)
+            raise RuntimeError("cancelled child turn")
+
+        def stop_conversation(self, conversation_id: str) -> bool:
+            self.stop_ids.append(conversation_id)
+            self.stopped.set()
+            return True
+
+    monkeypatch.setattr(agent_pool_module, "ChatGPTDesktopBridge", BlockingBridge)
+    monkeypatch.setattr(AgentPool, "_discover_opencode_path", classmethod(lambda cls: ""))
+    monkeypatch.setattr(AgentPool, "_discover_claude_path", classmethod(lambda cls: ""))
+    pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=1)
+    created = pool.spawn(
+        workspace=tmp_path,
+        route_root=tmp_path,
+        prompt="wait",
+        executor="chatgpt",
+        write=False,
+    )
+    task_id = str(created["id"])
+    bridge = cast(BlockingBridge, BlockingBridge.last)
+    assert bridge.started.wait(3)
+    deadline = time.time() + 3
+    while time.time() < deadline and pool.get(task_id).get("external_id") != "chatgpt:cancel-me":
+        time.sleep(0.02)
+    cancelled = pool.cancel(task_id)
+    assert cancelled["state"] == "cancelled"
+    assert bridge.stop_ids == ["chatgpt:cancel-me"]
+    assert bridge.stopped.is_set()

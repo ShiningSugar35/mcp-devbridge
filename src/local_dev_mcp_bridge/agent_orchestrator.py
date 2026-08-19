@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -53,6 +54,11 @@ class AgentRecord:
     state: str
     created_at: float
     current_task_id: str
+    route_root: str = ""
+    route_workspace_id: str = ""
+    isolation_mode: str = "auto"
+    completion_verified: bool = False
+    completion_receipt: dict[str, Any] = field(default_factory=dict)
     task_ids: list[str] = field(default_factory=list)
     team_id: str = ""
     pending_messages: list[str] = field(default_factory=list)
@@ -76,6 +82,8 @@ class TeamRecord:
     state: str
     stage: str
     created_at: float
+    route_root: str = ""
+    route_workspace_id: str = ""
     worker_ids: list[str] = field(default_factory=list)
     reviewer_id: str = ""
     merger_id: str = ""
@@ -91,6 +99,9 @@ class TeamRecord:
     base_sha: str = ""
     integration_worktree: str = ""
     integration_branch: str = ""
+    success_policy: str = "all_required"
+    worker_failures: list[str] = field(default_factory=list)
+    warning: str = ""
     error: str = ""
     finished_at: float = 0.0
 
@@ -194,16 +205,27 @@ class AgentOrchestrator:
     def _repo_base(workspace: Path) -> tuple[Path, str]:
         root = _run_git(["git", "-C", str(workspace), "rev-parse", "--show-toplevel"])
         if root.returncode != 0 or not root.stdout.strip():
-            raise ValueError("Agent Team 的写入/合并需要 Git 仓库。")
+            raise ValueError("目标目录不属于 Git 仓库。")
         repo = Path(root.stdout.strip()).resolve()
         sha = _run_git(["git", "-C", str(repo), "rev-parse", "HEAD"])
         if sha.returncode != 0 or not sha.stdout.strip():
             raise RuntimeError("无法读取 Git HEAD。")
         return repo, sha.stdout.strip()
 
+    @classmethod
+    def _try_repo_base(cls, workspace: Path) -> tuple[Path, str] | None:
+        try:
+            return cls._repo_base(workspace)
+        except (ValueError, RuntimeError):
+            return None
+
     def _commit_agent_turn(self, agent: AgentRecord, task: dict[str, Any]) -> bool:
         task_id = str(task.get("id") or "")
         if not task_id or task_id in agent.committed_task_ids or not agent.write:
+            return True
+        if str(task.get("isolation_mode") or agent.isolation_mode) != "git_worktree":
+            agent.committed_task_ids.append(task_id)
+            self._persist_agent(agent)
             return True
         worktree_raw = str(task.get("worktree") or agent.worktree or "")
         if not worktree_raw:
@@ -274,6 +296,10 @@ class AgentOrchestrator:
             agent.branch = str(task.get("branch") or agent.branch or "")
             agent.repo_root = str(task.get("repo_root") or agent.repo_root or "")
             agent.base_sha = agent.base_sha or str(task.get("base_sha") or "")
+            agent.isolation_mode = str(task.get("isolation_mode") or agent.isolation_mode or "auto")
+            agent.completion_verified = bool(task.get("completion_verified", False))
+            receipt = task.get("completion_receipt")
+            agent.completion_receipt = dict(receipt) if isinstance(receipt, dict) else {}
             agent.output_tail = str(task.get("output_tail") or "")[-24_000:]
             low_state = str(task.get("state") or "")
             if low_state in {"queued", "running"}:
@@ -303,6 +329,8 @@ class AgentOrchestrator:
                 try:
                     next_task = self.pool.spawn(
                         workspace=workspace,
+                        route_root=Path(agent.route_root or agent.workspace),
+                        route_workspace_id=agent.route_workspace_id,
                         prompt=continuation_prompt,
                         title=f"{agent.title} · continuation",
                         executor=agent.executor,
@@ -320,6 +348,8 @@ class AgentOrchestrator:
                 agent.current_task_id = next_id
                 agent.task_ids.append(next_id)
                 agent.state = str(next_task.get("state") or "queued")
+                agent.completion_verified = False
+                agent.completion_receipt = {}
                 agent.finished_at = 0.0
                 agent.error = ""
                 self._persist_agent(agent)
@@ -352,12 +382,15 @@ class AgentOrchestrator:
         workspace: Path,
         prompt: str,
         title: str = "",
+        route_root: Path | None = None,
+        route_workspace_id: str = "",
         executor: str = "auto",
         model: str = "",
         write: bool = True,
         role: str = "worker",
         team_id: str = "",
-        isolate: bool = True,
+        isolate: bool | None = None,
+        isolation_mode: str = "auto",
     ) -> dict[str, Any]:
         prompt = prompt.strip()
         if not prompt:
@@ -369,25 +402,39 @@ class AgentOrchestrator:
         safe_title = " ".join((title.strip() or f"{role.title()} {agent_id[:8]}").split())[:120]
         task = self.pool.spawn(
             workspace=workspace,
+            route_root=route_root,
+            route_workspace_id=route_workspace_id,
             prompt=prompt,
             title=safe_title,
             executor=executor,
             model=model,
             write=write,
             isolate=isolate,
+            isolation_mode=isolation_mode,
         )
         task_id = str(task.get("id") or "")
+        receipt_raw = task.get("completion_receipt")
+        completion_receipt = (
+            {str(key): value for key, value in receipt_raw.items()}
+            if isinstance(receipt_raw, dict)
+            else {}
+        )
         record = AgentRecord(
             id=agent_id,
             title=safe_title,
             role=normalized_role,
             workspace=str(workspace.resolve()),
             executor=str(task.get("executor") or executor),
-            model=model.strip(),
+            model=str(task.get("model") or model).strip(),
             write=bool(write),
             state=str(task.get("state") or "queued"),
             created_at=time.time(),
             current_task_id=task_id,
+            route_root=str((route_root or workspace).resolve()),
+            route_workspace_id=route_workspace_id.strip(),
+            isolation_mode=str(task.get("isolation_mode") or isolation_mode or "auto"),
+            completion_verified=bool(task.get("completion_verified", False)),
+            completion_receipt=completion_receipt,
             task_ids=[task_id],
             team_id=team_id,
         )
@@ -402,6 +449,8 @@ class AgentOrchestrator:
         workspace: Path,
         objective: str,
         tasks: list[dict[str, Any]],
+        route_root: Path | None = None,
+        route_workspace_id: str = "",
         title: str = "",
         executor: str = "auto",
         model: str = "",
@@ -413,6 +462,8 @@ class AgentOrchestrator:
         reviewer_model: str = "",
         merger_executor: str = "auto",
         merger_model: str = "",
+        success_policy: str = "all_required",
+        isolation_mode: str = "auto",
     ) -> dict[str, Any]:
         objective = objective.strip()
         if not objective:
@@ -423,12 +474,16 @@ class AgentOrchestrator:
             raise ValueError(f"单个 Team 最多 {_MAX_TEAM_WORKERS} 个 worker。")
         if any(not isinstance(item, dict) or not str(item.get("prompt") or "").strip() for item in tasks):
             raise ValueError("tasks 中每项都必须包含非空 prompt。")
+        normalized_policy = success_policy.strip().lower() or "all_required"
+        if normalized_policy not in {"all_required", "allow_partial"}:
+            raise ValueError("success_policy 必须是 all_required / allow_partial。")
 
         any_write = any(bool(item.get("write", True)) for item in tasks)
         repo_root = ""
         base_sha = ""
-        if any_write or merger:
-            repo, base_sha = self._repo_base(workspace)
+        repo_info = self._try_repo_base(workspace) if any_write or merger else None
+        if repo_info is not None:
+            repo, base_sha = repo_info
             repo_root = str(repo)
 
         team_id = uuid.uuid4().hex
@@ -440,8 +495,10 @@ class AgentOrchestrator:
             state="running",
             stage="workers",
             created_at=time.time(),
+            route_root=str((route_root or workspace).resolve()),
+            route_workspace_id=route_workspace_id.strip(),
             reviewer_enabled=bool(reviewer),
-            merger_enabled=bool(merger and any_write),
+            merger_enabled=bool(merger and any_write and repo_root),
             reviewer_prompt=reviewer_prompt.strip(),
             merger_prompt=merger_prompt.strip(),
             reviewer_executor=reviewer_executor or executor,
@@ -450,6 +507,12 @@ class AgentOrchestrator:
             merger_model=merger_model or model,
             repo_root=repo_root,
             base_sha=base_sha,
+            success_policy=normalized_policy,
+            warning=(
+                "目标目录不是 Git 仓库：写型 worker 将使用 direct 模式；自动 Merger 已关闭。"
+                if any_write and not repo_root
+                else ""
+            ),
         )
         with self._lock:
             self._teams[team_id] = record
@@ -460,6 +523,8 @@ class AgentOrchestrator:
             for index, item in enumerate(tasks, start=1):
                 worker = self.spawn_agent(
                     workspace=workspace,
+                    route_root=Path(record.route_root or record.workspace),
+                    route_workspace_id=record.route_workspace_id,
                     prompt=str(item.get("prompt") or ""),
                     title=str(item.get("title") or f"Worker {index}"),
                     executor=str(item.get("executor") or executor),
@@ -467,7 +532,8 @@ class AgentOrchestrator:
                     write=bool(item.get("write", True)),
                     role="worker",
                     team_id=team_id,
-                    isolate=bool(item.get("write", True)),
+                    isolate=None,
+                    isolation_mode=str(item.get("isolation_mode") or isolation_mode or "auto"),
                 )
                 created.append(worker)
                 with self._lock:
@@ -617,6 +683,83 @@ class AgentOrchestrator:
             "all_terminal": bool(snapshots) and all(bool(item.get("terminal")) for item in snapshots),
         }
 
+    def cleanup_agent(self, agent_id: str, *, remove_branch: bool = True) -> dict[str, Any]:
+        """Delete terminal logical-Agent metadata and any isolated executor worktrees."""
+        snapshot = self._sync_agent(agent_id)
+        if not bool(snapshot.get("terminal")):
+            raise ValueError("Agent 仍在运行，不能清理。请先等待或取消。")
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent is None:
+                raise ValueError(f"找不到 Agent：{agent_id}")
+            task_ids = list(agent.task_ids)
+        cleaned_tasks: list[str] = []
+        for task_id in task_ids:
+            try:
+                task = self.pool.get(task_id)
+                if not bool(task.get("cleaned")):
+                    self.pool.cleanup(task_id, remove_branch=remove_branch)
+                cleaned_tasks.append(task_id)
+            except ValueError:
+                continue
+        with self._lock:
+            self._agents.pop(agent_id, None)
+            with suppress(OSError):
+                self._agent_file(agent_id).unlink(missing_ok=True)
+        return {"agent_id": agent_id, "cleaned": True, "task_ids": cleaned_tasks}
+
+    def cleanup_team(self, team_id: str, *, remove_branches: bool = True) -> dict[str, Any]:
+        """Delete a terminal team, its logical agents, and its integration worktree/branch."""
+        team_snapshot = self.get_team(team_id)
+        if not bool(team_snapshot.get("terminal")):
+            raise ValueError("Agent Team 仍在运行，不能清理。请先等待或取消相关 Agent。")
+        with self._lock:
+            team = self._teams.get(team_id)
+            if team is None:
+                raise ValueError(f"找不到 Agent Team：{team_id}")
+            agent_ids = [*team.worker_ids]
+            if team.reviewer_id:
+                agent_ids.append(team.reviewer_id)
+            if team.merger_id:
+                agent_ids.append(team.merger_id)
+            integration_worktree = team.integration_worktree
+            integration_branch = team.integration_branch
+            repo_root = team.repo_root
+
+        cleaned_agents: list[str] = []
+        for agent_id in agent_ids:
+            if agent_id not in self._agents:
+                continue
+            self.cleanup_agent(agent_id, remove_branch=remove_branches)
+            cleaned_agents.append(agent_id)
+
+        if integration_worktree and repo_root:
+            worktree = Path(integration_worktree)
+            repo = Path(repo_root)
+            if worktree.exists():
+                removed = _run_git(
+                    ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+                    timeout=60,
+                )
+                if removed.returncode != 0:
+                    raise RuntimeError(
+                        f"清理 Team integration worktree 失败：{(removed.stderr or removed.stdout).strip()[:800]}"
+                    )
+            if remove_branches and integration_branch:
+                deleted = _run_git(
+                    ["git", "-C", str(repo), "branch", "-D", integration_branch], timeout=30
+                )
+                if deleted.returncode != 0 and "not found" not in (deleted.stderr or "").lower():
+                    raise RuntimeError(
+                        f"删除 Team integration 分支失败：{(deleted.stderr or deleted.stdout).strip()[:800]}"
+                    )
+
+        with self._lock:
+            self._teams.pop(team_id, None)
+            with suppress(OSError):
+                self._team_file(team_id).unlink(missing_ok=True)
+        return {"team_id": team_id, "cleaned": True, "agent_ids": cleaned_agents}
+
     # -------------------------------------------------------------- team stages
     def _review_context(self, team: TeamRecord) -> str:
         lines = [
@@ -630,8 +773,12 @@ class AgentOrchestrator:
             snapshot = self._sync_agent(agent_id)
             lines.append(
                 f"\n- {agent.title} [{snapshot['state']}] branch={agent.branch or '(none)'} "
-                f"error={agent.error or '(none)'}"
+                f"verified={agent.completion_verified} error={agent.error or '(none)'}"
             )
+            if agent.output_tail and remaining > 0:
+                chunk = ("WORKER OUTPUT TAIL:\n" + agent.output_tail[-6000:])[:remaining]
+                lines.append(chunk)
+                remaining -= len(chunk)
             if agent.branch and team.repo_root:
                 diff = _run_git(
                     ["git", "-C", team.repo_root, "diff", f"{team.base_sha}..{agent.branch}", "--"],
@@ -652,7 +799,11 @@ class AgentOrchestrator:
     def _create_integration_worktree(self, team: TeamRecord) -> Path:
         if not team.repo_root or not team.base_sha:
             raise RuntimeError("Team 缺少 Git repo/base，无法创建 Merger worktree。")
-        path = (self.integration_dir / team.id).resolve()
+        integration_base = self.integration_dir
+        if team.merger_executor == "chatgpt" and team.route_root:
+            integration_base = Path(team.route_root).resolve() / ".mcp-devbridge-team-worktrees"
+        path = (integration_base / team.id).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
         branch = f"mcp-team/{team.id[:12]}"
         if path.exists():
             raise RuntimeError(f"Team integration worktree 已存在：{path}")
@@ -703,22 +854,35 @@ class AgentOrchestrator:
             workers = [self._sync_agent(item) for item in worker_ids]
             if not workers or any(not bool(item.get("terminal")) for item in workers):
                 return
-            completed = [item for item in workers if item.get("state") == "completed"]
+            completed = [
+                item
+                for item in workers
+                if item.get("state") == "completed" and bool(item.get("completion_verified"))
+            ]
+            failures = [
+                f"{item.get('title')}: {item.get('error') or item.get('state')}"
+                for item in workers
+                if item not in completed
+            ]
             if not completed:
                 with self._lock:
                     team.state = "failed"
                     team.stage = "done"
-                    team.error = "所有 worker 均未成功完成。"
+                    team.worker_failures = failures
+                    team.error = "所有 worker 均未成功完成或缺少可验证的成功回执。"
                     team.finished_at = time.time()
                     self._persist_team(team)
                 return
             with self._lock:
+                team.worker_failures = failures
                 team.stage = "reviewer_spawning" if team.reviewer_enabled else "merge_preparing"
                 self._persist_team(team)
             if team.reviewer_enabled:
                 try:
                     reviewer = self.spawn_agent(
                         workspace=Path(team.workspace),
+                        route_root=Path(team.route_root or team.workspace),
+                        route_workspace_id=team.route_workspace_id,
                         prompt=self._review_context(team),
                         title=f"{team.title} · Reviewer",
                         executor=team.reviewer_executor,
@@ -745,15 +909,35 @@ class AgentOrchestrator:
             if not bool(reviewer.get("terminal")):
                 return
             with self._lock:
-                if reviewer.get("state") != "completed":
+                if reviewer.get("state") != "completed" or not bool(reviewer.get("completion_verified")):
+                    team.state = "failed"
+                    team.stage = "done"
                     team.error = (
                         (team.error + " | ") if team.error else ""
-                    ) + f"Reviewer 未成功完成：{reviewer.get('error') or reviewer.get('state')}"
+                    ) + f"Reviewer 未成功完成或缺少成功回执：{reviewer.get('error') or reviewer.get('state')}"
+                    team.finished_at = time.time()
+                    self._persist_team(team)
+                    return
+                if team.success_policy == "all_required" and team.worker_failures:
+                    team.state = "failed"
+                    team.stage = "done"
+                    team.error = "存在失败 worker；all_required 策略禁止把部分成功误判为团队完成。"
+                    team.finished_at = time.time()
+                    self._persist_team(team)
+                    return
                 team.stage = "merge_preparing"
                 self._persist_team(team)
             return
 
         if stage == "merge_preparing":
+            if team.success_policy == "all_required" and team.worker_failures:
+                with self._lock:
+                    team.state = "failed"
+                    team.stage = "done"
+                    team.error = "存在失败 worker；all_required 策略禁止把部分成功误判为团队完成。"
+                    team.finished_at = time.time()
+                    self._persist_team(team)
+                return
             if not team.merger_enabled:
                 with self._lock:
                     team.state = "completed"
@@ -768,6 +952,8 @@ class AgentOrchestrator:
                 integration = self._create_integration_worktree(team)
                 merger = self.spawn_agent(
                     workspace=integration,
+                    route_root=Path(team.route_root or team.workspace),
+                    route_workspace_id=team.route_workspace_id,
                     prompt=self._merger_assignment(team),
                     title=f"{team.title} · Merger",
                     executor=team.merger_executor,
@@ -796,7 +982,7 @@ class AgentOrchestrator:
             if not bool(merger.get("terminal")):
                 return
             with self._lock:
-                if merger.get("state") == "completed":
+                if merger.get("state") == "completed" and bool(merger.get("completion_verified")):
                     team.state = "completed"
                 else:
                     team.state = "failed"

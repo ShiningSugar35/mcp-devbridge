@@ -146,6 +146,19 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-19 · **v0.9.3 普通 ChatGPT Chat 多 Agent**：
+  - 新增 `chatgpt_desktop.py`：普通 Chat Deep Link + 127.0.0.1 CDP 精确 Send/Stop；不使用私有账号 API，不提取 ChatGPT Token。
+  - AgentPool `auto` 在 bridge ready 时优先 chatgpt；子 Chat 直接调用已连接 MCP DevBridge，必须 task-id receipt + read-back 后才算 success。
+  - child contract 固定 route root + `devbridge_workspace_id`；Git Chat writer worktree 放 routed drive，避免 C:/D: 与 transport recreation 漂移。
+  - Agent 管理面板与 Gateway 新增 Chat bridge status/prepare/restore；准备为显式 opt-in，恢复可去掉 CDP。
+  - 真机：managed direct writer、Git worktree writer、3-Agent batch 均成功；三路 batch 3/3 verified，约 2.5× wall-clock 加速。
+
+- 2026-08-18 · **v0.9.2 Agent 可靠性 / 非 Git direct / 控制面 / 包体瘦身**：
+  - Agent 工具返回标准 MCP CallToolResult；spawn/team 支持受工作区边界约束的 `target_path` 与 `auto/git_worktree/direct`。
+  - 真实执行器要求 machine-readable completion receipt；Team 默认 all_required；新增 logical Agent/Team cleanup。
+  - 桌面新增 Agent 管理面板和 Ctrl+Shift+A；OpenCode 默认 `--pure` + 免费 Zen 模型；Gateway Agent 分派拆模块。
+  - 构建阶段生成 production-only CodexPro runtime，排除 devDependencies，避免 TypeScript/esbuild/tsx 进入正式安装包。
+
 - 2026-08-18 · **v0.9.1 全局连接配置 / 全部启停 / Stop 可靠性**：
   - 固定连接提升为设备级默认值：工作台一次填写连接方式、hostname、Cloudflare credential 并同步现有/未来项目；Gateway port 以设备全局值为准。
   - 工作台移除“当前项目”重复服务卡；项目表保留单项目按钮，新增 Start All / Stop All；高级设置移到项目设置。

@@ -100,6 +100,28 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.9.3 普通 ChatGPT Chat 多 Agent
+
+- **普通 Chat 成为第一执行器**：Windows 上可显式准备 ChatGPT Desktop Chat Agent bridge。`auto` 在 bridge 就绪时优先启动普通 `ChatGPT / 聊天` 子会话；子会话保持 Chat 模式，直接调用用户已连接的 MCP DevBridge 完成本地文件、Shell、Git 与测试操作，不自动 handoff 到 Work/Codex。
+- **真实 Send，不再猜 Enter**：Desktop Deep Link 只负责 `mode=chat + prompt prefill`；DevBridge 通过仅监听 `127.0.0.1` 的 CDP 精确定位 composer 与真实“发送”按钮。无需私有 ChatGPT HTTP API，也不读取/复制账号 Token。
+- **显式 opt-in**：Agent 管理面板新增“准备 Chat Agent / 恢复普通启动”；另有 `chatgpt_bridge_status / prepare_chatgpt_bridge / restore_chatgpt_bridge` MCP 控制工具。准备操作会明确重启 ChatGPT Desktop；不用时可恢复无 CDP 的普通启动。
+- **MCP 验真合约**：子 Chat 不能靠自然语言 `DONE` 判成功。每个 task 必须通过 MCP 写入 task-id 结构化 receipt 并 read-back；AgentPool 外部轮询 receipt 后才置 `completion_verified=true`。取消任务会按 conversation ID 打开对应 Chat 并点击真实 Stop。
+- **盘符级无状态路由**：Chat 子 Agent 禁止依赖 `open_workspace` 的会话状态；DevBridge 同时下发 routed drive root 与固定 `devbridge_workspace_id`，每次 MCP 调用都携带同一 ID，兼容 ChatGPT transport 重建和 C:/D: 双盘入口。
+- **Git 隔离仍成立**：Git 写 Agent 的 Chat executor worktree 位于 routed drive 的 `.mcp-devbridge-agent-worktrees/`，普通 Chat 可通过 MCP 访问；主 checkout 不被直接编辑，collect/cleanup 继续提供 diff、branch 和清理。
+- **真实并发验收**：3 个 managed 普通 Chat Agent 在约 2.6 秒内全部进入 running，66.4s / 74.3s / 90.2s 完成，3/3 均写入+read-back+receipt 验证；wall-clock 约 92s，对应单任务耗时总和约 231s，约 2.5× 并行收益。
+- **Fallback**：Chat bridge 未启用/未就绪时 `auto` 回退 OpenCode（默认免费 Zen 模型）或 Claude；写任务不会因为 provider 失败自动跨 provider 重放，避免重复修改。
+
+## v0.9.2 Agent 控制面、非 Git 写入与发布瘦身
+
+- **修复 ChatGPT Agent 工具返回协议**：Gateway 本地 Agent/Pool 工具统一返回标准 MCP `content + structuredContent`，避免客户端把普通 JSON 对象拒绝为非法 `CallToolResult`。
+- **盘符根/普通目录可写**：写 Agent 新增 `auto / git_worktree / direct`。Git 项目仍默认 worktree 隔离；`C:\`、`D:\` 和普通非 Git 目录自动使用 direct local-write，不再因缺 `.git` 直接失败。spawn/team 新增 `target_path`，盘符级工作区可把任务精准落到子目录。
+- **成功语义收紧**：真实执行器必须返回 `MCP_AGENT_RESULT` 结构化成功回执；Team 默认 `all_required`，任一 required worker、Reviewer 或 Merger 未真正完成都不会被“部分成功”误判为 completed。
+- **生命周期补齐**：新增 logical `cleanup_agent / cleanup_agent_team`，终态 Agent/Team 可真正删除持久化元数据、worktree 与临时分支；非 Git direct 清理只清元数据，不删除用户文件。
+- **Agent 管理面板**：桌面右上角新增“Agent 管理”，`Ctrl+Shift+A` 可查看 Team/Agent、角色、状态、模型、目标目录、隔离/分支、耗时、错误和输出，并可追加消息、取消和清理。
+- **免费 OpenCode 保底**：OpenCode 执行默认 `--pure` 隔离外部插件；未显式指定模型时默认 `opencode/nemotron-3-ultra-free`，可用 `MCP_DEVBRIDGE_OPENCODE_FREE_MODEL` 覆盖。免费模型可能排队，因此定位为 cost-safe fallback 而不是性能 SLA 主执行器。
+- **复杂度收敛**：Agent 参数/分派从 Gateway 抽到 `agent_gateway.py`；`_exec_local_tool` 复杂度代理由 99 降至 34，避免 Agent 功能继续膨胀 OAuth/transport 主路径。
+- **安装包瘦身**：构建新增 production-only CodexPro runtime，依据 lockfile 排除 TypeScript/esbuild/tsx 等 dev dependencies；CodexPro 打包目录由约 55 MiB 降至约 15 MiB，开发环境的完整 `node_modules` 不受影响。
+
 ## v0.9.1 全局连接配置与多项目服务可靠性
 
 - **固定域名只填一次**：工作台「连接信息」新增“设备全局连接配置”。连接方式、公网域名和 Cloudflare Tunnel 凭据一次保存后同步到本设备全部现有项目；后续新项目自动继承，不再为 C:/D:/E:/F: 重复输入同一套 `jerry.shiningsugar.shop` 配置。

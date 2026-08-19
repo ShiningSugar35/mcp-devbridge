@@ -61,6 +61,10 @@ Step "1b/6 prepare private portable runtimes"
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:root "scripts\prepare_runtime.ps1")
 if ($LASTEXITCODE -ne 0) { throw "portable runtime preparation failed" }
 
+Step "1c/6 prepare production-only CodexPro runtime"
+& $script:py (Join-Path $script:root "scripts\prepare_codexpro_runtime.py")
+if ($LASTEXITCODE -ne 0) { throw "CodexPro production runtime preparation failed" }
+
 # --- 2. Unit tests ----------------------------------------------------------
 if (-not $SkipTests) {
     Step "2/6 unit tests (pytest)"
