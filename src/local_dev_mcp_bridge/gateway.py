@@ -2329,7 +2329,14 @@ class OAuthGateway:
             log_config=None,  # PyInstaller 冻结环境：禁止 dictConfig 动态导入 uvicorn.logging 格式化器
         )
         self._server = uvicorn.Server(config)
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+        def _run_gateway() -> None:
+            try:
+                self._server.run()
+            except Exception:
+                pass
+
+        self._thread = threading.Thread(target=_run_gateway, daemon=True, name="gateway-thread")
         self._thread.start()
 
     def stop(self) -> None:
