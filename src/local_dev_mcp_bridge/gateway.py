@@ -822,6 +822,8 @@ def _mcp_tool_payload(value: Any) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": text}],
         "structuredContent": structured,
+        # (\"complete\" == a plain completed tool result); older protocol
+        # surfaces ignore unknown fields, so emitting it is safe everywhere.
     }
 
 
@@ -1472,7 +1474,12 @@ class OAuthGateway:
                     f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
                 )
                 return JSONResponse(
-                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]})
+                    _jsonrpc_result(
+                        rpc_id,
+                        {
+                            "content": [{"type": "text", "text": text}],
+                        },
+                    )
                 )
             elif name == "run_program":
                 executable = str(arguments.get("executable", ""))
@@ -1491,7 +1498,12 @@ class OAuthGateway:
                     f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
                 )
                 return JSONResponse(
-                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]})
+                    _jsonrpc_result(
+                        rpc_id,
+                        {
+                            "content": [{"type": "text", "text": text}],
+                        },
+                    )
                 )
             elif name == "shell_self_test":
                 lines: list[str] = []
@@ -1525,13 +1537,14 @@ class OAuthGateway:
                         lines.append(f"[✗] {tool}: 未安装或不可调用")
                 return JSONResponse(
                     _jsonrpc_result(
-                        rpc_id, {"content": [{"type": "text", "text": "\n".join(lines)}]}
+                        rpc_id,
                     )
                 )
             elif name == "devbridge_list_workspaces":
                 result = self._list_workspaces()
                 return JSONResponse(
-                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                    _jsonrpc_result(
+                    )
                 )
             elif name == "devbridge_get_current_workspace":
                 result = self._get_current_workspace(workspace_id, session_id)
@@ -1561,7 +1574,8 @@ class OAuthGateway:
             elif name == "devbridge_list_devices":
                 result = self._list_devices(session_id)
                 return JSONResponse(
-                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
+                    _jsonrpc_result(
+                    )
                 )
             elif name == "devbridge_get_current_device":
                 result = self._get_current_device(session_id)
