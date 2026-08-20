@@ -734,8 +734,12 @@ def test_two_oauth_tokens_are_both_hub_scoped(mw_env: _MultiWorkspaceEnv) -> Non
     assert record_b.subject == "local-user"
 
 
-def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
-    """switch_workspace only affects the calling session, not others."""
+def test_switch_workspace_persists_across_sessions(mw_env: _MultiWorkspaceEnv) -> None:
+    """switch_workspace persists per client identity across MCP transport sessions.
+
+    ChatGPT recreates transports between tool batches, so session-only isolation
+    loses the selection; the explicit switch must survive the new session.
+    """
     import json  # noqa: F811 - local import is fine
 
     at_a, _, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
@@ -780,7 +784,8 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
     text = result["result"]["content"][0]["text"]
     assert WORKSPACE_B_ID in text
 
-    # Meanwhile, session "sess-gemini" (same token) should still be on workspace A
+    # A recreated transport ("sess-gemini", same client identity) inherits the
+    # persisted selection instead of falling back to the consent-time workspace.
     r3 = mw_env.client.post(
         "/mcp",
         content=rpc_gcw,
@@ -793,7 +798,7 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
     assert r3.status_code == 200
     result3 = json.loads(r3.text)
     text3 = result3["result"]["content"][0]["text"]
-    assert WORKSPACE_A_ID in text3, f"Expected workspace A for sess-gemini, got: {text3}"
+    assert WORKSPACE_B_ID in text3, f"Expected persisted workspace B for sess-gemini, got: {text3}"
 
 
 def test_switch_workspace_changes_real_proxy_target(mw_env: _MultiWorkspaceEnv) -> None:
@@ -834,7 +839,9 @@ def test_switch_workspace_changes_real_proxy_target(mw_env: _MultiWorkspaceEnv) 
         headers={"Authorization": f"Bearer {token}", "mcp-session-id": "sess-other"},
     )
     assert other.status_code == 200
-    assert routed_to == [18787]
+    # Same client identity: the explicit switch persists across transport
+    # sessions, so the new session stays on workspace B.
+    assert routed_to == [18788]
 
 
 def test_switch_workspace_unknown_project_returns_error(mw_env: _MultiWorkspaceEnv) -> None:
@@ -1046,7 +1053,9 @@ def test_v081_stateless_route_hint_survives_transport_recreation(
     assert all(b"devbridge_workspace_id" not in body for body in forwarded_bodies[-2:])
 
     call("transport-session-three", route=None)
-    assert routed_to[-1] == 18787
+    # The explicit route is persisted per client, so even without the hint the
+    # recreated transport stays pinned to workspace B.
+    assert routed_to[-1] == 18788
 
 
 def test_v081_injected_tool_schema_exposes_optional_route_hints() -> None:

@@ -19,10 +19,12 @@ host. No second tunnel, no second URL, tokens never written to logs.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import html
 import json
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -57,6 +59,31 @@ from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_
 from .platform_support import run_platform_kwargs
 from .secrets import SecretsStore
 from .shell import detect_binaries, get_shell_info, run_command, run_program
+
+_OPEN_WORKSPACE_TOOL_NAME = "open_workspace"
+_OPEN_CURRENT_WORKSPACE_TOOL_NAME = "open_current_workspace"
+_BINDING_FILE_NAME = "gateway_workspace_binding.json"
+
+
+def _stable_client_key(prefix: str, *parts: str) -> str:
+    """A stable, unguessable key for one client identity across transports."""
+    raw = "\x00".join((prefix, *parts))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _normalize_open_root(value: str) -> str:
+    """Resolve an open_workspace root/path argument to an absolute dir, or ''."""
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            return ""
+        resolved = candidate.resolve()
+        if not resolved.is_dir():
+            return ""
+        return str(resolved)
+    except Exception:
+        return ""
+
 
 _DEVICE_TOOL_NAMES = frozenset(
     {
@@ -996,6 +1023,12 @@ class OAuthGateway:
         self._upstream_sessions: dict[str, dict[str, str]] = {}
         self._initialize_requests: dict[str, bytes] = {}
         self._session_lock = threading.Lock()
+        # Durable per-client routing: ChatGPT recreates the MCP transport between
+        # tool batches, so session-bound state alone keeps losing the workspace.
+        self._client_workspace_bindings: dict[str, str] = {}
+        self._client_open_roots: dict[str, tuple[str, str]] = {}
+        self._bindings_loaded = False
+        self._bindings_path = constants.config_dir() / _BINDING_FILE_NAME
         self._agent_pool: AgentPool | None = None
         self._agent_orchestrator: AgentOrchestrator | None = None
 
@@ -1190,6 +1223,7 @@ class OAuthGateway:
         workspace_id = ""
         direct_workspace = ""
         upstream_target: str | None = None
+        client_key = ""
         if bearer:
             direct_workspace = self._workspace_for_credential(bearer)
             if _constant_time_eq(bearer, engine_credential) or direct_workspace:
@@ -1197,6 +1231,7 @@ class OAuthGateway:
                 proxy_token = self._credential_for_workspace(
                     workspace_id, engine_credential or bearer
                 )
+                client_key = _stable_client_key("bearer", bearer)
             else:
                 record = await self._provider.load_access_token(bearer)
                 if record is None:
@@ -1207,10 +1242,22 @@ class OAuthGateway:
                 proxy_token = self._credential_for_workspace(workspace_id, engine_credential)
                 if not proxy_token:
                     return self._unauthorized()
+                client_key = _stable_client_key(
+                    "oauth", str(getattr(record, "client_id", "") or ""), str(record.subject or "")
+                )
         elif self.allow_local_anonymous and _is_loopback(request):
             proxy_token = None
+            client_key = "loopback"
         else:
             return self._unauthorized()
+
+        open_root_arg = ""
+        if tool_name == _OPEN_WORKSPACE_TOOL_NAME:
+            open_root_arg = str(call_arguments.get("root") or call_arguments.get("path") or "").strip()
+        if open_root_arg and not direct_workspace and not route_workspace_id:
+            pinned_project = self._running_project_for_path(open_root_arg)
+            if pinned_project:
+                route_workspace_id = pinned_project
 
         if route_workspace_id and direct_workspace and route_workspace_id != direct_workspace:
             return JSONResponse(
@@ -1262,8 +1309,10 @@ class OAuthGateway:
                 if session_id and synthetic_workspace_route:
                     with self._session_lock:
                         self._session_workspaces[session_id] = workspace_id
+                if synthetic_workspace_route and client_key:
+                    self._remember_client_workspace(client_key, workspace_id)
             workspace_id = self._effective_workspace(
-                workspace_id, session_id, pinned=bool(direct_workspace)
+                workspace_id, session_id, pinned=bool(direct_workspace), client_key=client_key
             )
             if workspace_id:
                 upstream_target = self._resolve_upstream(workspace_id)
@@ -1283,16 +1332,60 @@ class OAuthGateway:
             params = rpc.get("params") or {}
             if tool_name in _DEVICE_TOOL_NAMES:
                 result = await self._exec_local_tool(
-                    tool_name, rpc, params, workspace_id, session_id
+                    tool_name, rpc, params, workspace_id, session_id, client_key
                 )
                 self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
                 return result
             if remote is None and tool_name in _LOCAL_TOOL_NAMES:
                 result = await self._exec_local_tool(
-                    tool_name, rpc, params, workspace_id, session_id
+                    tool_name, rpc, params, workspace_id, session_id, client_key
                 )
                 self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
                 return result
+
+        if (
+            rpc is not None
+            and jsonrpc_method == "tools/call"
+            and tool_name == _OPEN_WORKSPACE_TOOL_NAME
+            and open_root_arg
+            and client_key
+        ):
+            normalized_root = _normalize_open_root(open_root_arg)
+            if normalized_root:
+                self._remember_client_open_root(client_key, normalized_root, upstream_key)
+                if workspace_id and upstream_key.startswith("local:"):
+                    self._remember_client_workspace(client_key, workspace_id)
+
+        if (
+            rpc is not None
+            and jsonrpc_method == "tools/call"
+            and tool_name == _OPEN_CURRENT_WORKSPACE_TOOL_NAME
+            and client_key
+        ):
+            recorded_root = self._client_open_root_for(client_key)
+            if recorded_root[0] and (not recorded_root[1] or recorded_root[1] == upstream_key):
+                try:
+                    rewritten_rpc = json.loads(body)
+                    if isinstance(rewritten_rpc, dict):
+                        rewritten_params = rewritten_rpc.get("params") or {}
+                        if isinstance(rewritten_params, dict):
+                            original_args = rewritten_params.get("arguments") or {}
+                            new_args = {
+                                key: value
+                                for key, value in (
+                                    original_args.items() if isinstance(original_args, dict) else []
+                                )
+                                if key not in ("root", "path")
+                            }
+                            new_args["root"] = recorded_root[0]
+                            rewritten_params["name"] = _OPEN_WORKSPACE_TOOL_NAME
+                            rewritten_params["arguments"] = new_args
+                            rewritten_rpc["params"] = rewritten_params
+                            body = json.dumps(rewritten_rpc, ensure_ascii=False).encode("utf-8")
+                            rpc = rewritten_rpc
+                            jsonrpc_method = "tools/call"
+                except (ValueError, TypeError):
+                    pass
 
         body = _strip_route_arguments(body, rpc, keep_workspace=remote is not None)
         upstream_session_id = session_id
@@ -1302,6 +1395,7 @@ class OAuthGateway:
                 upstream_key=upstream_key,
                 upstream_target=upstream_target,
                 authorization=proxy_token,
+                client_key=client_key,
             )
             if not ensured:
                 return JSONResponse(
@@ -1323,6 +1417,7 @@ class OAuthGateway:
             session_id=session_id,
             device_id=device_id,
             rpc=rpc,
+            client_key=client_key,
         )
 
     async def _proxy(
@@ -1341,6 +1436,7 @@ class OAuthGateway:
         session_id: str = "",
         device_id: str = "",
         rpc: dict[str, Any] | None = None,
+        client_key: str = "",
     ) -> Response:
         base = upstream_target or self.upstream_url
         target = f"{base}{request.url.path}"
@@ -1417,6 +1513,17 @@ class OAuthGateway:
                     self._remember_upstream_session(
                         returned_session_id, upstream_key, returned_session_id, body
                     )
+                if returned_session_id and client_key:
+                    recorded_root = self._client_open_root_for(client_key)
+                    if recorded_root[0] and (
+                        not recorded_root[1] or recorded_root[1] == upstream_key
+                    ):
+                        # ChatGPT recreates the MCP transport per tool batch; each new
+                        # engine session starts at its default root, so re-open the
+                        # client's pinned workspace root before any tool runs.
+                        await self._replay_open_workspace(
+                            base, returned_session_id, authorization, recorded_root[0]
+                        )
                 rewritten = _rewrite_server_identity(upstream.content)
                 _write_diag_entry(
                     path=request.url.path,
@@ -1453,6 +1560,7 @@ class OAuthGateway:
         params: dict[str, Any],
         workspace_id: str = "",
         session_id: str = "",
+        client_key: str = "",
     ) -> JSONResponse:
         rpc_id = rpc.get("id")
         arguments = _tool_arguments(params)
@@ -1550,7 +1658,7 @@ class OAuthGateway:
                     )
                 )
             elif name == "devbridge_get_current_workspace":
-                result = self._get_current_workspace(workspace_id, session_id)
+                result = self._get_current_workspace(workspace_id, session_id, client_key)
                 return JSONResponse(
                     _jsonrpc_result(
                         rpc_id,
@@ -1564,7 +1672,7 @@ class OAuthGateway:
                 target_id = str(arguments.get("project_id", ""))
                 if not target_id:
                     raise ValueError("project_id 不能为空。")
-                result = self._do_switch_workspace(target_id, session_id)
+                result = self._do_switch_workspace(target_id, session_id, client_key)
                 return JSONResponse(
                     _jsonrpc_result(
                         rpc_id,
@@ -1781,6 +1889,7 @@ class OAuthGateway:
         upstream_key: str,
         upstream_target: str,
         authorization: str | None,
+        client_key: str = "",
     ) -> str:
         existing = self._mapped_upstream_session(client_session_id, upstream_key)
         if existing:
@@ -1828,7 +1937,165 @@ class OAuthGateway:
         self._remember_upstream_session(
             client_session_id, upstream_key, upstream_session_id, initialize_body
         )
+        if client_key:
+            recorded_root = self._client_open_root_for(client_key)
+            if recorded_root[0] and (not recorded_root[1] or recorded_root[1] == upstream_key):
+                await self._replay_open_workspace(
+                    upstream_target, upstream_session_id, authorization, recorded_root[0]
+                )
         return upstream_session_id
+
+    async def _replay_open_workspace(
+        self, upstream_target: str, upstream_session_id: str, authorization: str | None, root: str
+    ) -> None:
+        """Re-open the client's pinned workspace root on a fresh upstream session.
+
+        The CodexPro engine keeps its selected workspace per MCP session; when the
+        gateway creates a new upstream session for a recreated client transport,
+        replay the recorded open_workspace so subsequent tool calls (which may omit
+        workspace_id) keep resolving against the same root. Best-effort only.
+        """
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+            "mcp-session-id": upstream_session_id,
+        }
+        if authorization:
+            headers["authorization"] = f"Bearer {authorization}"
+        initialized = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": _OPEN_WORKSPACE_TOOL_NAME,
+                "arguments": {"root": root, "include_tree": False},
+            },
+        }
+        with contextlib.suppress(httpx.HTTPError):
+            await self._http.post(
+                f"{upstream_target}/mcp",
+                content=json.dumps(initialized, ensure_ascii=False).encode("utf-8"),
+                headers=headers,
+            )
+        with contextlib.suppress(httpx.HTTPError):
+            await self._http.post(
+                f"{upstream_target}/mcp",
+                content=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers,
+            )
+
+    # ---------------------------------------------- persistent client bindings
+    def _load_client_bindings(self) -> None:
+        if self._bindings_loaded:
+            return
+        self._bindings_loaded = True
+        try:
+            raw = json.loads(self._bindings_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        workspaces = raw.get("workspaces")
+        open_roots = raw.get("open_roots")
+        with self._session_lock:
+            if isinstance(workspaces, dict):
+                for key, item in workspaces.items():
+                    if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+                        self._client_workspace_bindings[key] = item["id"]
+            if isinstance(open_roots, dict):
+                for key, item in open_roots.items():
+                    if isinstance(item, dict) and isinstance(item.get("root"), str) and item["root"]:
+                        self._client_open_roots[key] = (item["root"], str(item.get("upstream_key") or ""))
+
+    def _save_client_bindings(self) -> None:
+        with self._session_lock:
+            payload = {
+                "workspaces": {
+                    key: {"id": workspace_id, "updated_at": time.time()}
+                    for key, workspace_id in self._client_workspace_bindings.items()
+                },
+                "open_roots": {
+                    key: {"root": root, "upstream_key": upstream_key, "updated_at": time.time()}
+                    for key, (root, upstream_key) in self._client_open_roots.items()
+                },
+            }
+        try:
+            self._bindings_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._bindings_path.with_name(self._bindings_path.name + ".tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp_path, self._bindings_path)
+        except Exception:
+            pass
+
+    def _client_workspace_binding(self, client_key: str) -> str:
+        if not client_key:
+            return ""
+        self._load_client_bindings()
+        with self._session_lock:
+            return self._client_workspace_bindings.get(client_key, "")
+
+    def _client_open_root_for(self, client_key: str) -> tuple[str, str]:
+        if not client_key:
+            return ("", "")
+        self._load_client_bindings()
+        with self._session_lock:
+            return self._client_open_roots.get(client_key, ("", ""))
+
+    def _remember_client_workspace(self, client_key: str, workspace_id: str) -> None:
+        if not client_key or not workspace_id:
+            return
+        self._load_client_bindings()
+        changed = False
+        with self._session_lock:
+            if self._client_workspace_bindings.get(client_key) != workspace_id:
+                self._client_workspace_bindings[client_key] = workspace_id
+                changed = True
+        if changed:
+            self._save_client_bindings()
+
+    def _remember_client_open_root(self, client_key: str, root: str, upstream_key: str) -> None:
+        if not client_key or not root:
+            return
+        self._load_client_bindings()
+        changed = False
+        with self._session_lock:
+            if self._client_open_roots.get(client_key) != (root, upstream_key):
+                self._client_open_roots[client_key] = (root, upstream_key)
+                changed = True
+        if changed:
+            self._save_client_bindings()
+
+    def _running_project_for_path(self, target: str) -> str:
+        """Return the running project whose root best contains ``target``, or ''."""
+        try:
+            resolved = Path(target).expanduser().resolve()
+        except Exception:
+            return ""
+        running = set(self._running_workspace_ids())
+        if not running:
+            return ""
+        best_id = ""
+        best_depth = -1
+        try:
+            from .config_store import load_projects
+
+            for project in load_projects():
+                if not project.id or project.id not in running:
+                    continue
+                try:
+                    root = Path(project.root_path).expanduser().resolve()
+                except Exception:
+                    continue
+                if (resolved == root or root in resolved.parents) and len(root.parts) > best_depth:
+                    best_id, best_depth = project.id, len(root.parts)
+        except Exception:
+            return ""
+        return best_id
 
     # -------------------------------------------------------- workspace helpers
     def _credential_for_workspace(self, workspace_id: str, fallback: str | None) -> str | None:
@@ -1916,16 +2183,26 @@ class OAuthGateway:
             return ""
         return ""
 
-    def _effective_workspace(self, token_workspace: str, session_id: str, *, pinned: bool = False) -> str:
+    def _effective_workspace(
+        self, token_workspace: str, session_id: str, *, pinned: bool = False, client_key: str = ""
+    ) -> str:
         """Resolve a workspace without binding OAuth identity to one project.
 
         Direct per-project Bearer credentials remain pinned for backward compatibility.
-        OAuth sessions can switch freely. With no explicit selection, one running
+        A durable per-client selection (explicit route arg, devbridge_switch_workspace
+        or open_workspace) survives MCP transport recreation; otherwise one running
         workspace is auto-selected; otherwise the Hub entry project is preferred.
         """
         if pinned and token_workspace:
             return token_workspace
         running = self._running_workspace_ids()
+        if client_key:
+            bound = self._client_workspace_binding(client_key)
+            if bound and bound in running:
+                if session_id:
+                    with self._session_lock:
+                        self._session_workspaces[session_id] = bound
+                return bound
         with self._session_lock:
             selected = self._session_workspaces.get(session_id, "") if session_id else ""
             if selected and selected in running:
@@ -1966,16 +2243,16 @@ class OAuthGateway:
             lines.append("（无法加载项目列表）")
         return "\n".join(lines)
 
-    def _get_current_workspace(self, workspace_id: str, session_id: str) -> str:
+    def _get_current_workspace(self, workspace_id: str, session_id: str, client_key: str = "") -> str:
         """Return the current session workspace, applying automatic selection."""
-        effective = self._effective_workspace(workspace_id, session_id)
+        effective = self._effective_workspace(workspace_id, session_id, client_key=client_key)
         if not effective:
             return "当前没有运行中的工作区。请先在 MCP DevBridge 桌面启动一个项目服务。"
         root = str(self._resolve_workspace_path(effective) or "未知")
         return f"当前工作区：id={effective}\n路径：{root}"
 
-    def _do_switch_workspace(self, project_id: str, session_id: str) -> str:
-        """Switch the current session's workspace binding."""
+    def _do_switch_workspace(self, project_id: str, session_id: str, client_key: str = "") -> str:
+        """Switch the current session's workspace binding (and persist it per client)."""
         # Verify the project exists
         try:
             from .config_store import load_projects
@@ -1995,6 +2272,7 @@ class OAuthGateway:
         if session_id:
             with self._session_lock:
                 self._session_workspaces[session_id] = project_id
+        self._remember_client_workspace(client_key, project_id)
         try:
             from .config_store import load_projects
 
@@ -2005,7 +2283,8 @@ class OAuthGateway:
             name = project_id
         return (
             f"已切换到工作区：{name}（{project_id}）\n"
-            f"后续工具调用请携带 {_ROUTE_WORKSPACE_ARG}={project_id}；这不依赖底层 MCP transport session。"
+            f"后续工具调用请携带 {_ROUTE_WORKSPACE_ARG}={project_id}；这不依赖底层 MCP transport session，"
+            "且已为本客户端持久化，新的 MCP 会话仍会固定到该工作区。"
         )
 
     # ----------------------------------------------------------- helper
