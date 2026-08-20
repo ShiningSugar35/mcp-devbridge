@@ -19,6 +19,7 @@ import shutil
 import socket
 import sys
 import time
+import traceback
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3351,7 +3352,19 @@ class MainWindow(QMainWindow):
 
 _APP_LOCK: QLockFile | None = None
 
+def _install_crash_logger() -> None:
+    def hook(exc_type, exc_value, exc_tb):
+        try:
+            log_dir = constants.CONFIG_DIR / "crash_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with (log_dir / "desktop_crash.log").open("a", encoding="utf-8") as fh:
+                fh.write("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        except Exception:
+            pass
+    sys.excepthook = hook
+
 def main() -> int:
+    _install_crash_logger()
     global _APP_LOCK
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     app = QApplication(sys.argv)
