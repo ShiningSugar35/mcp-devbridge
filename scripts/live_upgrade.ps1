@@ -92,9 +92,29 @@ if (-not $Worker) {
     if (-not (Test-Path -LiteralPath $InstallerPath)) { throw "Installer not found: $InstallerPath" }
     if (-not $ProjectRoot) {
         $configPath = Join-Path $ConfigDir "config.json"
+        $projectsPath = Join-Path $ConfigDir "projects.json"
+        $cfg = $null
+        $projects = @()
         if (Test-Path $configPath) {
-            $cfg = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $ProjectRoot = [string]$cfg.active_workspace
+            try { $cfg = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+        }
+        if (Test-Path $projectsPath) {
+            try { $projects = @((Get-Content -LiteralPath $projectsPath -Raw -Encoding UTF8 | ConvertFrom-Json).projects) } catch { }
+        }
+        # Prefer the project that owns the device-level public gateway port.
+        # The previous active_workspace can point at a project that has since been
+        # removed from the catalog; restoring the gateway owner keeps the public
+        # MCP/OAuth endpoint available after an in-place upgrade.
+        $gwPort = 0
+        if ($cfg -and [int]$cfg.gateway_port -gt 0) { $gwPort = [int]$cfg.gateway_port }
+        $entry = @($projects) | Where-Object { [int]$_.gateway_port -eq $gwPort -and $_.root_path } | Select-Object -First 1
+        if (-not $entry) {
+            $entry = @($projects) | Where-Object { $_.enabled -and $_.root_path } | Select-Object -First 1
+        }
+        if ($entry -and $entry.root_path) {
+            $ProjectRoot = [IO.Path]::GetFullPath([string]$entry.root_path)
+        } elseif ($cfg -and [string]$cfg.active_workspace) {
+            $ProjectRoot = [IO.Path]::GetFullPath([string]$cfg.active_workspace)
         }
     }
     if ($ProjectRoot) { $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot) }

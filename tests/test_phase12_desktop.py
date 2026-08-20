@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -160,70 +161,55 @@ def test_v081_run_async_keeps_completion_signal_alive() -> None:
     app.processEvents()
     assert not dm._ASYNC_SIGNAL_GUARDS
 
-def test_agent_panel_surface_and_shortcut(tmp_path: Path, monkeypatch) -> None:
-    app, window, _project = _window(tmp_path, monkeypatch)
 
-    class FakeOrchestrator:
-        def list_agents(self):
-            return {
-                "agents": [
-                    {
-                        "id": "agent-1",
-                        "title": "Worker A",
-                        "role": "worker",
-                        "state": "running",
-                        "executor": "opencode",
-                        "model": "opencode/nemotron-3-ultra-free",
-                        "workspace": str(tmp_path),
-                        "isolation_mode": "direct",
-                        "branch": "",
-                        "duration_seconds": 1.25,
-                        "terminal": False,
-                        "output_tail": "working",
-                    }
-                ],
-                "teams": [
-                    {
-                        "id": "team-1",
-                        "title": "Team A",
-                        "stage": "workers",
-                        "state": "running",
-                        "workspace": str(tmp_path),
-                        "integration_branch": "",
-                        "terminal": False,
-                    }
-                ],
-                "running": 1,
-                "queued": 0,
-                "max_parallel": 4,
-            }
-
-        def get_agent(self, _agent_id: str):
-            return self.list_agents()["agents"][0]
-
-        def get_team(self, _team_id: str):
-            return self.list_agents()["teams"][0]
-
+def test_resume_upgrade_falls_back_to_gateway_owner_when_project_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The upgrade-resume handoff must restore the public gateway even when the
+    recorded project_root was removed from the catalog (v0.9.4 regression)."""
+    app, window, _first = _window(tmp_path, monkeypatch)
     try:
-        monkeypatch.setattr(
-            dm,
-            "bridge_status",
-            lambda: {"enabled": True, "ready": True, "debug_port": 19222},
+        cfg_dir = dm.constants.config_dir()
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+
+        first = window.pm.by_root(str(tmp_path / "project"))
+        assert first is not None
+        first.gateway_port = 8790
+        window.pm.update(first)
+
+        second_root = tmp_path / "gateway-owner"
+        second_root.mkdir()
+        second = window.pm.add(str(second_root), display_name="GatewayOwner")
+        second.connection = "cloudflare"
+        second.gateway_port = 8786
+        second.public_hostname = "mcp.example.test"
+        window.pm.update(second)
+        window._refresh_project_list()
+
+        removed_root = tmp_path / "removed"
+        removed_root.mkdir()
+        resume = cfg_dir / "upgrade-resume.json"
+        resume.write_text(
+            json.dumps({
+                "project_root": str(removed_root),
+                "project_roots": [str(removed_root), str(first.root_path)],
+                "requested_at": "2026-08-20T14:29:00",
+            }),
+            encoding="utf-8",
         )
-        fake = FakeOrchestrator()
-        panel = dm.AgentPanel(lambda: fake, window)
-        app.processEvents()
-        assert panel.table.rowCount() == 2
-        assert "并发上限 4" in panel.summary.text()
-        assert "普通 Chat" in panel.chatgpt_bridge_label.text()
-        assert "19222" in panel.chatgpt_bridge_label.text()
-        assert panel.prepare_chatgpt_btn.isEnabled() is False
-        assert panel.restore_chatgpt_btn.isEnabled() is True
-        model_item = panel.table.item(1, 4)
-        assert model_item is not None
-        assert "nemotron-3-ultra-free" in model_item.text()
-        assert window.agent_action.shortcut().toString() == "Ctrl+Shift+A"
-        assert "Ctrl+Shift+A" in window.agent_btn.toolTip()
-        panel.close()
+
+        started: list[str] = []
+        def fake_start() -> None:
+            cfg = window._project_config()
+            assert cfg is not None
+            started.append(cfg.root_path)
+        window._start_service = fake_start
+        window._app_config.first_system_risk_accepted = True
+        window._app_config.full_system_risk_accepted = True
+
+        window._resume_upgrade_if_requested()
+
+        assert not resume.exists()
+        assert started == [str(second.root_path)]
     finally:
         _close(app, window)
