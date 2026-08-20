@@ -476,7 +476,7 @@ class AgentPool:
             isolation = "This is a read-only/analysis assignment. Do not modify files. "
         return (
             f"{isolation}Read and obey all applicable AGENTS.md instructions before acting. "
-            "Complete only the assigned task and run relevant tests when practical. "
+            "Operate as a persistent implementation agent: do not stop after analysis, partial fixes, or an intermediate milestone. Continue through all required phases of the assignment until the original objective is actually satisfied. Before reporting success, verify the resulting state instead of only describing intended changes. "
             "Your final output MUST end with exactly one machine-readable line like "
             'MCP_AGENT_RESULT: {"status":"success","summary":"short result"}. '
             "Use status=failed when the assignment was not actually completed.\n\n"
