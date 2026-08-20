@@ -1538,12 +1538,15 @@ class OAuthGateway:
                 return JSONResponse(
                     _jsonrpc_result(
                         rpc_id,
+                        {"content": [{"type": "text", "text": ""}]},
                     )
                 )
             elif name == "devbridge_list_workspaces":
                 result = self._list_workspaces()
                 return JSONResponse(
                     _jsonrpc_result(
+                        rpc_id,
+                        {"content": [{"type": "text", "text": result}],},
                     )
                 )
             elif name == "devbridge_get_current_workspace":
@@ -1575,6 +1578,8 @@ class OAuthGateway:
                 result = self._list_devices(session_id)
                 return JSONResponse(
                     _jsonrpc_result(
+                        rpc_id,
+                        {"content": [{"type": "text", "text": result}],},
                     )
                 )
             elif name == "devbridge_get_current_device":
