@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -143,7 +144,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 _LOOPBACK_HEADERS = {"x-forwarded-for": "127.0.0.1"}
 
 
-def _post(client: TestClient, payload: dict, session_id: str = "") -> httpx.Response:
+def _post(client: TestClient, payload: dict, session_id: str = "") -> Any:
     headers = dict(_LOOPBACK_HEADERS)
     if session_id:
         headers["mcp-session-id"] = session_id
