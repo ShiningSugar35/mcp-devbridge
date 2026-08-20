@@ -100,6 +100,13 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.10.0 Persistent Agent Runtime
+
+- **任务不再等于一次 CLI**：`spawn_agent` 现在先创建持久 `TaskState` 和 Objective Checklist，再由 `AgentRuntimeLoop` 连续调度多个 AgentPool executor turn。一次 OpenCode、Claude 或 ChatGPT 子会话退出，只代表本轮结束，不代表整个目标完成。
+- **自动接续**：每轮保存 task id、workspace id、worktree/branch、已完成 checklist、前轮输出摘要和下一步计划。只要 checklist 或独立验证仍未通过，Runtime 会在同一任务、同一 workspace 上自动创建 continuation，无需再次调用 `message_agent`。
+- **独立验收**：`CompletionValidator` 不接受自然语言“完成”。它检查 machine-readable receipt、完整 checklist、Git diff/修改文件，以及任务要求的测试、build、EXE、服务、MCP、commit、push 证据；失败会回到执行循环。
+- **重启恢复与人工介入**：checkpoint、TaskState 与 `agent_runtime_logs` 全部落盘。DevBridge 启动时扫描 queued/running/interrupted 任务并恢复；模型/工具失败按退避策略重试，连续失败或缺少账号/权限时进入 `waiting_human`，用户回复后沿用原 task id/checkpoint 继续。
+
 ## v0.9.3 普通 ChatGPT Chat 多 Agent
 
 - **普通 Chat 成为第一执行器**：Windows 上可显式准备 ChatGPT Desktop Chat Agent bridge。`auto` 在 bridge 就绪时优先启动普通 `ChatGPT / 聊天` 子会话；子会话保持 Chat 模式，直接调用用户已连接的 MCP DevBridge 完成本地文件、Shell、Git 与测试操作，不自动 handoff 到 Work/Codex。
@@ -143,7 +150,7 @@ MCP DevBridge 解决的就是中间这一层：
 - **推荐双固定 App 拓扑**：主机使用自己的 Cloudflare Tunnel/Token/`mcp.shiningsugar.shop`，朋友另建一个完全独立的 Cloudflare Tunnel/Token/`jerry.shiningsugar.shop`。两个 Tunnel 都可以把各自机器的 hostname 映射到各自的 `http://localhost:8786`；禁止把同一个 Tunnel Token/UUID 部署到两台独立 OAuth Gateway。
 - **Hub 与独立 App 可以并存**：朋友仍可保持“已连接主 Hub”用于共享设备路由，同时用 `jerry.shiningsugar.shop/mcp` 创建自己的稳定 ChatGPT App。两条路径互不要求复用 Tunnel Token。
 - **Agent Pool**：新增本地并发实施 Agent 队列。执行器自动探测可非交互运行的 OpenCode CLI 与 Claude Code CLI；`auto` 默认优先 OpenCode，也可显式指定 `executor=claude/opencode`，单次可排队最多 64 个任务，默认物理并发 4（环境变量 `MCP_DEVBRIDGE_AGENT_POOL_MAX` 可调，硬上限 16）。写入任务默认创建独立 Git worktree + `mcp-agent/<id>` 分支，避免多个 Agent 同时踩主工作区。
-- **Agent 生命周期工具**：`agent_pool_capabilities / spawn / spawn_batch / list / get / wait / cancel / collect / cleanup`。长任务后台运行，`wait` 单次最多 30 秒；DevBridge 重启后旧 running/queued 任务标记 `interrupted`，不会谎称继续运行。
+- **Agent 生命周期工具**：`agent_pool_capabilities / spawn / spawn_batch / list / get / wait / cancel / collect / cleanup`。长任务后台运行，`wait` 单次最多 30 秒；底层一次性进程在 DevBridge 重启后会如实标记 `interrupted`，v0.10.0 的上层 Persistent Agent Runtime 会从 checkpoint 创建恢复 turn，而不是伪装旧进程仍存活。
 - **并发开发边界**：Agent Pool 是逻辑任务池而不是“无限进程”。可以排很多任务，但真实并发受机器资源和模型服务限制；主会话负责规划、审阅 diff 和决定合并，Agent 不自动 push 主分支。
 
 > 使用共享 Hub 的旧 ChatGPT App 时，升级后请执行一次 **Refresh / Scan Tools**，以获取正式 `device_id` 参数和 Agent Pool 工具。朋友若使用独立 `jerry` 固定 App，也要对该 App 扫描一次工具。

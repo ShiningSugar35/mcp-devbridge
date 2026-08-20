@@ -2,6 +2,16 @@
 
 All dates are local development dates.
 
+## 0.10.0 (2026-08-20) — production persistent Agent runtime
+
+- Add `AgentRuntimeLoop` above Agent Orchestrator/Pool so a user objective spans multiple one-shot CLI/Chat executor turns and can run for hours without another user message.
+- Add durable `TaskState`, automatic Objective Checklist planning, per-turn checkpoints, previous-output/next-plan inheritance, and JSONL `agent_runtime_logs` observability.
+- Add an independent `CompletionValidator` that rejects prose-only completion and checks checklist, receipt, Git/file, test, build, executable, service, MCP, commit and push evidence as required by the objective.
+- Add automatic continuation after incomplete validation, exponential-backoff retries for executor/tool failures, and `waiting_human` with same-task checkpoint resume.
+- Restore queued/running/interrupted Runtime tasks after MCP DevBridge restart while accurately treating the old executor process as interrupted; persist and reuse workspace route id, worktree and branch.
+- Preserve Team stages across restart and surface Runtime checklist, iteration, validation, checkpoint and recent trace through the existing Agent APIs.
+- Add regression coverage for automatic long-task continuation, validator rejection, checkpoint restore, restart resume, retry recovery, human resume, release evidence and route-workspace inheritance.
+
 ## 0.9.3 (2026-08-19) — ordinary ChatGPT Chat as the primary local Agent executor
 
 - Add an opt-in Windows ChatGPT Desktop bridge that launches `mode=chat` child conversations and submits the real composer Send control through loopback-only CDP; it does not use private ChatGPT HTTP APIs or extract account tokens.

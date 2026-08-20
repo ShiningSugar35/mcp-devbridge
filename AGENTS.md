@@ -75,6 +75,9 @@ mcp-devBridge/
 │       ├── secrets.py          # Bearer 令牌（Win CredManager + DPAPI 回退文件 secrets.dpapi.json）
 │       ├── audit.py            # 审计日志 + 密钥脱敏
 │       ├── agent_pool.py       # v0.9 本地并发 Agent 池：OpenCode/Claude Code + worktree + bounded queue
+│       ├── agent_runtime.py    # v0.10 Persistent Runtime：TaskState/checkpoint/validator/retry/restart resume
+│       ├── agent_orchestrator.py # logical Agent/Team 与 Runtime/Pool 接线
+│       ├── agent_gateway.py    # Agent MCP 参数规范化与本机分派
 │       ├── shell.py            # PowerShell 命令执行、进程树终止、环境探测
 │       ├── processes.py        # 受管进程注册（dev server 等）
 │       ├── permissions.py      # 权限：read_only / workspace / system
@@ -145,6 +148,12 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 ---
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
+
+- 2026-08-20 · **v0.10.0 Persistent Agent Runtime**：
+  - 新增 `agent_runtime.py`：正式 TaskState/Objective Checklist、每 turn durable checkpoint、`agent_runtime_logs`、独立 CompletionValidator、自动 continuation、退避 retry 与 `waiting_human`。
+  - `spawn_agent` 不再把一次 CLI/Chat receipt 当整个目标终点；Orchestrator 在同 task/workspace/worktree 上连续调度 AgentPool turns，checklist 或证据未齐时无需用户消息自动继续。
+  - Gateway 启动扫描 queued/running/interrupted Runtime task；低层旧进程如实 interrupted，上层从 checkpoint 恢复。`message_agent` 对 waiting_human 使用同 task id 恢复。
+  - 新回归覆盖长任务接续、validator 返工、checkpoint/restart、retry/human resume、完整 release evidence 与 workspace route 继承。
 
 - 2026-08-19 · **v0.9.3 普通 ChatGPT Chat 多 Agent**：
   - 新增 `chatgpt_desktop.py`：普通 Chat Deep Link + 127.0.0.1 CDP 精确 Send/Stop；不使用私有账号 API，不提取 ChatGPT Token。

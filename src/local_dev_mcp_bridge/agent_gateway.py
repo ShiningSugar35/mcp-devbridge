@@ -197,7 +197,16 @@ def execute_agent_tool(
 ) -> dict[str, Any]:
     """Execute one Agent tool and return a serializable business payload."""
     if name in AGENT_POOL_TOOL_NAMES:
-        return _execute_pool_tool(name, arguments, workspace, workspace_id, pool)
+        result = _execute_pool_tool(name, arguments, workspace, workspace_id, pool)
+        if name == "agent_pool_capabilities":
+            # Executor processes are disposable, while the logical runtime task
+            # that owns each turn is checkpointed and resumed after restart.
+            # Expose both guarantees instead of leaking the legacy pool-only
+            # lifecycle answer through the combined Gateway capability.
+            result["execution_processes_survive_restart"] = False
+            result["running_tasks_survive_restart"] = True
+            result["persistent_runtime"] = orchestrator.runtime_capabilities()
+        return result
     if name in AGENT_ORCHESTRATOR_TOOL_NAMES:
         return _execute_orchestrator_tool(name, arguments, workspace, workspace_id, orchestrator)
     raise ValueError(f"未知 Agent 工具：{name}")

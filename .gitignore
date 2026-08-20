@@ -11,6 +11,13 @@ __pycache__/
 packaging/*.toc
 packaging/*.pkg
 
+# 本项目目录同时作为本机发布落点时产生的已安装文件
+/MCPDevBridge*.exe
+/_internal/
+/cloudflared.exe
+/unins*.dat
+/unins*.exe
+
 # 运行时二进制（从官方下载后放入 .tools/）
 /tools/
 .tools/

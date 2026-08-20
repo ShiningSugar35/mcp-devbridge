@@ -32,6 +32,7 @@ from typing import Any, Literal, cast
 
 from . import constants
 from .agent_pool import AgentPool
+from .agent_runtime import AgentRuntimeLoop, TaskState
 from .platform_support import run_platform_kwargs
 
 AgentRole = Literal["worker", "reviewer", "merger"]
@@ -54,6 +55,7 @@ class AgentRecord:
     state: str
     created_at: float
     current_task_id: str
+    objective: str = ""
     route_root: str = ""
     route_workspace_id: str = ""
     isolation_mode: str = "auto"
@@ -68,6 +70,7 @@ class AgentRecord:
     branch: str = ""
     repo_root: str = ""
     base_sha: str = ""
+    isolate: bool | None = None
     output_tail: str = ""
     error: str = ""
     finished_at: float = 0.0
@@ -144,6 +147,14 @@ class AgentOrchestrator:
         self._tick_seconds = max(0.1, min(float(tick_seconds), 2.0))
         self._stop = threading.Event()
         self._load_history()
+        self.runtime = AgentRuntimeLoop(
+            self.root_dir / "runtime",
+            turn_spawner=self._spawn_runtime_turn,
+            turn_getter=self._get_runtime_turn,
+            turn_canceller=getattr(self.pool, "cancel", None),
+        )
+        self._migrate_runtime_tasks()
+        self.runtime.resume_incomplete()
         self._monitor_thread: threading.Thread | None = None
         if monitor:
             self._monitor_thread = threading.Thread(
@@ -162,15 +173,17 @@ class AgentOrchestrator:
 
     @staticmethod
     def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
 
     def _persist_agent(self, agent: AgentRecord) -> None:
-        self._atomic_json(self._agent_file(agent.id), asdict(agent))
+        with self._lock:
+            self._atomic_json(self._agent_file(agent.id), asdict(agent))
 
     def _persist_team(self, team: TeamRecord) -> None:
-        self._atomic_json(self._team_file(team.id), asdict(team))
+        with self._lock:
+            self._atomic_json(self._team_file(team.id), asdict(team))
 
     def _load_history(self) -> None:
         agents: list[AgentRecord] = []
@@ -191,14 +204,96 @@ class AgentOrchestrator:
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 continue
             if team.state not in _TERMINAL:
-                team.state = "interrupted"
-                team.stage = "done"
-                team.error = "MCP DevBridge restarted before team orchestration finished."
-                team.finished_at = time.time()
+                team.state = "running"
+                if team.stage == "reviewer_spawning":
+                    team.stage = "workers"
+                elif team.stage == "merger_spawning":
+                    team.stage = "merge_preparing"
+                team.error = ""
+                team.finished_at = 0.0
                 self._persist_team(team)
             teams.append(team)
         teams.sort(key=lambda item: item.created_at, reverse=True)
         self._teams = {item.id: item for item in teams[:100]}
+
+    def _migrate_runtime_tasks(self) -> None:
+        """Attach pre-runtime nonterminal Agent metadata to the durable loop."""
+        with self._lock:
+            records = [item for item in self._agents.values() if item.state not in _TERMINAL]
+        for agent in records:
+            if self.runtime.has_task(agent.id):
+                continue
+            self.runtime.create_task(
+                task_id=agent.id,
+                objective=agent.objective or agent.title,
+                workspace=Path(agent.workspace),
+                title=agent.title,
+                role=agent.role,
+                route_root=Path(agent.route_root or agent.workspace),
+                route_workspace_id=agent.route_workspace_id,
+                executor=agent.executor,
+                model=agent.model,
+                write=agent.write,
+                isolation_mode=agent.isolation_mode,
+                initial_isolate=agent.isolate,
+                current_turn_id=agent.current_task_id,
+                turn_ids=agent.task_ids,
+                worktree=agent.worktree,
+                branch=agent.branch,
+                repo_root=agent.repo_root,
+                base_sha=agent.base_sha,
+                start=False,
+            )
+
+    def _spawn_runtime_turn(self, state: TaskState, prompt: str) -> dict[str, Any]:
+        with self._lock:
+            agent = self._agents.get(state.task_id)
+            if agent is None:
+                raise ValueError(f"找不到 Agent：{state.task_id}")
+            continuation = bool(agent.task_ids)
+            workspace = Path(agent.worktree or state.worktree or agent.workspace)
+        task = self.pool.spawn(
+            workspace=workspace,
+            route_root=Path(agent.route_root or agent.workspace),
+            route_workspace_id=agent.route_workspace_id,
+            prompt=prompt,
+            title=f"{agent.title} · continuation" if continuation else agent.title,
+            executor=agent.executor,
+            model=agent.model,
+            write=agent.write,
+            isolate=(
+                False
+                if continuation and (agent.worktree or state.worktree)
+                else state.initial_isolate
+            ),
+            isolation_mode=(
+                agent.isolation_mode
+                if agent.isolation_mode in {"auto", "git_worktree", "direct"}
+                else "auto"
+            ),
+        )
+        task_id = str(task.get("id") or "")
+        with self._lock:
+            agent.current_task_id = task_id
+            if task_id and task_id not in agent.task_ids:
+                agent.task_ids.append(task_id)
+            agent.executor = str(task.get("executor") or agent.executor)
+            agent.model = str(task.get("model") or agent.model)
+            agent.state = str(task.get("state") or "queued")
+            self._persist_agent(agent)
+        return cast(dict[str, Any], task)
+
+    def _get_runtime_turn(self, turn_id: str) -> dict[str, Any]:
+        task = cast(dict[str, Any], self.pool.get(turn_id))
+        if str(task.get("state") or "") != "completed":
+            return task
+        with self._lock:
+            agent = next((item for item in self._agents.values() if item.current_task_id == turn_id), None)
+        if agent is not None and not self._commit_agent_turn(agent, task):
+            task = dict(task)
+            task["state"] = "failed"
+            task["error"] = agent.error or "Agent turn could not be committed."
+        return task
 
     # -------------------------------------------------------------- git helpers
     @staticmethod
@@ -275,7 +370,35 @@ class AgentOrchestrator:
         return True
 
     # -------------------------------------------------------------- agent sync
+    def _sync_runtime_agent(self, agent_id: str) -> dict[str, Any]:
+        runtime = self.runtime.advance(agent_id)
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent is None:
+                raise ValueError(f"找不到 Agent：{agent_id}")
+            agent.current_task_id = str(runtime.get("current_turn_id") or agent.current_task_id)
+            agent.task_ids = [str(item) for item in runtime.get("turn_ids", agent.task_ids)]
+            agent.state = str(runtime.get("status") or agent.state)
+            agent.worktree = str(runtime.get("worktree") or agent.worktree)
+            agent.branch = str(runtime.get("branch") or agent.branch)
+            agent.repo_root = str(runtime.get("repo_root") or agent.repo_root)
+            agent.base_sha = str(runtime.get("base_sha") or agent.base_sha)
+            agent.isolation_mode = str(runtime.get("isolation_mode") or agent.isolation_mode)
+            agent.completion_verified = bool(runtime.get("completion_verified"))
+            receipt = runtime.get("completion_receipt")
+            agent.completion_receipt = dict(receipt) if isinstance(receipt, dict) else {}
+            agent.output_tail = str(runtime.get("previous_output") or agent.output_tail)[-24_000:]
+            agent.error = str(runtime.get("error") or runtime.get("waiting_reason") or "")
+            if bool(runtime.get("terminal")):
+                agent.finished_at = float(runtime.get("updated_at") or time.time())
+            else:
+                agent.finished_at = 0.0
+            self._persist_agent(agent)
+            return self._agent_snapshot(agent, runtime=runtime)
+
     def _sync_agent(self, agent_id: str) -> dict[str, Any]:
+        if hasattr(self, "runtime") and self.runtime.has_task(agent_id):
+            return self._sync_runtime_agent(agent_id)
         with self._lock:
             agent = self._agents.get(agent_id)
             if agent is None:
@@ -364,10 +487,42 @@ class AgentOrchestrator:
             self._persist_agent(agent)
             return self._agent_snapshot(agent)
 
-    def _agent_snapshot(self, agent: AgentRecord) -> dict[str, Any]:
+    def _agent_snapshot(
+        self,
+        agent: AgentRecord,
+        *,
+        runtime: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         row = asdict(agent)
-        row["terminal"] = agent.state in _TERMINAL
-        row["turn_count"] = len(agent.task_ids)
+        if runtime is not None:
+            row.update(
+                {
+                    key: runtime[key]
+                    for key in (
+                        "objective",
+                        "checklist",
+                        "completed_items",
+                        "current_stage",
+                        "iteration",
+                        "retry_count",
+                        "last_checkpoint",
+                        "status",
+                        "validation",
+                        "waiting_reason",
+                        "next_plan",
+                        "modified_files",
+                        "recent_events",
+                    )
+                    if key in runtime
+                }
+            )
+            row["state"] = str(runtime.get("status") or agent.state)
+            row["terminal"] = bool(runtime.get("terminal"))
+            row["objective_complete"] = bool(runtime.get("objective_complete"))
+            row["turn_count"] = int(runtime.get("turn_count") or len(agent.task_ids))
+        else:
+            row["terminal"] = agent.state in _TERMINAL
+            row["turn_count"] = len(agent.task_ids)
         return row
 
     def _team_snapshot(self, team: TeamRecord) -> dict[str, Any]:
@@ -400,47 +555,49 @@ class AgentOrchestrator:
         normalized_role = cast(AgentRole, role)
         agent_id = uuid.uuid4().hex
         safe_title = " ".join((title.strip() or f"{role.title()} {agent_id[:8]}").split())[:120]
-        task = self.pool.spawn(
-            workspace=workspace,
-            route_root=route_root,
-            route_workspace_id=route_workspace_id,
-            prompt=prompt,
-            title=safe_title,
-            executor=executor,
-            model=model,
-            write=write,
-            isolate=isolate,
-            isolation_mode=isolation_mode,
-        )
-        task_id = str(task.get("id") or "")
-        receipt_raw = task.get("completion_receipt")
-        completion_receipt = (
-            {str(key): value for key, value in receipt_raw.items()}
-            if isinstance(receipt_raw, dict)
-            else {}
-        )
         record = AgentRecord(
             id=agent_id,
             title=safe_title,
             role=normalized_role,
             workspace=str(workspace.resolve()),
-            executor=str(task.get("executor") or executor),
-            model=str(task.get("model") or model).strip(),
+            executor=executor,
+            model=model.strip(),
             write=bool(write),
-            state=str(task.get("state") or "queued"),
+            state="queued",
             created_at=time.time(),
-            current_task_id=task_id,
+            current_task_id="",
+            objective=prompt,
             route_root=str((route_root or workspace).resolve()),
             route_workspace_id=route_workspace_id.strip(),
-            isolation_mode=str(task.get("isolation_mode") or isolation_mode or "auto"),
-            completion_verified=bool(task.get("completion_verified", False)),
-            completion_receipt=completion_receipt,
-            task_ids=[task_id],
+            isolation_mode=isolation_mode or "auto",
+            task_ids=[],
             team_id=team_id,
+            isolate=isolate,
         )
         with self._lock:
             self._agents[record.id] = record
             self._persist_agent(record)
+        try:
+            self.runtime.create_task(
+                task_id=record.id,
+                objective=prompt,
+                workspace=workspace,
+                title=safe_title,
+                role=role,
+                route_root=route_root,
+                route_workspace_id=route_workspace_id,
+                executor=executor,
+                model=model,
+                write=write,
+                isolation_mode=isolation_mode,
+                initial_isolate=isolate,
+            )
+        except Exception:
+            with self._lock:
+                self._agents.pop(record.id, None)
+                with suppress(OSError):
+                    self._agent_file(record.id).unlink(missing_ok=True)
+            raise
         return self.get_agent(record.id)
 
     def spawn_agent_team(
@@ -569,6 +726,17 @@ class AgentOrchestrator:
             "running": sum(item["state"] == "running" for item in agents),
             "queued": sum(item["state"] == "queued" for item in agents),
             "max_parallel": self.pool.max_parallel,
+            "persistent_runtime": self.runtime_capabilities(),
+        }
+
+    def runtime_capabilities(self) -> dict[str, Any]:
+        return {
+            "automatic_continuation": True,
+            "durable_checkpoints": True,
+            "restart_resume": True,
+            "completion_validator": True,
+            "waiting_human_resume_same_task": True,
+            "trace_directory": str(self.runtime.log_dir),
         }
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
@@ -607,10 +775,26 @@ class AgentOrchestrator:
             task_id = agent.current_task_id
 
         applied = False
-        try:
-            applied = self.pool.append_prompt(task_id, message)
-        except ValueError:
-            applied = False
+        if task_id:
+            try:
+                applied = self.pool.append_prompt(task_id, message)
+            except ValueError:
+                applied = False
+        if self.runtime.has_task(agent_id):
+            self.runtime.add_instruction(
+                agent_id,
+                message,
+                applied_to_current_turn=applied,
+            )
+            with self._lock:
+                self._persist_agent(agent)
+            result = self.get_agent(agent_id)
+            result["message_delivery"] = (
+                "appended_to_queued_turn"
+                if applied
+                else "queued_as_continuation_on_same_worktree"
+            )
+            return result
         with self._lock:
             if not applied:
                 agent.pending_messages.append(message)
@@ -630,6 +814,9 @@ class AgentOrchestrator:
                 raise ValueError(f"找不到 Agent：{agent_id}")
             task_id = agent.current_task_id
             agent.pending_messages.clear()
+        if self.runtime.has_task(agent_id):
+            self.runtime.cancel(agent_id)
+            return self._sync_agent(agent_id)
         try:
             self.pool.cancel(task_id)
         finally:
@@ -706,6 +893,8 @@ class AgentOrchestrator:
             self._agents.pop(agent_id, None)
             with suppress(OSError):
                 self._agent_file(agent_id).unlink(missing_ok=True)
+        if self.runtime.has_task(agent_id):
+            self.runtime.delete(agent_id)
         return {"agent_id": agent_id, "cleaned": True, "task_ids": cleaned_tasks}
 
     def cleanup_team(self, team_id: str, *, remove_branches: bool = True) -> dict[str, Any]:
@@ -852,6 +1041,22 @@ class AgentOrchestrator:
 
         if stage == "workers":
             workers = [self._sync_agent(item) for item in worker_ids]
+            waiting = [item for item in workers if item.get("state") == "waiting_human"]
+            if waiting:
+                with self._lock:
+                    team.state = "waiting_human"
+                    team.worker_failures = [
+                        f"{item.get('title')}: {item.get('waiting_reason') or item.get('error')}"
+                        for item in waiting
+                    ]
+                    team.error = "一个或多个 worker 连续失败，正在等待人工处理。"
+                    self._persist_team(team)
+                return
+            if team.state == "waiting_human":
+                with self._lock:
+                    team.state = "running"
+                    team.error = ""
+                    self._persist_team(team)
             if not workers or any(not bool(item.get("terminal")) for item in workers):
                 return
             completed = [
@@ -906,9 +1111,16 @@ class AgentOrchestrator:
 
         if stage == "reviewer":
             reviewer = self._sync_agent(team.reviewer_id)
+            if reviewer.get("state") == "waiting_human":
+                with self._lock:
+                    team.state = "waiting_human"
+                    team.error = "Reviewer 连续失败，正在等待人工处理。"
+                    self._persist_team(team)
+                return
             if not bool(reviewer.get("terminal")):
                 return
             with self._lock:
+                team.state = "running"
                 if reviewer.get("state") != "completed" or not bool(reviewer.get("completion_verified")):
                     team.state = "failed"
                     team.stage = "done"
@@ -979,9 +1191,16 @@ class AgentOrchestrator:
 
         if stage == "merger":
             merger = self._sync_agent(team.merger_id)
+            if merger.get("state") == "waiting_human":
+                with self._lock:
+                    team.state = "waiting_human"
+                    team.error = "Merger 连续失败，正在等待人工处理。"
+                    self._persist_team(team)
+                return
             if not bool(merger.get("terminal")):
                 return
             with self._lock:
+                team.state = "running"
                 if merger.get("state") == "completed" and bool(merger.get("completion_verified")):
                     team.state = "completed"
                 else:
@@ -995,6 +1214,7 @@ class AgentOrchestrator:
 
     def _monitor_loop(self) -> None:
         while not self._stop.wait(self._tick_seconds):
+            self.runtime.tick_all()
             with self._lock:
                 agent_ids = list(self._agents)
                 team_ids = list(self._teams)
@@ -1011,6 +1231,8 @@ class AgentOrchestrator:
 
     def shutdown(self) -> None:
         self._stop.set()
+        if self._monitor_thread is not None and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2)
 
 
 __all__ = ["AgentOrchestrator", "AgentRecord", "TeamRecord", "AgentRole"]

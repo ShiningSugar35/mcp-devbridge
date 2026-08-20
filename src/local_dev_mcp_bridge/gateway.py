@@ -51,6 +51,7 @@ from . import constants
 from .agent_gateway import execute_agent_tool
 from .agent_orchestrator import AgentOrchestrator
 from .agent_pool import AgentPool
+from .agent_runtime import AgentRuntimeLoop
 from .audit import AuditLogger
 from .chatgpt_desktop import bridge_status, prepare_chatgpt_bridge, restore_normal_chatgpt_launch
 from .constants import LOG_DIR as _LOG_DIR
@@ -411,7 +412,7 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "spawn_agent",
-        "description": "Spawn one persistent logical coding Agent. Write agents use Git worktree isolation when available, or direct mode for non-Git targets. Use message_agent for later instructions; running one-shot CLIs receive them as a continuation turn on the same branch.",
+        "description": "Create one durable objective in the Persistent Agent Runtime. The runtime plans a checklist, automatically creates continuation turns after one-shot executors exit, checkpoints every turn, independently validates completion, retries failures, resumes after MCP DevBridge restart, and pauses as waiting_human only when intervention is required.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2320,6 +2321,10 @@ class OAuthGateway:
     def start(self, port: int = constants.GATEWAY_PORT) -> None:
         import uvicorn
 
+        runtime_root = constants.config_dir() / "agent-orchestrator" / "runtime"
+        if AgentRuntimeLoop.has_persisted_incomplete(runtime_root):
+            self._get_agent_orchestrator()
+
         config = uvicorn.Config(
             self.app,
             host=constants.GATEWAY_HOST,
@@ -2328,13 +2333,12 @@ class OAuthGateway:
             access_log=False,
             log_config=None,  # PyInstaller 冻结环境：禁止 dictConfig 动态导入 uvicorn.logging 格式化器
         )
-        self._server = uvicorn.Server(config)
+        server = uvicorn.Server(config)
+        self._server = server
 
         def _run_gateway() -> None:
-            try:
-                self._server.run()
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                server.run()
 
         self._thread = threading.Thread(target=_run_gateway, daemon=True, name="gateway-thread")
         self._thread.start()

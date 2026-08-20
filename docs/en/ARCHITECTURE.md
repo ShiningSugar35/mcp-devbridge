@@ -1,5 +1,23 @@
 # Architecture
 
+## v0.10.0 persistent Agent runtime
+
+Agent execution has three explicit layers. `AgentPool` remains a bounded primitive for one executor process and its worktree. `AgentOrchestrator` owns logical Agents and Teams. `AgentRuntimeLoop` owns the durable user objective across any number of executor processes and application restarts:
+
+```text
+Task Create → ObjectivePlanner → Execution Turn → Checkpoint
+       ↑                                      ↓
+       └──── Continue ← CompletionValidator ←┘
+                              │
+                         Finish / waiting_human
+```
+
+Each objective has an atomic on-disk `TaskState` containing the task id, objective checklist, completed items, stage, iteration/retry counters, workspace route, current/previous turns, evidence and latest checkpoint. Every turn records tool/evidence results, modified files, an output summary and the next plan. JSONL `agent_runtime_logs` explain every continuation, validation failure, retry, restart recovery and human pause.
+
+An executor's prose or `status=success` is not a completion authority. `CompletionValidator` requires every checklist item plus a verified receipt and checks the evidence implied by the objective: Git/file changes, tests, build artifacts, executable presence, service/MCP health, commits and pushes. Failed validation creates another turn automatically on the same task id/workspace/worktree. Provider and tool failures retry with exponential backoff; repeated failures enter `waiting_human`. A later `message_agent` response resumes that same checkpoint rather than creating a replacement task.
+
+At Gateway startup, persisted `queued`, `running`, or `interrupted` objectives cause eager Runtime initialization. The old executor process is correctly recorded as interrupted; a new continuation turn inherits its task id, checkpoint, checklist, route workspace id and previous output.
+
 ## v0.7.1 command task model
 
 Public shell execution is task-based by default. The `bash` MCP tool validates the command and workspace, spawns it through `BashTaskManager`, and immediately returns `task_id`; it has no public timeout argument or execution timer. The `BashTaskManager` is process-scoped (not `McpServer`/MCP-session scoped) so task ids remain resolvable across successive HTTP MCP sessions while each task is still bound to its workspace id. `get_task`, `wait_task`, `list_tasks`, and `cancel_task` manage the task lifecycle. `wait_task` only bounds a polling call, not execution. Output is held in a bounded rolling buffer, cancellation terminates the process tree, and all normal PathGuard/bash-session/permission checks remain in force. Terminal task metadata is memory-only and expires after 24 hours; restarting DevBridge/CodexPro ends running jobs and clears the registry.
@@ -51,6 +69,9 @@ Local mode skips the public tunnel and Gateway and connects directly to the sele
 | `project_secrets.py` | Per-project encrypted Bearer and Cloudflare tunnel values with backward-compatible legacy migration. |
 | `app_state.py` | Full-entry `ServiceCoordinator`; public tunnel → Gateway, engine/gateway/bridge readiness, failure cleanup. |
 | `gateway.py` | OAuth 2.1 + Bearer reverse proxy; session/workspace routing; per-project upstream credential selection; Gemini consent workspace gate. |
+| `agent_runtime.py` | Durable `TaskState`, objective planning, checkpoints/traces, completion validation, automatic continuation, retry and restart/human resume. |
+| `agent_orchestrator.py` | Connects the Runtime to AgentPool turns and manages logical Agents plus worker/reviewer/merger Teams. |
+| `agent_pool.py` | Bounded one-turn executor queue, process cancellation, verified receipts and Git worktree/direct isolation. |
 | `tunnel_manager.py` | Cloudflare Named, ngrok reserved domain, Quick Tunnel and Local modes. Quick/ngrok/fixed public URLs normalize to `/mcp`. |
 | `models.py` | `ProjectConfig`, including permission, client target, connection, per-project ports, Git and Gemini redirect URI. |
 

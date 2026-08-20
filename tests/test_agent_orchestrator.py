@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import cast
 
+from local_dev_mcp_bridge.agent_gateway import execute_agent_tool
 from local_dev_mcp_bridge.agent_orchestrator import AgentOrchestrator
 from local_dev_mcp_bridge.agent_pool import AgentPool, AgentTask
 from local_dev_mcp_bridge.gateway import _PYTHON_TOOL_DEFS
@@ -88,6 +90,76 @@ def test_message_agent_runs_continuation_on_same_worktree(tmp_path: Path) -> Non
         assert (worktree / "history.txt").read_text(encoding="utf-8") == "initial\nfollowup\n"
         assert not (repo / "history.txt").exists()
         assert len(cast(list[str], final["committed_task_ids"])) == 2
+    finally:
+        orchestrator.shutdown()
+
+
+def test_logical_agent_automatically_continues_without_message_agent(tmp_path: Path) -> None:
+    prompts: list[str] = []
+
+    def builder(_task: AgentTask, prompt: str, _workdir: Path) -> list[str]:
+        prompts.append(prompt)
+        full_line = next(line for line in prompt.splitlines() if line.startswith("FULL CHECKLIST: "))
+        checklist = json.loads(full_line.removeprefix("FULL CHECKLIST: "))
+        receipt = (
+            {
+                "status": "success",
+                "summary": "analysis checkpoint",
+                "completed_items": ["analyze_objective"],
+                "objective_complete": False,
+                "evidence": [],
+            }
+            if len(prompts) == 1
+            else {
+                "status": "success",
+                "summary": "objective verified",
+                "completed_items": checklist,
+                "objective_complete": True,
+                "evidence": [],
+            }
+        )
+        code = "import sys; print('MCP_AGENT_RESULT: ' + sys.argv[1], flush=True)"
+        return [sys.executable, "-c", code, json.dumps(receipt)]
+
+    pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=1, command_builder=builder)
+    orchestrator = AgentOrchestrator(pool, root_dir=tmp_path / "orchestrator", tick_seconds=0.05)
+    try:
+        created = orchestrator.spawn_agent(
+            workspace=tmp_path,
+            route_root=tmp_path,
+            route_workspace_id="workspace-D",
+            prompt="Analyze a long objective and verify the final result",
+            write=False,
+        )
+        final = _wait_agent(orchestrator, str(created["id"]))
+
+        assert final["state"] == "completed"
+        assert final["turn_count"] == 2
+        assert final["iteration"] == 2
+        assert len(prompts) == 2
+        assert "PREVIOUS TURN OUTPUT TAIL" in prompts[1]
+        for task_id in cast(list[str], final["task_ids"]):
+            assert pool.get(task_id)["route_workspace_id"] == "workspace-D"
+    finally:
+        orchestrator.shutdown()
+
+
+def test_gateway_capabilities_report_logical_restart_resume(tmp_path: Path) -> None:
+    pool = AgentPool(root_dir=tmp_path / "pool", max_parallel=1)
+    orchestrator = AgentOrchestrator(pool, root_dir=tmp_path / "orchestrator", tick_seconds=0.05)
+    try:
+        result = execute_agent_tool(
+            name="agent_pool_capabilities",
+            arguments={},
+            workspace=tmp_path,
+            workspace_id="workspace-D",
+            pool=pool,
+            orchestrator=orchestrator,
+        )
+
+        assert result["running_tasks_survive_restart"] is True
+        assert result["execution_processes_survive_restart"] is False
+        assert cast(dict[str, object], result["persistent_runtime"])["restart_resume"] is True
     finally:
         orchestrator.shutdown()
 
@@ -222,7 +294,7 @@ def test_non_git_team_uses_direct_write_and_disables_merger(tmp_path: Path, monk
         orchestrator.shutdown()
 
 
-def test_team_all_required_rejects_partial_worker_success(tmp_path: Path) -> None:
+def test_team_all_required_pauses_for_human_after_repeated_worker_failure(tmp_path: Path) -> None:
     def builder(task: AgentTask, _prompt: str, _workdir: Path) -> list[str]:
         if "Reviewer" in task.title:
             return [sys.executable, "-c", "print('reviewed partial failure', flush=True)"]
@@ -251,9 +323,9 @@ def test_team_all_required_rejects_partial_worker_success(tmp_path: Path) -> Non
             if bool(team.get("terminal")):
                 break
             time.sleep(0.05)
-        assert team["state"] == "failed", team
+        assert team["state"] == "waiting_human", team
         assert team["worker_failures"]
-        assert "all_required" in str(team["error"])
+        assert "人工" in str(team["error"])
     finally:
         orchestrator.shutdown()
 

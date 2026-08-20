@@ -163,6 +163,10 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         <h3>v0.9.1：SteamOS / Linux Desktop</h3>
         <p>SteamOS/Linux 使用原生桌面版，不需要 Wine/Proton。配置放在 XDG 用户目录；程序安装到用户目录并创建 Desktop Entry/autostart；Node.js 与 cloudflared 使用应用私有 Linux runtime。Windows 控制桥在 Linux 自动禁用，文件、Shell、Git、进程与 Agent 使用 Linux 原生工具。</p>
         <p>Linux 凭据优先写入桌面 Secret Service；不可用时进入 AES-GCM 加密 fallback。不要把 Tunnel Token 写进 shell 脚本或 projects.json。</p>
+        <h3>v0.10.0：Persistent Agent Runtime</h3>
+        <p><code>spawn_agent</code> 现在创建的是持久目标，不是一次 CLI 调用。Runtime 会自动生成 checklist，每轮保存 checkpoint，并在测试、build、文件/Git 或部署证据不足时自动创建下一轮；不需要用户反复发送“继续”。</p>
+        <p>DevBridge 重启后，queued/running/interrupted 目标会沿用原 task id、workspace id、worktree、checkpoint 和前轮输出恢复。连续失败时状态为 <code>waiting_human</code>；在 Agent 管理面板追加消息后从同一 checkpoint 继续。</p>
+        <p>模型文字中的“完成”不是验收。只有 machine-readable receipt、完整 checklist 和 CompletionValidator 的实际证据全部通过，任务才进入 completed。<code>get_agent</code> 可查看 iteration、validation、last checkpoint 与近期 runtime trace。</p>
         <h3>v0.9.3：普通 ChatGPT Chat 多 Agent</h3>
         <p>Windows 上可以在“Agent 管理”里显式准备 <b>ChatGPT Chat Agent</b>。准备后，AgentPool 的 <code>auto</code> 会优先创建普通“ChatGPT / 聊天”子会话；子 Chat 不切 Work/Codex，而是直接调用你已经连接的 MCP DevBridge 完成本地任务。</p>
         <p>Deep Link 只负责创建 Chat 和预填 prompt；DevBridge 通过仅监听 <code>127.0.0.1</code> 的 CDP 精确点击真实“发送/停止”控件。它不读取 ChatGPT 登录 Token，也不调用私有 ChatGPT HTTP API。不使用时点击“恢复普通启动”即可去掉 CDP。</p>
@@ -193,6 +197,7 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         <ul><li>本地 worker 会探测真正可非交互运行的 <b>OpenCode CLI</b> 与 <b>Claude Code CLI</b>，不会把 Electron 桌面版误判成 worker。可用 CLI 会出现在 capabilities；模型账号认证、额度和 provider 健康在任务运行时验证。</li>
         <li>单次最多排队 64 个任务；默认真实同时运行 4 个，硬上限 16。其余任务留在队列中，不会为了“看起来并发”把电脑一次拉满。</li>
         <li>长任务返回 task id 后后台执行；用 list/get/wait/cancel 查看或停止。wait 单次最多 30 秒，不会占住 ChatGPT 的长同步请求。</li></ul>
+        <p><b>Pool 和 Persistent Runtime 不同：</b><code>agent_pool_spawn</code> 仍表示一次底层 executor turn；生产级长目标请用 <code>spawn_agent</code>。后者会跨多个 Pool turn 自动接续，并在软件重启后从 durable checkpoint 恢复。</p>
         <h3>写入隔离怎么工作</h3>
         <p>Git 项目默认给每个写 Agent 创建独立 <code>git worktree</code> 和 <code>mcp-agent/&lt;id&gt;</code> 分支；主 checkout 不被子 Agent 直接编辑。盘符根和普通非 Git 目录没有 branch 概念，<code>auto</code> 会使用 <code>direct</code> 模式，因此并发任务应通过 <code>target_path</code> 尽量分到不同子目录，避免两个 Agent 同时改同一文件。</p>
         <p><b>注意：</b>worktree/direct 都不是 Windows 安全沙箱。OpenCode / Claude Code 进程仍继承当前用户权限；Agent Pool 不自动 push 主分支。</p>

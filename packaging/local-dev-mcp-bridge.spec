@@ -9,7 +9,7 @@ from shutil import copy2
 import sys
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.9.5"
+PROJECT_VERSION = "0.10.0"
 IS_WINDOWS = sys.platform == "win32"
 TOOLS = ROOT / ".tools"
 RUNTIME = TOOLS if IS_WINDOWS else TOOLS / "linux"
@@ -53,6 +53,7 @@ a = Analysis(
         "local_dev_mcp_bridge.agent_pool",
         "local_dev_mcp_bridge.chatgpt_desktop",
         "local_dev_mcp_bridge.agent_orchestrator",
+        "local_dev_mcp_bridge.agent_runtime",
         "local_dev_mcp_bridge.audit",
         "local_dev_mcp_bridge.shell",
         "local_dev_mcp_bridge.processes",
