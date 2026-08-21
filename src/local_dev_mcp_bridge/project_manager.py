@@ -5,13 +5,12 @@ Architecture (多项目并行开发):
 * One ``CodexProManager`` + one ``WindowsBridgeManager`` per project
   (``ProjectUnit``). Every engine process starts with ITS OWN root:
   ``CODEXPRO_ROOT`` / ``CODEXPRO_ALLOWED_ROOTS`` point at the project dir, and
-  the process listens on the project's own internal port. Switching the
-  desktop "entry project" therefore never re-binds a running engine, and two
-  projects can run side by side without the old "Workspace root is outside
-  allowed roots" failure.
+  the process listens on the project's own internal port. The desktop bootstrap project used by the shared Hub therefore never re-binds
+  another running engine, and two projects can run side by side without the old
+  "Workspace root is outside allowed roots" failure.
 * ``ProjectManager`` owns the catalog (``projects.json`` via ``config_store``),
-  the running units, port allocation and startup auto-restore. ``enabled``
-  projects are automatically restored after the desktop launches.
+  the running units and port allocation. ``enabled`` is retained for config/API
+  compatibility; v0.8.2 desktop routing treats every running unit as active.
 * Pure Python (no Qt) so the whole lifecycle is unit-testable.
 """
 

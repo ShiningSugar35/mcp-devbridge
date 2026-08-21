@@ -1807,8 +1807,8 @@ class OAuthGateway:
         """Resolve a workspace without binding OAuth identity to one project.
 
         Direct per-project Bearer credentials remain pinned for backward compatibility.
-        OAuth sessions can switch freely. With no explicit selection, one running
-        workspace is auto-selected; otherwise the Hub entry project is preferred.
+        OAuth sessions can target any running root. With no explicit routing evidence,
+        a deterministic running root supplies the bootstrap fallback.
         """
         if pinned and token_workspace:
             return token_workspace

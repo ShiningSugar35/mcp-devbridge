@@ -1,803 +1,240 @@
 # MCP DevBridge
 
-> **让 ChatGPT、Gemini Spark 等支持 MCP 的网页端，直接连接你的本地开发项目。**
+> 让 ChatGPT、Gemini 等支持 MCP 的客户端安全连接本机开发目录，并在多个运行根之间按路径自动路由。
 
-MCP DevBridge 是一款面向 Windows，并支持 Linux / SteamOS Desktop Mode 的可视化本地开发桥接工具。
-你可以同时启动多个项目根目录；所有运行根均处于 active 状态，ChatGPT、Gemini Spark 等 MCP 客户端通过同一个 Hub 地址按目标路径自动路由，无需手动切换 current workspace。
+MCP DevBridge 是一款 PySide6 桌面桥接工具。Windows 10/11 是主要发行平台；v0.8.2 同时提供 Linux / SteamOS Desktop Mode 的构建、用户目录安装和升级链。
 
-它本身**不调用任何大模型 API**，也不需要你为 MCP DevBridge 配置 OpenAI / Gemini 模型 API Key。  
-如果你已经在使用 ChatGPT、Gemini 等网页端订阅，又不希望为了本地 Coding Agent 额外长期购买大量 API Token，MCP DevBridge 提供了一条更直接的路径：
+它**不提供模型推理，也不调用 OpenAI / Gemini 模型 API**。客户端是否允许写入、是否需要额外确认，以及相关额度/套餐限制，仍由对应平台决定。
+
+## v0.8.2 的核心变化
+
+### 所有运行根同时 active
+
+项目列表不再有“入口项目”或“当前工作区决定权限”的概念。只要一个项目根处于运行中（READY），它和其它运行根就同时参与 Hub 路由。
+
+例如同时启动：
 
 ```text
-ChatGPT / Gemini Spark
-          │
-          │ MCP over HTTPS
-          ▼
-     MCP DevBridge
-          │
-    ┌─────┴─────┐
-    ▼           ▼
-CodexPro     Windows-MCP
-项目开发       可选系统控制
-    │
-    ▼
-你的本地项目
+C:\
+D:\
 ```
 
-> [!IMPORTANT]
-> MCP DevBridge 只是本地工具桥接层，不提供模型推理，也不会绕过 ChatGPT、Gemini 或其他平台自身的套餐、额度、工具权限和安全确认规则。  
-> 网页端是否允许写操作、是否要求确认、以及相关使用如何计入平台额度，都以对应平台当前规则为准。
+那么：
 
----
+```text
+C:\Program Files (x86)\...
+C:\Users\...\project
+D:\Environment\mcp
+D:\meme
+```
 
-## 为什么做这个项目？
+都可以直接作为目标路径，无论它们是不是 Git 仓库，也不需要把每个子目录单独加入项目列表。
 
-很多 AI Coding Agent 能力很强，但通常需要单独购买 API Token。大型项目持续开发时，模型调用成本可能很高。
+路由规则：
 
-另一方面，很多用户已经订阅了 ChatGPT 或 Gemini，但网页端默认无法直接：
+1. 绝对路径优先；若多个运行根有包含关系，选择最具体的根。
+2. 相对路径只有在能唯一定位到一个运行根时才自动选择。
+3. 多个根存在同名相对路径时返回歧义错误，要求改用绝对路径，不猜测。
+4. `bash` 任务产生的 `task_id` 会绑定原运行根，后续 `wait_task/get_task/cancel_task` 自动回到同一根。
+5. CodexPro `workspace_id=ws_...` 仅作为没有路径/任务证据时的兼容 affinity。
+6. `devbridge_switch_workspace` / `devbridge_workspace_id` 仍保留兼容和显式覆盖能力，但不是正常开发工作流的前置步骤。
 
-- 读取本地项目文件；
-- 搜索整个代码仓库；
-- 修改代码并应用 Patch；
-- 执行测试、构建和 Git；
-- 启动或停止本地开发进程。
+路径安全没有因为自动路由而放松：`..`、symlink/junction 逃逸和本地工具越界 `cwd` 都会被拒绝；根盘扫描遇到无权限目录会跳过并返回 warning，而不是让整次扫描失败。
 
-MCP DevBridge 解决的就是中间这一层：
+### 多根 Hub 生命周期
 
-**把支持 MCP 的网页端 AI，安全地连接到你的本地开发环境。**
+公网模式下 Gateway/Tunnel 是共享 Hub 连接。桌面可能借一个运行项目完成首次编排，但该项目没有额外路由权限。
 
-你不需要自己手写 MCP Server、HTTP 网关、OAuth、Cloudflare Tunnel、项目权限管理和桌面控制程序。
+- 停止一个运行根：只停止该根的 ProjectUnit，其它运行根和 Hub 保持可用。
+- 停止最后一个运行根：再关闭共享 Gateway/Tunnel。
+- “启动所有项目 / 停止所有项目”用于批量生命周期控制。
+- 项目表只保留：名称 / 路径 / 状态 / 端口 / 操作。
 
----
+> `Local` 模式为了向后兼容仍直接连接所选 CodexPro loopback，不经过公网 Hub Gateway；需要“一个客户端地址跨多个根自动路由”时，应使用 Gateway/Hub 路径。
 
-## 主要功能
-
-- **可视化项目选择**  
-  在桌面窗口直接选择需要开发的本地根目录。支持**多项目并行**运行，每个 READY 根及其全部后代路径同时可用；跨磁盘/跨项目调用按最长路径前缀自动路由，每个项目仍拥有独立 CodexPro 引擎进程和端口。
-
-- **固定 MCP 地址**  
-  支持 Cloudflare Named Tunnel，例如：
-
-  ```text
-  https://mcp.example.com/mcp
-  ```
-
-  正常重启程序或切换项目后，公网地址不需要改变。
-
-- **ChatGPT + Gemini Spark**  
-  同一个 MCP DevBridge 可用于多个支持远程 MCP 的客户端。
-
-- **本地文件开发能力**  
-  支持读取、搜索、写入、编辑、Patch、目录操作等开发工作流。
-
-- **Git 与命令执行**  
-  支持 Git status / diff / commit / push，以及 PowerShell、测试、构建和长期进程管理。
-
-- **OAuth + Bearer 认证**  
-  公网入口支持 MCP OAuth 流程，同时保留 Bearer Token 兼容路径。
-
-- **按项目独立配置**
-  每个项目独立记忆权限、客户端类型、连接方式、端口、Git 参数、访问令牌、Cloudflare Token 与 Gemini Redirect URI；切换项目不会互相覆盖。
-
-- **四种连接方式**
-  Cloudflare Named Tunnel、ngrok 固定域名、Quick Tunnel 临时地址、仅本机均可直接在桌面选择。
-
-- **权限模式**  
-  支持只读、项目工作区、完全访问。桌面端默认选择 **完全访问（危险）**（`system + full_system`），首次实际启动仍需要一次性风险确认。
-
-- **状态与诊断**
-  项目表 1 秒级刷新真实状态；控制区展示 Codex / Gateway / Tunnel / Windows 桥组件状态，并提供一键连接诊断和真实 MCP 自测。
-
-- **可选 Windows 控制能力**  
-  可通过 Windows-MCP 扩展桌面操作、应用控制、PowerShell、文件系统等能力。
-
-- **审计与脱敏**  
-  提供工具调用日志、进程日志，并对 Token、Secret、Password 等敏感值进行脱敏。
-
-- **桌面化运行**  
-  PySide6 单窗口界面，一键启动 / 停止本地引擎、OAuth Gateway 和 Tunnel。
-
----
-
-
-## v0.8.2 桌面启停稳定性与轻量化维护
-
-- **全部项目一键启停**：项目列表底部新增“启动所有项目 / 停止所有项目”动态总控；入口项目负责公网连接，其余项目引擎最多 8 路并行启停，单个非入口项目失败不会阻断其它项目收尾。
-- **修复偶发点击无效**：1 秒状态轮询不再销毁并重建项目操作按钮；异步启停的 busy 标记只由对应完成回调释放，避免 mouse press/release 之间控件被替换，以及重复 start/stop race。
-- **精简重复控制面**：删除“当前项目”卡片和重复启停按钮；单项目启停只保留项目表操作列，“高级设置…”移到“项目设置”页。
-- **批量保存连接与权限**：“连接与权限”右下新增“保存为所有项目设置”，同步权限模式、客户端、连接方式、公网域名、Windows 控制、Gemini Redirect URI 与 Cloudflare Tunnel Token，不覆盖 Git 参数和项目独立端口。
-- **降低桌面轮询开销**：项目表文本项改为原位更新，避免每秒为每个项目反复分配 QTableWidgetItem；移除未使用状态缓存和重复私有控制入口。
-- **瘦身正式发行物**：CodexPro 先完整构建，再按 `package-lock.json` 只复制 production dependencies；开发侧约 51.90 MiB 的 `dist + node_modules` 生成约 14.91 MiB 生产 runtime，减少约 71% 的 CodexPro 运行包体积。
-- **安全依赖收口**：更新 CodexPro 传递依赖后 `npm audit` 为 0 vulnerabilities；构建脚本从干净 clone 开始自动 `npm ci → build → production runtime`，不再依赖机器上恰好存在的未跟踪构建产物。
-- **外部工具扩展策略**：完成 Context7、GitHub MCP、Playwright MCP、Chrome DevTools MCP、MarkItDown MCP、Serena 等 GitHub 调研；优先规划“按需 profile + 动态工具发现”，避免把大量重复 schema 常驻同一 tools/list。详见 `docs/tool-extension-evaluation-v0.8.2.md`。
-
-## v0.8.1 多工作区路由热修
-
-- **修复 ChatGPT 切换工作区后又回到入口项目**：ChatGPT 可能在连续工具调用之间重建底层 MCP transport，v0.8.0 只按 `mcp-session-id` 保存工作区会失效。v0.8.1 为工具增加可选的 `devbridge_workspace_id / devbridge_device_id` 路由提示，切换工具返回路由值，后续调用显式携带，因此不再依赖同一个 transport session。
-- **多项目真正同时在线**：主 Hub 只保留一个固定地址/Gateway；每个已启动项目继续拥有独立 CodexPro 端口，GPT 可在同一聊天中切换 C:\、D:\ 等项目。
-- **升级保持多项目运行态**：detached updater 会在替换旧进程前记录所有正在监听的项目引擎，升级后恢复入口服务并并行恢复其余项目，不再只恢复项目 A。
-- **每个项目独立上游 MCP Session**：Gateway 为同一 ChatGPT 会话在每个 CodexPro/远端设备上分别维护上游 session；切换项目时懒初始化目标引擎并改写上游 `mcp-session-id`，避免不同项目各自 session 表导致 `Session not found`。
-- **修复 Gateway 本地命令参数**：`run_command / run_program` 正确读取 MCP `params.arguments`。
-- **修复“正在启动项目引擎”日志卡住**：异步 Qt signal 在 GUI 回调执行前保持强引用，避免项目已经 READY 但完成消息丢失。
-- **盘符根目录名称**：`C:\`、`D:\` 不再显示为空名称。
-- **长任务防 ChatGPT 工具流超时**：同步 `run_command / run_program` 只允许短调用（默认 10 秒、最多 20 秒）；构建、测试、安装、抓取等长任务统一使用后台 `bash → task_id → wait_task/get_task`，避免一个 MCP 请求长期占住。此优化只能缓解工具等待造成的超时，不能改变 ChatGPT 自身纯模型推理流的超时策略。
-
-> 升级到 0.8.1 后，ChatGPT 开发中的 App 请执行一次 **Refresh / Scan Tools**，让 ChatGPT 获取新增的可选路由参数。
-
-## v0.8.0 单域名 Hub 路由与桌面可靠性
-
-- **一个固定域名、一个 OAuth App、任意设备/工作区**：OAuth 授权页不再绑定单个工作区。ChatGPT 只连接主 Hub 的固定 URL，连接后用 `devbridge_switch_device` / `devbridge_switch_workspace` 按会话切换目标。
-- **自动默认**：只有一个在线设备或一个运行工作区时自动选择；本机同时运行多个项目时优先使用当前公网入口项目，避免每次连接都询问。
-- **禁止同一 Named Tunnel 多机复用**：主 Hub 的 Cloudflare Tunnel Token 只允许主 Hub 使用。远端设备使用 Quick Tunnel/ngrok/独立域名作为回传链路，避免 OAuth `Client ID not found`。
-- **一次配对、长期记忆**：首次配对成功后，Hub 地址、设备目录与心跳凭据安全持久化；双方电脑或软件重启后自动恢复心跳，不需要再次配对。同一个“配对码 + device_id”在成功后的 **1800 秒（30 分钟）**内可幂等重试并返回同一凭据，解决首次 HTTP 响应丢失场景。
-- **单实例桌面**：同一 Windows 用户只能运行一个 MCP DevBridge；首次升级会清理旧版本遗留的重复进程。
-- **服务状态修复**：稳定状态会清除残留 busy 标记，READY 项目的“停止服务”始终可点；托盘退出提供即时反馈和清理 watchdog。
-- **复制反馈**：地址、令牌、Gateway 地址、Gemini 凭据等复制按钮短暂变绿并显示“复制成功”。
-- **内置更新**：启动后与每 **12 小时**检查 GitHub Release。仅发现新版本时显示右上角更新图标，点击可查看说明、下载、校验 SHA-256、静默安装并自动重启。v0.8.0 之前的版本仍需手动安装 v0.8.0 一次。
-- **安装包自带运行组件**：正式 Windows 安装包内置固定版本 Node.js、uv/uvx 与 cloudflared，普通用户无需预装这些组件或修改 PATH；启动和诊断会自动检查完整性。可选 Windows 控制首次启用时由内置 uvx 获取锁定版本的 Windows-MCP，不做系统级静默安装。
-
-### 多设备正确拓扑
+## 架构概览
 
 ```text
 ChatGPT / Gemini
-       │
-       │  唯一固定 URL
-       ▼
-https://mcp.example.com/mcp
-       │
-       ▼
-主 Hub（唯一持有该 Named Tunnel Token）
-       │
-       ├─ 本机工作区 A / B / C
-       │
-       └─ 远端设备 ── Quick Tunnel / ngrok / 独立域名
-                    └─ 远端工作区 X / Y
+        │ MCP over HTTPS
+        ▼
+Cloudflare / ngrok / Quick Tunnel
+        ▼
+OAuth/Bearer Gateway (loopback)
+        │
+        ├── active root C:\  → CodexPro
+        ├── active root D:\  → CodexPro
+        ├── active nested root → CodexPro
+        └── optional remote device → remote DevBridge Hub
+                                      │
+                                      └── its own active roots
 ```
 
-**不要**把主 Hub 的 `cloudflared.exe service install ey...` Token 复制到朋友电脑。那会把两台机器变成同一 Tunnel 的 replicas，使 OAuth 注册和授权请求可能落在不同机器，导致 `Client ID not found`。
+CodexPro 提供文件、Git、Shell、异步任务、代码分析等开发工具。Windows-MCP 是可选系统控制桥；注册表、环境配置等系统类命令在允许的权限模式下不需要先“切换项目”。
 
----
+## 安装
 
-## v0.7.2 默认异步命令任务
+### Windows
 
-> **v0.7.1 已被 v0.7.2 取代。** v0.7.1 首次发布后真机验收发现任务目录绑定在单个 MCP Server/session 实例：`bash` 返回 task_id 后，另一次 MCP 调用可能无法找到任务。v0.7.2 将 `BashTaskManager` 提升为 CodexPro 进程级共享，同时继续按 workspace 隔离，并新增跨 HTTP MCP session 回归测试。
-
-- `bash` **不再暴露 `timeout_ms`，也没有固定执行时长上限**。每次执行命令都会立即创建后台任务并返回 `task_id`。
-- 不再区分“普通命令”和“大型任务”，也删除了重复的 `start_task`。短命令和长构建统一走同一套任务模型。
-- 任务管理只保留 `get_task / wait_task / list_tasks / cancel_task`：查看状态、短暂等待、列出任务或取消任务。
-- `wait_task` 默认等待 15 秒、单次最多等待 30 秒，只是一次状态查询；它返回并不会停止后台任务，任务会继续运行直到自然结束或被取消。
-- 增加 **600 秒编排看门狗**：如果某个任务 600 秒没有被任何 `get/wait/list/cancel` 调用接续，下一次读取会标记 `orchestrationStale=true` 并给出恢复提示。看门狗只识别“编排断了”，**绝不终止任务**。
-- 输出使用有界滚动缓存：长时间大量日志不会无限占用内存，较早输出可能被省略，但任务不会因为日志量而被终止。
-- 所有任务仍经过原有工作区边界、Bash session、权限档和危险命令拦截；`cancel_task` 会结束完整子进程树。
-- 任务状态保存在当前 CodexPro 进程内，完成任务最多保留 24 小时 / 100 条。**关闭、升级或重启 MCP DevBridge 会结束仍在运行的任务，不做跨重启续跑。**
-
----
-
-## v0.7.0 Multi-Device Hub 与新手体验
-
-- **一个 ChatGPT MCP 地址可管理多台电脑**：主 Hub 维护设备目录；每个 MCP 会话可以独立切换目标电脑，不会影响朋友正在使用的另一个会话。
-- **单设备自动选择**：当前只有一台电脑在线时自动使用它；多台在线时默认本机，并可用 `devbridge_list_devices / devbridge_switch_device` 切换。
-- **远端 Quick Tunnel 自动更新**：朋友电脑可用 Quick Tunnel 加入 Hub；临时 `trycloudflare.com` 地址变化后会通过心跳自动更新到主 Hub，ChatGPT 仍只连接主 Hub 的固定 URL。
-- **设备配对不要求开放家庭路由器端口**：两端都通过已有公网 MCP 入口通信；6 位一次性配对码只在内存存在 10 分钟，设备 Bearer/心跳凭据进入 Windows 凭据存储，不写入 `devices.json` 或日志。
-- 新增顶层 **设备** 与 **使用手册** 页面。使用手册支持搜索、上一篇/下一篇和“帮我选择连接方式”，覆盖 ChatGPT、Gemini、Quick Tunnel、固定地址、多设备、权限、诊断和常见问题。
-- 工作台/项目设置关键网络字段增加 `?` 上下文帮助；悬浮或点击显示非模态说明，帮助用户理解连接方式、域名、Tunnel Token 和公网入口端口。
-- 工作台删除重复的“连接自测”卡和底层组件状态；自测合并进 **诊断**，诊断先给“可以正常使用 / 需要处理”结论，再给逐步解决方法。
-- **日志真正接入正式链路**：运行情况读取当前选中项目的进程输出；操作记录由 Gateway 直接记录实际 `tools/call`；网络连接把 Gateway JSONL 加工成普通用户能理解的事件。
-
-### Quick Tunnel 到底怎么用？
-
-选择“Quick Tunnel 临时测试”并启动服务后，Cloudflare 会随机生成一个 `https://xxxxx.trycloudflare.com` 地址，MCP DevBridge 自动补上 `/mcp`。单机使用时把工作台显示的 MCP 地址复制到 ChatGPT / Gemini 即可；重新建立 Quick Tunnel 后地址会变化，需要在客户端更新。**如果这台电脑已经作为远端设备加入固定主 Hub，新地址会自动上报 Hub，不需要修改 ChatGPT 中的主 Hub URL。**
-
-> 长期 Multi-Device 建议：主 Hub 使用 Cloudflare / ngrok 固定地址；远端电脑可以使用 Quick Tunnel。
-
----
-
-## v0.6.0 桌面体验重构
-
-- 顶层界面收敛为 **工作台 / 项目设置 / 诊断 / 日志 / 设置**，详细技术信息不再挤在主操作路径里。
-- 多项目交互改为真正的**按项目状态控制**：一个项目运行不会锁住其它项目；运行项目自己的“停止服务”始终可用，未运行项目仍可启动和编辑。
-- 常驻说明文字大幅精简，必要解释改为自然语言、Tooltip、诊断结果或高级设置。
-- 新安装不会预置开发者机器上的项目路径、公网域名、Git、Gemini 等数据；没有项目时连接信息显示“选择项目后显示”。通用端口仍按既有规则自动分配，并可在界面修改。
-- 点击标题栏“—”仍是普通最小化到任务栏；点击“×”默认隐藏到系统托盘。托盘图标可恢复窗口，右键可退出；“设置”中可以把关闭行为改为直接退出。
-- 日志页合并了进程 / 审计 / Gateway 三类日志，减少顶层导航噪音。
-
----
-
-## v0.5.0 桌面交互要点
-
-- 项目表操作列即服务开关：停止时显示“启动服务”，运行时显示“停止服务”；状态 1 秒级刷新。
-- “权限模式 / 客户端 / 连接方式”下拉框忽略鼠标滚轮，页面滚动不会误改配置。
-- 选择“Gemini Spark”才显示 Gemini OAuth 配置；选择“ChatGPT 网页端”时自动隐藏。
-- “服务控制”只保留一个动态启停按钮和“高级设置”；独立“停止 / 重启”按钮已移除。
-- “连接诊断”页会检查项目、令牌、域名/隧道、端口、Gemini URI、ngrok 环境和引擎状态；项目已连接时会继续执行真实 MCP self-test。
-- 关闭窗口时，子进程清理在后台线程完成，GUI 不再同步卡住。
-
----
-
-# 快速开始
-
-## 方式一：安装 Windows 安装包（推荐）
-
-普通用户建议直接使用 GitHub Releases 中的安装包，不需要自己搭 Python 项目环境。
-
-### 1. 下载
-
-打开：
-
-**[GitHub Releases](https://github.com/ShiningSugar35/mcp-devbridge/releases)**
-
-下载最新版本的：
+从 GitHub Release 下载：
 
 ```text
-MCPDevBridge-Setup-x.x.x.exe
+MCPDevBridge-Setup-0.8.2.exe
 ```
 
-> 如果 Releases 页面暂时还没有安装包，可以使用下面的“从源码运行”方式。
+安装器为 per-user 安装，不要求管理员权限。v0.8.2 显式保留安装目录选择页，用户可以安装到默认目录，也可以选择其它目录。
 
-### 2. 安装并启动
+正式包自带固定版本的 Node.js、uv/uvx 和 cloudflared 私有运行时，不要求把这些工具安装到系统 PATH。可选 Windows-MCP 仍由内置 uvx 按锁定版本首次获取。
 
-安装完成后打开：
+首次使用：
+
+1. 打开 MCP DevBridge。
+2. 添加希望授权的根目录；如果希望整盘下所有子路径都可访问，可以直接添加 `C:\`、`D:\` 等盘根。
+3. 按需要选择权限模式和连接方式。
+4. 启动一个或多个项目，或点击“启动所有项目”。
+5. 将桌面显示的 MCP URL / 授权信息配置到 ChatGPT、Gemini 等客户端。
+6. 后续请求直接在提示词或工具参数中使用目标绝对路径，无需先切换 workspace。
+
+### Linux / SteamOS Desktop Mode
+
+GitHub Release 提供：
 
 ```text
-MCP DevBridge
+MCPDevBridge-Linux-x86_64-0.8.2.tar.gz
 ```
 
-### 3. 选择项目
+解压后执行：
 
-在主界面选择你希望 ChatGPT / Gemini 操作的项目文件夹，例如：
+```bash
+tar -xzf MCPDevBridge-Linux-x86_64-0.8.2.tar.gz
+cd MCPDevBridge
+./install.sh
+```
+
+默认安装到：
 
 ```text
-D:\Projects\my-project
+~/.local/opt/MCPDevBridge
 ```
 
-桌面端默认选择：
+也可以显式选择用户可写目录：
 
-```text
-完全访问（危险）
+```bash
+./install.sh --target-dir "$HOME/Applications/MCPDevBridge"
 ```
 
-即 `system + full_system`。这是本项目当前的产品默认值；第一次实际启动完全访问模式时仍会弹出一次风险确认。需要缩小权限范围时，可主动切换为“项目工作区”或“只读”。
+安装器会拒绝 `/`、`$HOME`、`$HOME/.local` 等危险目标，也不会覆盖一个看起来不是 MCP DevBridge 的非空目录。Desktop Entry / autostart 遵循有效的绝对 `XDG_DATA_HOME` / `XDG_CONFIG_HOME`；相对 XDG 值按规范视为无效并回退到用户默认目录。
 
-### 4. 选择连接方式
+SteamOS 建议在 Desktop Mode 使用用户目录安装，不改写只读系统基座。
 
-可选择四种连接方式：`Cloudflare 固定地址`、`ngrok 固定地址`、`Quick Tunnel 临时测试`、`仅本机`。
+## 连接方式
 
-如果只是本机调试，可以使用“仅本机”；Quick Tunnel 适合临时验证；如果希望 ChatGPT / Gemini 网页端长期连接，推荐：
-
-```text
-Cloudflare 固定地址
-```
-
-然后填写：
-
-- 固定域名，例如 `mcp.example.com`
-- Cloudflare Named Tunnel Token
-
-### 5. 点击启动
-
-启动成功后，程序会显示固定 MCP 地址：
-
-```text
-https://mcp.example.com/mcp
-```
-
-### 6. 在网页端添加 MCP
-
-将这个地址添加到 ChatGPT 或 Gemini Spark 的自定义 MCP / Connected App 中。
-
-之后正常使用时通常只需要：
-
-```text
-打开 MCP DevBridge
-→ 选择项目
-→ 点击启动
-→ 去 ChatGPT / Gemini 开发
-```
-
-固定地址模式下，不需要每次重新生成 MCP URL。
-
----
-
-# Cloudflare 固定地址部署
-
-如果你希望网页端长期使用同一个 MCP 地址，推荐使用 Cloudflare Named Tunnel。
-
-## 需要准备
-
-- 一个 Cloudflare 账号；
-- 一个托管在 Cloudflare 的域名；
-- 一个 Named Tunnel；
-- 一个固定子域名，例如：
-
-```text
-mcp.example.com
-```
-
-## 推荐结构
-
-```text
-https://mcp.example.com
-          │
-          ▼
-Cloudflare Named Tunnel
-          │
-          ▼
-127.0.0.1:8786
-MCP DevBridge OAuth Gateway
-          │
-          ▼
-127.0.0.1:8787
-Local MCP Engine
-```
-
-当前 OAuth Gateway 默认监听：
-
-```text
-127.0.0.1:8786
-```
-
-因此 Cloudflare Public Hostname 的 Service 应指向：
-
-```text
-http://localhost:8786
-```
-
-MCP Endpoint 为：
-
-```text
-https://mcp.example.com/mcp
-```
-
-## 端口配置
-
-- **公网入口端口（Gateway）**：第一个项目通常从 `8786` 开始分配，后续项目自动避让。当前项目可在桌面“访问令牌与 MCP 地址”区域修改、检测占用、恢复默认；
-  修改后**必须同步**将 Cloudflare Tunnel 的 Service URL 改为
-  `http://localhost:<新端口>`，否则公网连接会失败（界面会醒目提示）。
-- **项目内部端口**：CodexPro 从 `8787`、Windows-MCP 从 `28731`、Gateway 从 `8786` 起为每个项目独立分配；「高级设置…」只修改当前项目。Legacy backend `8765` 仍是全局兼容端口。服务运行期间锁定端口编辑。
-- 所有端口仅监听 `127.0.0.1`；启动前会检查端口占用，被占用时提示处理，
-  不会偷偷改端口。
-- 端口默认值集中在 `src/local_dev_mcp_bridge/constants.py` 的 `DEFAULT_*_PORT`。
-
-正常情况下：
-
-```powershell
-curl.exe -i https://mcp.example.com/mcp
-```
-
-在没有认证信息时返回 `401 Unauthorized`，通常意味着：
-
-```text
-DNS
-→ Cloudflare
-→ Tunnel
-→ 本地 Gateway
-→ MCP 认证层
-```
-
-这条公网链路已经打通。
-
-> [!WARNING]
-> Cloudflare Tunnel Token、MCP Bearer Token、OAuth Client Secret 都属于敏感凭据。不要提交到 Git，不要粘贴到公开聊天或 Issue 中。
-
----
-
-# ChatGPT 连接
-
-在支持自定义 MCP 的 ChatGPT 环境中：
-
-1. 启用相应的 Developer / MCP 功能；
-2. 新建自定义 MCP App；
-3. Server URL 填：
-
-   ```text
-   https://mcp.example.com/mcp
-   ```
-
-4. 根据当前 ChatGPT 界面配置认证；
-5. 扫描并启用需要的 Actions / Tools；
-6. 新建会话开始使用。
-
-示例任务：
-
-```text
-读取当前项目的 AGENTS.md 和 README.md，
-检查 Git 状态，
-然后根据项目约束定位当前未完成任务。
-不要修改代码，先给我开发计划。
-```
-
-或者：
-
-```text
-阅读相关代码并修复这个 bug。
-修改后运行测试，
-再用 Git diff 检查改动。
-```
-
-> ChatGPT 对 MCP 写操作、工具刷新、Action 快照以及确认机制的支持可能随套餐和产品版本变化。  
-> “Allow all actions” 只会影响已经暴露给 ChatGPT 的工具，并不会替 MCP Server 自动新增工具。
-
----
-
-# Gemini Spark 连接
-
-MCP DevBridge 提供 OAuth Gateway，可用于 Gemini Spark 的 Custom Connected App。
-
-一般流程：
-
-1. 在 Gemini Spark 中添加自定义 Connected App；
-2. MCP Server URL 填：
-
-   ```text
-   https://mcp.example.com/mcp
-   ```
-
-3. 按 Gemini 当前界面完成 OAuth / Client 配置；
-4. 浏览器会打开 MCP DevBridge 授权页；
-5. 确认项目目录和授权范围；
-6. 点击允许；
-7. 返回 Gemini Spark 使用。
-
-MCP DevBridge 对外身份为：
-
-```text
-mcp-devbridge
-```
-
-显示名称：
-
-```text
-MCP DevBridge
-```
-
----
-
-# 多项目并行开发
-
-MCP DevBridge 支持同时管理多个项目：
-
-1. 在“项目列表”点击「添加项目」注册多个本地目录；项目表只保留“名称 / 路径 / 状态 / 端口 / 入口 / 操作”六列。
-2. 每个项目拥有**独立的 CodexPro 引擎、Windows 桥、Gateway 端口与配置**；项目的 Bearer/Cloudflare Token 也独立加密保存。
-3. 不再使用“启用”勾选和桌面启动自动恢复；需要哪个项目，直接点击该行“启动服务”。状态会实时更新为“启动中 / 已连接 / 停止中 / 失败”。
-4. 同一时刻可有一个完整公网入口（Tunnel + Gateway），其它项目的 CodexPro 引擎仍可并行运行；Gateway 按 MCP session/workspace 将请求路由到目标项目。
-5. **ChatGPT 和 Gemini 可以同时操作不同项目**；通过 `switch_workspace` 只切换当前 MCP session，`list_projects` 查看全部项目与运行状态。
-6. 服务配置、Git 参数、端口、客户端类型、MCP 地址和自测结果均跟随当前项目；切换回来会恢复原值。
-
-项目非敏感配置持久化于 `projects.json`；敏感值只进入 Windows Credential Manager / DPAPI SecretsStore，不以明文写入 JSON。
-
-## Shell 与命令执行
-
-Windows 上 Shell 默认优先级：
-
-1. **pwsh.exe**（PowerShell 7）
-2. **powershell.exe**（Windows PowerShell 5.1）
-3. **cmd.exe**
-4. **Git Bash**
-
-**WSL Bash 不会被自动选择**，仅当用户明确指定时才会使用（WSL 的 Linux 工具链无法保证运行 Windows 项目脚本和开发工具）。使用 `shell_info` MCP 工具可查看所有可用 Shell 及其类型、路径和版本。桌面「开发环境检测」按钮也可一键确认 Shell / python / git / pytest / pyright 是否可调用。
-
----
-
-# 权限模式
-
-## 只读
-
-适合第一次连接或代码审查。
-
-允许：
-
-- 查看项目；
-- 读取文件；
-- 搜索代码；
-- Git 只读操作。
-
-不允许直接修改项目。
-
-## 项目工作区
-
-适合希望把文件访问和命令范围限制在当前项目目录内的场景。
-
-允许在当前选中的项目范围内：
-
-- 读取和搜索；
-- 写文件；
-- Edit / Patch；
-- Git；
-- 受控命令执行 —— 命令首词限定为开发工具白名单
-  （pytest / pyright / ruff / mypy / git（完整子命令）/ npm / uv / python 等，危险命令硬拦截）；
-- 测试和构建；
-- 本地开发进程管理。
-
-## 系统权限（完全访问模式，桌面默认）
-
-允许更高风险的系统级能力（对应命令档位 `full_system`：任意命令，首次启用需风险确认）。
-
-如果启用了 Windows-MCP，AI 还可能获得：
-
-- PowerShell；
-- 应用控制；
-- 文件系统；
-- 进程管理；
-- 注册表；
-- Windows UI 自动化等能力。
-
-> [!NOTE]
-> 桌面端「权限模式」已与命令执行档位合一：
-> **只读** = read_only + safe、**项目工作区** = workspace + developer、**完全访问（桌面默认）** = system + full_system；
-> 无独立档位选择（`--execution-profile` CLI 参数与引擎映射仍独立保留）。
-
-> [!NOTE]
-> Windows 桥接工具按权限模式过滤：`默认 / 只读` 下只放行
-> `desktop_ui` 白名单（点击、输入、快照、应用等 UI 操作），
-> PowerShell / 注册表 / 文件系统等系统级工具会被拒绝；
-> 仅 `完全访问` 模式放行全部工具（`system_full`）。
-> 每次调用还会与桥端实时工具清单（inventory）交叉校验。
-
-> [!CAUTION]
-> 完全访问意味着远程 AI 工具可能影响项目目录之外的电脑状态。  
-> 桌面端当前按产品设计默认使用“完全访问（危险）”；首次实际启动仍要求一次性风险确认。若不需要系统级能力，可主动降级到“项目工作区”或“只读”。
-
----
-
-# 命令执行档位（Shell Execution Profile，内部模型）
-
-桌面端 UI 已与权限模式合一（见上），此处为后端/CLI 的档位定义；
-对 `run_command / run_program / start_process`（本机工具）与 Codex 引擎的 bash 工具生效：
-
-| 档位 | 行为 | 适用场景 |
+| 方式 | 说明 | 适合 |
 |---|---|---|
-| `developer`（默认） | 命令首词必须是开发工具（pytest / pyright / ruff / mypy / git（完整子命令）/ npm / pnpm / yarn / bun / uv / python / tsc / eslint / cargo …）；危险命令硬拦截 | 通用开发工作流：AI 可运行测试、类型检查、lint、git 操作 |
-| `safe` | 完全保留原有“项目内命令允许”行为（仅危险拦截；引擎端仍执行其安全 allowlist） | 需要保持旧行为的场景 |
-| `full_system` | 任意命令；启用前需要**一次性风险确认**（桌面首次提示） | 完全受信任的 AI 客户端 |
+| Cloudflare Named Tunnel | 固定域名，公网长期地址 | 主 Hub / 长期使用 |
+| ngrok 固定域名 | 固定 ngrok hostname | 已有 ngrok reserved domain |
+| Quick Tunnel | 随机 `trycloudflare.com`，重建会变化 | 临时测试 / 远端设备回传 |
+| Local | 仅 loopback，直连所选 CodexPro | 本机单引擎开发 |
 
-**危险命令在任何档位都被硬拦截**（白名单无法绕过）：磁盘格式化（`format C:`）、
-分区操作（`diskpart`）、关机重启（`shutdown/reboot`）、引导配置（`bcdedit`）、注册表删除
-（`reg delete`）、`msiexec / cipher / takeown / icacls`，以及递归删除指向盘根或系统目录的
-`rm -rf /`、`del /s C:\`、`Remove-Item -Recurse C:\Windows` 等。
+所有公网模式都终止在 Gateway；CodexPro、Gateway、Windows 桥本身只监听 loopback。
 
-Shell 选择：默认顺序 pwsh > Windows PowerShell > cmd > Git Bash，**WSL Bash 永不当默认**
-（它运行 Linux 工具链，无法保证执行 Windows 项目脚本）。桌面提供「开发环境检测」按钮，
-可一键确认 Shell / python / git / pytest / pyright 是否可调用（对应 MCP 工具 `shell_self_test`）。
+## 多设备
 
----
-
-# 从源码运行
-
-## 环境要求
-
-基础开发环境：
-
-- Windows 10 / 11 x64
-- Python 3.12
-- Node.js 20+
-- Git
-- uv
-- npm
-
-固定公网连接还需要：
-
-- `cloudflared`
-
-Windows 系统控制为可选能力，依赖 Windows-MCP 及其对应运行时要求。
-
-## 1. Clone
-
-```powershell
-git clone https://github.com/ShiningSugar35/mcp-devbridge.git
-cd mcp-devbridge
-```
-
-## 2. 创建 Python 环境
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip uv
-.\.venv\Scripts\uv.exe pip install -e ".[dev,package]"
-```
-
-## 3. 构建 CodexPro 引擎
-
-```powershell
-cd third_party\codexpro
-npm ci
-npm run build
-npm run smoke
-cd ..\..
-```
-
-## 4. 准备 cloudflared
-
-如果需要 Cloudflare Tunnel，将官方 `cloudflared.exe` 放到：
+一个主 Hub 可以登记其它 MCP DevBridge 设备。设备切换和本机工作区路由是两层独立逻辑：
 
 ```text
-.tools\cloudflared.exe
+客户端
+  → 选择/自动确定设备
+  → 目标设备内部按 path/cwd/task 自动确定 active root
+  → 执行工具
 ```
 
-如果只使用本机模式，可以暂时跳过。
+远端 Quick Tunnel 地址变化可通过心跳更新到主 Hub，而 ChatGPT 仍只需要配置主 Hub 的固定地址。
 
-## 5. 启动桌面程序
+## 权限与安全
 
-```powershell
-.\.venv\Scripts\python.exe -m local_dev_mcp_bridge.desktop_main
-```
+桌面新项目默认仍是“完全访问（危险）”语义，对应 `system + full_system`，首次实际启用时必须完成一次风险确认。用户可主动降为项目工作区或只读模式。
 
----
+主要安全边界：
 
-# 开发与测试
+- 路径 containment 使用 canonical/real path，防止 `..` 和 symlink/junction 越界。
+- 本地 `run_command/run_program` 的 `cwd` 必须位于目标运行根内。
+- 公网请求必须通过 Gateway 的 OAuth/Bearer 认证；loopback 匿名仅限本机兼容路径。
+- command/content/patch 与 secret-like 字段写审计日志前会脱敏。
+- 已知格式化磁盘、破坏引导、递归删除系统盘等高风险命令仍受硬拦截。
+- Windows 密钥优先使用 Credential Manager，兼容 DPAPI fallback。
+- Linux/SteamOS 优先桌面 secret service；无服务时使用用户配置目录中的 AES-GCM 加密 fallback，并限制文件权限。
 
-运行 Python 测试：
+详细模型见 `docs/en/SECURITY.md` 与 `项目架构.md`。
 
-```powershell
-$env:PYTHONIOENCODING="utf-8"
-.\.venv\Scripts\python.exe -m pytest tests -q
-```
+## 开发
 
-Ruff：
-
-```powershell
-.\.venv\Scripts\python.exe -m ruff check src tests
-```
-
-Pyright：
+### Windows
 
 ```powershell
-.\.venv\Scripts\pyright.exe
-```
+uv venv --python 3.12
+uv pip install -p .venv -e ".[dev,package]"
 
-CodexPro：
-
-```powershell
-cd third_party\codexpro
+cd third_party/codexpro
 npm ci
 npm run build
+cd ../..
+
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m pyright --pythonpath .venv\Scripts\python.exe src tests
+.venv\Scripts\python.exe -m pytest tests -q --disable-warnings
+
+cd third_party/codexpro
 npm run smoke
 ```
 
-构建 Windows 程序前，应先确保 CodexPro 的：
+完整 Windows 发布构建：
 
-```text
-third_party/codexpro/dist
-third_party/codexpro/node_modules
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.2
 ```
 
-均已经生成。
-
----
-
-# 项目架构
+产物：
 
 ```text
-┌─────────────────────────────────────┐
-│          MCP DevBridge GUI          │
-│              PySide6                │
-│                                     │
-│  项目选择 / 权限 / Tunnel / 日志     │
-└─────────────────┬───────────────────┘
-                  │
-                  ▼
-        ┌───────────────────┐
-        │ ServiceCoordinator│
-        └───────┬───────┬───┘
-                │       │
-                │       └───────────────┐
-                ▼                       ▼
-        CodexPro Engine             Windows-MCP
-        项目 Coding 能力             可选系统能力
-                │
-                └──────────┬────────────┘
-                           ▼
-                    OAuth Gateway
-                     127.0.0.1
-                           │
-                           ▼
-                  Cloudflare Tunnel
-                           │
-                           ▼
-               ChatGPT / Gemini Spark
+release/MCPDevBridge-Setup-0.8.2.exe
 ```
 
-更详细的实现说明：
+### Linux build host
 
-- [Architecture](docs/en/ARCHITECTURE.md)
-- [Security](docs/en/SECURITY.md)
-- [Compatibility](docs/en/COMPATIBILITY.md)
-- [Development](docs/en/DEVELOPMENT.md)
-- [Changelog](docs/en/CHANGELOG.md)
+```bash
+uv venv --python 3.12
+uv pip install -p .venv -e '.[dev,package]'
+cd third_party/codexpro && npm ci && npm run build && cd ../..
+bash scripts/build_linux.sh 0.8.2
+```
 
-中文开发文档：
+产物：
 
-- `项目架构.md`
-- `AGENTS.md`
+```text
+release/MCPDevBridge-Linux-x86_64-0.8.2.tar.gz
+```
 
----
+CI 的 Linux 构建基线为 Ubuntu 22.04，以避免在过新的 glibc 环境构建后失去对较旧发行环境的兼容性。
 
-# 安全说明
+## 发布与更新
 
-MCP DevBridge 的目标就是让远程 AI 能够操作本地开发环境，因此安全边界非常重要。
+桌面启动后检查 GitHub Release，之后按固定周期检查更新。Windows 使用内置 `live_upgrade.ps1` 做 detached 升级接力；Linux 使用随包提供的 `live_upgrade.sh`。升级接力文件只保存非敏感恢复元数据，真正凭据在新进程启动后从 SecretsStore 重新读取。
 
-当前设计包括：
+当前维护版本：**0.8.2**。`v0.9.x` 远端 tag/历史仍保留，但不属于本维护线，也不会被 v0.8.2 发布覆盖或 force-push。
 
-- MCP 引擎只监听 `127.0.0.1`；
-- 公网入口可经过 Cloudflare Named / ngrok / Quick Tunnel，三者统一终止在本机 Gateway；
-- 公网请求需要 OAuth 或有效 Bearer；
-- Bearer 与 Cloudflare Tunnel Token 按项目使用 Windows Credential Manager / DPAPI 加密保存；
-- 认证比较使用 constant-time comparison；
-- 失败认证有限速；
-- 日志对 Token / Secret / Password / Cookie 等字段脱敏；
-- Workspace 模式限制项目文件访问范围；
-- 高风险工具提供 destructive metadata；
-- Windows-MCP 仅作为本地可选桥接后端，并按权限档位过滤工具（`desktop_ui` 白名单 / `system_full`）；
-- 端口默认值集中维护（`constants.DEFAULT_*_PORT`），启动前检查占用，不做静默换端口。
+## 文档
 
-建议：
+- `AGENTS.md`：开发/Agent 快速约束。
+- `项目架构.md`：当前架构与数据流。
+- `开发计划.md`：v0.8.2 维护目标和发布门。
+- `进度验收.md`：当前发布的真实测试/构建/Release 证据。
+- `docs/en/ARCHITECTURE.md`：English architecture.
+- `docs/en/COMPATIBILITY.md`：Windows / Linux / SteamOS compatibility.
+- `docs/en/SECURITY.md`：security model.
+- `docs/en/DEVELOPMENT.md`：build and verification commands.
+- `docs/en/CHANGELOG.md`：release history.
 
-1. 不使用时停止 MCP DevBridge；
-2. 不公开分享 MCP URL + 凭据；
-3. 桌面默认“完全访问（危险）”；如不需要系统级能力，可主动降级到“项目工作区”或“只读”；
-4. 定期轮换 Bearer / OAuth 凭据；
-5. 不要把 `.env`、SSH Key、Cookie、Tunnel Token 提交到 Git。
+## License
 
-详见：
-
-[SECURITY.md](docs/en/SECURITY.md)
-
-
----
-
-# 上游项目与致谢
-
-MCP DevBridge 是一个独立的桌面集成项目，本项目构建在以下优秀的开源项目之上：
-
-### CodexPro
-
-- Upstream: `rebel0789/codexpro`
-- 用途：本地项目 Coding MCP Engine
-- License: MIT
-
-MCP DevBridge 内维护了一个受控 fork，用于增加 Windows Bridge 等集成功能。
-
-### Windows-MCP
-
-- Upstream: `CursorTouch/Windows-MCP`
-- 用途：可选 Windows 系统与 UI 控制后端
-- License: MIT
-
-详细版本、修改和第三方许可证：
-
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
-
----
-
-# 当前状态
-
-**MCP DevBridge 目前处于早期 Beta 阶段。**
-
-已经完成的核心路径包括：
-
-- Windows GUI
-- 本地项目选择
-- CodexPro Coding Engine
-- 文件 / Git / 命令 / 进程工具
-- Cloudflare 固定 MCP URL
-- Bearer 认证
-- MCP OAuth Gateway
-- Gemini Spark 接入
-- ChatGPT MCP 接入
-- Windows-MCP 可选桥接
-- **多项目并行开发**（每个项目独立 CodexPro 引擎与端口，GPT/Gemini 可同时操作不同项目）
-- **Windows Shell 自动检测**（pwsh > PowerShell > cmd > Git Bash 优先级，WSL 不会自动调用）
-- 日志与审计
-- PyInstaller / Inno Setup 打包
-
-欢迎提交 Issue、Bug 报告和兼容性测试结果。
-
----
-
-# License
-
-MCP DevBridge 项目代码按仓库声明的许可证发布。
-
-第三方组件保留各自原始许可证与版权声明。  
-请参阅：
-
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+项目许可证见 `LICENSE`；第三方组件及其许可证见 `THIRD_PARTY_LICENSES.md`。

@@ -2185,7 +2185,7 @@ class MainWindow(QMainWindow):
 
             self.coord.start(options)
             if self.coord.state != EngineState.READY:
-                raise RuntimeError(self.coord.message or "公网入口项目未进入已连接状态。")
+                raise RuntimeError(self.coord.message or "Hub 编排项目未进入已连接状态。")
             others = [project for project in projects if project.id != entry.id]
             failures: list[str] = []
             if others:
@@ -2248,7 +2248,7 @@ class MainWindow(QMainWindow):
                 try:
                     self.coord.stop()
                 except Exception as exc:  # noqa: BLE001
-                    failures.append(f"公网入口: {exc}")
+                    failures.append(f"Hub 编排: {exc}")
             max_workers = min(len(projects), 8)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(self.pm.stop, project.id): project for project in projects}
