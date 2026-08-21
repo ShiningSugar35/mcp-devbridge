@@ -35,6 +35,13 @@ Thumbs.db
 
 # 本地临时
 tmp/
+
+# 当仓库与本机安装目录重合时产生的正式安装文件
+/MCPDevBridge.exe
+/_internal/
+/cloudflared.exe
+/unins*.exe
+/unins*.dat
 # �ڲ����Ŀ����ĵ������ύ�������ֿ⣩
 /�����ƻ�.md
 /�����¼.md

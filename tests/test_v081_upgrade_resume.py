@@ -35,6 +35,9 @@ def test_live_upgrade_script_snapshots_all_listening_project_roots() -> None:
     assert "$resumeProjectRoots" in script
     assert "Test-LoopbackPort -Port $candidatePort" in script
     assert "project_roots = @($request.resume_project_roots)" in script
+    assert "install_dir = $currentInstallDir" in script
+    assert '/DIR="{0}"' in script
+    assert 'Join-Path $installDir "MCPDevBridge.exe"' in script
 
 
 def test_upgrade_resume_restores_entry_and_additional_projects(

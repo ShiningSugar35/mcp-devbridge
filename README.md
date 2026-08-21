@@ -100,6 +100,17 @@ MCP DevBridge 解决的就是中间这一层：
 ---
 
 
+## v0.8.2 桌面启停稳定性与轻量化维护
+
+- **全部项目一键启停**：项目列表底部新增“启动所有项目 / 停止所有项目”动态总控；入口项目负责公网连接，其余项目引擎最多 8 路并行启停，单个非入口项目失败不会阻断其它项目收尾。
+- **修复偶发点击无效**：1 秒状态轮询不再销毁并重建项目操作按钮；异步启停的 busy 标记只由对应完成回调释放，避免 mouse press/release 之间控件被替换，以及重复 start/stop race。
+- **精简重复控制面**：删除“当前项目”卡片和重复启停按钮；单项目启停只保留项目表操作列，“高级设置…”移到“项目设置”页。
+- **批量保存连接与权限**：“连接与权限”右下新增“保存为所有项目设置”，同步权限模式、客户端、连接方式、公网域名、Windows 控制、Gemini Redirect URI 与 Cloudflare Tunnel Token，不覆盖 Git 参数和项目独立端口。
+- **降低桌面轮询开销**：项目表文本项改为原位更新，避免每秒为每个项目反复分配 QTableWidgetItem；移除未使用状态缓存和重复私有控制入口。
+- **瘦身正式发行物**：CodexPro 先完整构建，再按 `package-lock.json` 只复制 production dependencies；开发侧约 51.90 MiB 的 `dist + node_modules` 生成约 14.91 MiB 生产 runtime，减少约 71% 的 CodexPro 运行包体积。
+- **安全依赖收口**：更新 CodexPro 传递依赖后 `npm audit` 为 0 vulnerabilities；构建脚本从干净 clone 开始自动 `npm ci → build → production runtime`，不再依赖机器上恰好存在的未跟踪构建产物。
+- **外部工具扩展策略**：完成 Context7、GitHub MCP、Playwright MCP、Chrome DevTools MCP、MarkItDown MCP、Serena 等 GitHub 调研；优先规划“按需 profile + 动态工具发现”，避免把大量重复 schema 常驻同一 tools/list。详见 `docs/tool-extension-evaluation-v0.8.2.md`。
+
 ## v0.8.1 多工作区路由热修
 
 - **修复 ChatGPT 切换工作区后又回到入口项目**：ChatGPT 可能在连续工具调用之间重建底层 MCP transport，v0.8.0 只按 `mcp-session-id` 保存工作区会失效。v0.8.1 为工具增加可选的 `devbridge_workspace_id / devbridge_device_id` 路由提示，切换工具返回路由值，后续调用显式携带，因此不再依赖同一个 transport session。

@@ -7,15 +7,18 @@ Output: dist/MCPDevBridge/
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.8.1"
+PROJECT_VERSION = "0.8.2"
+CODEXPRO_RUNTIME = ROOT / "build" / "codexpro-runtime"
+if not (CODEXPRO_RUNTIME / "dist").is_dir() or not (CODEXPRO_RUNTIME / "node_modules").is_dir():
+    raise RuntimeError("Missing build/codexpro-runtime; run scripts/prepare_codexpro_runtime.py first")
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry_desktop.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
 datas=[
-        (str(ROOT / "third_party" / "codexpro" / "dist"), "third_party/codexpro/dist"),
-        (str(ROOT / "third_party" / "codexpro" / "node_modules"), "third_party/codexpro/node_modules"),
+        (str(CODEXPRO_RUNTIME / "dist"), "third_party/codexpro/dist"),
+        (str(CODEXPRO_RUNTIME / "node_modules"), "third_party/codexpro/node_modules"),
         (str(ROOT / ".tools" / "node.exe"), "runtime"),
         (str(ROOT / ".tools" / "uv.exe"), "runtime"),
         (str(ROOT / ".tools" / "uvx.exe"), "runtime"),

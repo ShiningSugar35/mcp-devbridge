@@ -98,12 +98,23 @@ if (-not $Worker) {
         }
     }
     if ($ProjectRoot) { $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot) }
+    $currentInstallDir = ""
     if ($OldPid -le 0) {
         $candidate = Get-CimInstance Win32_Process |
             Where-Object { $_.Name -ieq "MCPDevBridge.exe" } |
             Sort-Object ProcessId |
             Select-Object -First 1
-        if ($candidate) { $OldPid = [int]$candidate.ProcessId }
+        if ($candidate) {
+            $OldPid = [int]$candidate.ProcessId
+            if ($candidate.ExecutablePath) {
+                $currentInstallDir = Split-Path -Parent ([IO.Path]::GetFullPath([string]$candidate.ExecutablePath))
+            }
+        }
+    } else {
+        $candidate = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $OldPid) -ErrorAction SilentlyContinue
+        if ($candidate -and $candidate.ExecutablePath) {
+            $currentInstallDir = Split-Path -Parent ([IO.Path]::GetFullPath([string]$candidate.ExecutablePath))
+        }
     }
     if ($FallbackExe) { $FallbackExe = [IO.Path]::GetFullPath($FallbackExe) }
 
@@ -140,6 +151,7 @@ if (-not $Worker) {
         resume_project_roots = @($resumeProjectRoots)
         old_pid = $OldPid
         fallback_exe = $FallbackExe
+        install_dir = $currentInstallDir
         dry_run = [bool]$DryRun
         task_name = "MCPDevBridge-LiveUpgrade-" + (Get-Date -Format "yyyyMMdd-HHmmss")
         requested_at = (Get-Date).ToString("o")
@@ -189,6 +201,8 @@ try {
     if ($projectRoot) { $projectRoot = [IO.Path]::GetFullPath($projectRoot) }
     $oldPidValue = [int]$request.old_pid
     $fallback = [string]$request.fallback_exe
+    $installDir = [string]$request.install_dir
+    if ($installDir) { $installDir = [IO.Path]::GetFullPath($installDir) }
     $resumePath = Join-Path $ConfigDir "upgrade-resume.json"
     if ($projectRoot) {
         Write-JsonAtomic -Path $resumePath -Value ([ordered]@{
@@ -214,7 +228,8 @@ try {
     if (@($oldProcesses).Count -gt 0) { Start-Sleep -Seconds 2 }
 
     $installArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/TASKS=desktopicon")
-    Write-UpgradeLog "Installing: $installer"
+    if ($installDir) { $installArgs += ('/DIR="{0}"' -f $installDir) }
+    Write-UpgradeLog "Installing: $installer; target=$installDir"
     $install = Start-Process -FilePath $installer -ArgumentList $installArgs -PassThru -Wait
     if ($install.ExitCode -ne 0) {
         Write-UpgradeLog "Installer failed with exit code $($install.ExitCode)."
@@ -225,7 +240,11 @@ try {
         throw "Installer failed: exit=$($install.ExitCode)"
     }
 
-    $installedExe = Join-Path $env:LOCALAPPDATA "Programs\MCP DevBridge\MCPDevBridge.exe"
+    $installedExe = if ($installDir) {
+        Join-Path $installDir "MCPDevBridge.exe"
+    } else {
+        Join-Path $env:LOCALAPPDATA "Programs\MCP DevBridge\MCPDevBridge.exe"
+    }
     if (-not (Test-Path -LiteralPath $installedExe)) {
         if ($fallback -and (Test-Path -LiteralPath $fallback)) {
             Write-UpgradeLog "Installed executable missing; launching staging fallback."

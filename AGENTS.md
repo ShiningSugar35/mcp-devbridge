@@ -145,6 +145,12 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-21 · **v0.8.2 桌面启停稳定性 / 批量配置 / 生产包瘦身**：
+  - 项目表操作按钮改为原位复用，1 秒轮询不得销毁正在交互的按钮；`_busy_project_ids` 只由对应异步生命周期回调释放，避免 Stop/Start 点击被吞与重复启停竞态。
+  - 新增“启动所有项目 / 停止所有项目”总控；删除重复“当前项目”卡片；“连接与权限”支持一次同步到全部项目，批量同步不覆盖 Git 参数和项目独立端口。
+  - 构建链从干净 clone 自动 `npm ci → CodexPro build → prepare_codexpro_runtime.py`；正式包只带 production dependencies。CodexPro 运行侧从约 51.90 MiB 降到约 14.91 MiB，并把 npm 安全审计收敛到 0 vulnerabilities。
+  - 外部 MCP 工具采用按需 profile / 动态发现方向；Context7 与 GitHub MCP 为 P0，Playwright / Chrome DevTools / MarkItDown 为 P1；Serena 因与 CodexPro 高度重叠不默认接入。
+
 - 2026-08-17 · **v0.8.1 多工作区/ChatGPT stateless transport 热修**：
   - 不再把工作区/设备选择仅绑定 `mcp-session-id`；工具 schema 增加可选显式路由提示，兼容 ChatGPT 在连续工具调用间重建 MCP transport 的行为。
   - 修复 Gateway `run_command/run_program` 对 `params.arguments` 的读取；修复 PySide 异步完成 signal 生命周期导致的“项目已 READY、运行记录仍停在正在启动”；盘符根目录补齐显示名。

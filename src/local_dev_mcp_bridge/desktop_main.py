@@ -250,13 +250,13 @@ class MainWindow(QMainWindow):
         self._signals = _Signals()
         self._signals.coord_event.connect(self._on_coord_event)
         self.coord.listen(self._emit_coord_event)
-        self._projects = load_projects()
         self._current_token = ""
         self._bridge_token = _bridge_token()
         self._loading_project = False
         self._loaded_project_root = ""
         self._service_root = ""
         self._busy_project_ids: set[str] = set()
+        self._bulk_project_action: str | None = None
         self._closing = False
         self._force_exit = False
         self._tray_hint_shown = False
@@ -375,8 +375,11 @@ class MainWindow(QMainWindow):
         self.add_project_btn.clicked.connect(self._browse_project)
         self.remove_project_btn = QPushButton("移除项目")
         self.remove_project_btn.clicked.connect(self._remove_project)
+        self.all_projects_btn = QPushButton("启动所有项目")
+        self.all_projects_btn.clicked.connect(self._toggle_all_projects)
         proj_btns.addWidget(self.add_project_btn)
         proj_btns.addWidget(self.remove_project_btn)
+        proj_btns.addWidget(self.all_projects_btn)
         proj_btns.addStretch(1)
         proj_v.addLayout(proj_btns)
         self.project_table.setToolTip("★ 表示当前承担公网入口的项目")
@@ -476,6 +479,13 @@ class MainWindow(QMainWindow):
         self.bridge_check.setToolTip("启用后提供额外的 Windows 桌面控制工具。")
         self.bridge_check.toggled.connect(self._autosave_project_settings)
         cfg_form.addRow("", self.bridge_check)
+
+        cfg_actions = QHBoxLayout()
+        cfg_actions.addStretch(1)
+        self.save_all_project_settings_btn = QPushButton("保存为所有项目设置")
+        self.save_all_project_settings_btn.clicked.connect(self._save_settings_for_all_projects)
+        cfg_actions.addWidget(self.save_all_project_settings_btn)
+        cfg_form.addRow("", cfg_actions)
         self.ctrl_layout.addWidget(cfg_box)
 
         # --- git settings (Phase 5)
@@ -501,24 +511,6 @@ class MainWindow(QMainWindow):
         self.git_save_btn.clicked.connect(self._save_git_settings)
         git_form.addRow("", self.git_save_btn)
         self.ctrl_layout.addWidget(git_box)
-
-        # --- service control
-        ctrl_box = QGroupBox("当前项目")
-        ctrl_row = QHBoxLayout(ctrl_box)
-        ctrl_row.setContentsMargins(12, 8, 12, 8)
-        ctrl_row.setSpacing(8)
-        self.start_btn = QPushButton("启动服务")
-        self.start_btn.setProperty("role", "primary")
-        self.advanced_btn = QPushButton("高级设置…")
-        self.start_btn.clicked.connect(self._toggle_selected_service)
-        self.advanced_btn.clicked.connect(self._open_advanced_settings)
-        for btn in (self.start_btn, self.advanced_btn):
-            btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-            btn.setMinimumHeight(28)
-        ctrl_row.addWidget(self.start_btn)
-        ctrl_row.addStretch(1)
-        ctrl_row.addWidget(self.advanced_btn)
-        self.ctrl_layout.addWidget(ctrl_box)
 
         # --- status
         self.status_label = QLabel("状态：未启动")
@@ -645,6 +637,14 @@ class MainWindow(QMainWindow):
         project_settings_v.setSpacing(12)
         project_settings_v.addWidget(cfg_box)
         project_settings_v.addWidget(git_box)
+        project_settings_actions = QHBoxLayout()
+        project_settings_actions.addStretch(1)
+        self.advanced_btn = QPushButton("高级设置…")
+        self.advanced_btn.clicked.connect(self._open_advanced_settings)
+        self.advanced_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.advanced_btn.setMinimumHeight(28)
+        project_settings_actions.addWidget(self.advanced_btn)
+        project_settings_v.addLayout(project_settings_actions)
         project_settings_v.addStretch(1)
         self.tabs.addTab(self.project_settings_tab, "项目设置")
 
@@ -1673,37 +1673,50 @@ class MainWindow(QMainWindow):
         views = self.pm.views()
         table.blockSignals(True)
         try:
-            table.setRowCount(0)
+            table.setRowCount(len(views))
             for row, view in enumerate(views):
                 project = self.pm.get(view.id)
                 state_obj = self._project_state(project)
                 state = state_obj.value
                 is_entry = bool(self._service_root and _same_root(view.root_path, self._service_root))
-                table.insertRow(row)
-                table.setItem(row, 0, QTableWidgetItem(view.name))
-                table.setItem(row, 1, QTableWidgetItem(view.root_path))
-                table.setItem(row, 2, QTableWidgetItem(state))
-                table.setItem(row, 3, QTableWidgetItem(str(view.codexpro_port)))
-                table.setItem(row, 4, QTableWidgetItem("★" if is_entry and self.coord.running else ""))
-                svc_btn = QPushButton("启动服务")
+                values = (
+                    view.name,
+                    view.root_path,
+                    state,
+                    str(view.codexpro_port),
+                    "★" if is_entry and self.coord.running else "",
+                )
+                for column, value in enumerate(values):
+                    item = table.item(row, column)
+                    if item is None:
+                        item = QTableWidgetItem(value)
+                        table.setItem(row, column, item)
+                    elif item.text() != value:
+                        item.setText(value)
+                svc_btn = table.cellWidget(row, 5)
+                if not isinstance(svc_btn, QPushButton) or str(svc_btn.property("project_id") or "") != view.id:
+                    svc_btn = QPushButton("启动服务")
+                    svc_btn.setProperty("project_id", view.id)
+                    svc_btn.setProperty("project_root", view.root_path)
+                    svc_btn.clicked.connect(
+                        lambda _checked=False, button=svc_btn: self._toggle_service_for(
+                            str(button.property("project_root") or "")
+                        )
+                    )
+                    table.setCellWidget(row, 5, svc_btn)
                 busy = self._is_project_busy(view.id)
                 if state_obj == EngineState.READY:
                     svc_btn.setText("停止服务")
                 elif state_obj == EngineState.STARTING:
                     svc_btn.setText("启动中…")
-                    svc_btn.setEnabled(False)
                 elif state_obj == EngineState.STOPPING:
                     svc_btn.setText("停止中…")
-                    svc_btn.setEnabled(False)
                 elif state_obj == EngineState.ERROR:
                     svc_btn.setText("重新启动")
-                if busy and state_obj not in (EngineState.READY, EngineState.IDLE, EngineState.ERROR):
-                    svc_btn.setEnabled(False)
+                else:
+                    svc_btn.setText("启动服务")
+                svc_btn.setEnabled(not busy and state_obj not in (EngineState.STARTING, EngineState.STOPPING))
                 svc_btn.setToolTip(f"启动或停止 {view.name}")
-                svc_btn.clicked.connect(
-                    lambda _checked=False, root=view.root_path: self._toggle_service_for(root)
-                )
-                table.setCellWidget(row, 5, svc_btn)
             table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
             table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
@@ -2072,6 +2085,170 @@ class MainWindow(QMainWindow):
 
         _run_async(run, done)
 
+    def _has_active_projects(self) -> bool:
+        if self.coord.running or self.coord.state == EngineState.ERROR:
+            return True
+        for project in self.pm.list():
+            if self._project_state(project) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING):
+                return True
+        return False
+
+    def _sync_all_projects_button(self) -> None:
+        projects = self.pm.list()
+        if self._bulk_project_action == "start":
+            self.all_projects_btn.setText("停止所有项目")
+            self.all_projects_btn.setEnabled(False)
+            return
+        if self._bulk_project_action == "stop":
+            self.all_projects_btn.setText("启动所有项目")
+            self.all_projects_btn.setEnabled(False)
+            return
+        active = self._has_active_projects()
+        any_busy = any(self._is_project_busy(project.id) for project in projects)
+        self.all_projects_btn.setText("停止所有项目" if active else "启动所有项目")
+        self.all_projects_btn.setEnabled(bool(projects) and not any_busy)
+
+    def _toggle_all_projects(self) -> None:
+        if self._bulk_project_action is not None:
+            return
+        if self._has_active_projects():
+            self._stop_all_projects()
+        else:
+            self._start_all_projects()
+
+    def _start_all_projects(self) -> None:
+        projects = self.pm.list()
+        if not projects:
+            QMessageBox.warning(self, "没有项目", "请先添加项目。")
+            return
+        if any(self._is_project_busy(project.id) for project in projects):
+            return
+        entry = self._project_config()
+        if entry is None:
+            entry = projects[0]
+            self._select_root(entry.root_path)
+            self._apply_selected_project()
+        if not self._save_project_settings(show_errors=True):
+            return
+        projects = self.pm.list()
+        entry = next((project for project in projects if project.id == entry.id), projects[0])
+        if self._require_start_confirmations(projects):
+            return
+
+        tokens = {project.id: ensure_project_access_token(project.id) for project in projects}
+        bridge_token = _bridge_token(ensure=any(project.windows_enabled for project in projects))
+        self._current_token = tokens[entry.id]
+        self._bridge_token = bridge_token
+        self._bind_coord_engines(entry.id)
+        options = self._current_options()
+        options.codex_token = tokens[entry.id]
+        options.windows_token = bridge_token
+        conflict = self._ports_conflict(options)
+        if conflict:
+            QMessageBox.warning(self, "端口被占用", conflict)
+            return
+
+        project_ids = {project.id for project in projects}
+        self._bulk_project_action = "start"
+        self._busy_project_ids.update(project_ids)
+        self._service_root = entry.root_path
+        self._append_log(f"正在启动全部 {len(projects)} 个项目…")
+        self._poll_status()
+
+        def run() -> str:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            self.coord.start(options)
+            if self.coord.state != EngineState.READY:
+                raise RuntimeError(self.coord.message or "公网入口项目未进入已连接状态。")
+            others = [project for project in projects if project.id != entry.id]
+            failures: list[str] = []
+            if others:
+                max_workers = min(len(others), 8)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            self.pm.start,
+                            project.id,
+                            codex_token=tokens[project.id],
+                            permission_mode=project.permission_mode,
+                            execution_profile=PERMISSION_PROFILE.get(project.permission_mode, "full_system"),
+                            windows_token=bridge_token,
+                        ): project
+                        for project in others
+                    }
+                    for future in as_completed(futures):
+                        project = futures[future]
+                        try:
+                            future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            failures.append(f"{project.display_name}: {exc}")
+            started = len(projects) - len(failures)
+            if failures:
+                preview = "；".join(failures[:3])
+                if len(failures) > 3:
+                    preview += f"；另有 {len(failures) - 3} 个失败"
+                return f"全部启动完成：{started}/{len(projects)} 个项目可用。失败：{preview}"
+            return f"全部启动完成：{len(projects)}/{len(projects)} 个项目可用。"
+
+        def done(result: Any) -> None:
+            self._bulk_project_action = None
+            self._busy_project_ids.difference_update(project_ids)
+            if isinstance(result, Exception):
+                self._append_log(f"启动所有项目失败：{result}")
+                if self.coord.state != EngineState.READY:
+                    self._service_root = ""
+            else:
+                self._append_log(str(result))
+            self._sync_token_ui()
+            self._poll_status()
+
+        _run_async(run, done)
+
+    def _stop_all_projects(self) -> None:
+        projects = self.pm.list()
+        if not projects:
+            return
+        project_ids = {project.id for project in projects}
+        self._bulk_project_action = "stop"
+        self._busy_project_ids.update(project_ids)
+        self._append_log(f"正在停止全部 {len(projects)} 个项目…")
+        self._poll_status()
+
+        def run() -> str:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            failures: list[str] = []
+            if self.coord.running or self.coord.state == EngineState.ERROR:
+                try:
+                    self.coord.stop()
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(f"公网入口: {exc}")
+            max_workers = min(len(projects), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(self.pm.stop, project.id): project for project in projects}
+                for future in as_completed(futures):
+                    project = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        failures.append(f"{project.display_name}: {exc}")
+            if failures:
+                preview = "；".join(failures[:3])
+                if len(failures) > 3:
+                    preview += f"；另有 {len(failures) - 3} 个失败"
+                return f"停止完成，但有 {len(failures)} 项异常：{preview}"
+            return f"已停止全部 {len(projects)} 个项目。"
+
+        def done(result: Any) -> None:
+            self._bulk_project_action = None
+            self._busy_project_ids.difference_update(project_ids)
+            self._service_root = ""
+            self._append_log(str(result) if not isinstance(result, Exception) else f"停止所有项目出错：{result}")
+            self._poll_status()
+
+        _run_async(run, done)
+
     def _bind_coord_engines(self, project_id: str | None = None) -> None:
         project_id = project_id or self._selected_project_id()
         if not project_id:
@@ -2096,14 +2273,11 @@ class MainWindow(QMainWindow):
         return get_project_access_token(project_id)
 
     # -------------------------------------------------- service control
-    def _toggle_selected_service(self) -> None:
-        root = self._selected_root()
-        if root:
-            self._toggle_service_for(root)
-
     def _toggle_service_for(self, project_root: str) -> None:
         project = self.pm.by_root(project_root)
         if project is None:
+            return
+        if self._is_project_busy(project.id):
             return
         self._select_root(project.root_path)
         self._apply_selected_project()
@@ -2161,9 +2335,14 @@ class MainWindow(QMainWindow):
         remember_project_tunnel_token(project.id, value)
         self._tunnel_token_default = value.strip()
 
-    def _require_start_confirmations(self) -> bool:
-        """True when the user declined a mandatory warning."""
-        if self._selected_permission_mode() == "system" and (
+    def _require_start_confirmations(self, projects: list[ProjectConfig] | None = None) -> bool:
+        """True when the user declined a mandatory full-system warning."""
+        needs_system = (
+            any(project.permission_mode == "system" for project in projects)
+            if projects is not None
+            else self._selected_permission_mode() == "system"
+        )
+        if needs_system and (
             not self._app_config.first_system_risk_accepted
             or not self._app_config.full_system_risk_accepted
         ):
@@ -2184,6 +2363,42 @@ class MainWindow(QMainWindow):
     def _save_git_settings(self) -> None:
         if self._save_project_settings(show_errors=True):
             self._append_log("Git 参数已保存。")
+
+    def _save_settings_for_all_projects(self) -> None:
+        projects = self.pm.list()
+        source = self._project_config()
+        if source is None or not projects:
+            QMessageBox.warning(self, "没有项目", "请先添加并选择一个项目。")
+            return
+        active = [
+            project
+            for project in projects
+            if self._is_project_busy(project.id)
+            or self._project_state(project) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
+        ]
+        if active or self.coord.running:
+            QMessageBox.warning(self, "项目正在运行", "请先停止所有项目，再批量保存连接与权限设置。")
+            return
+        if not self._save_project_settings(show_errors=True):
+            return
+        source = self.pm.get(source.id) or source
+        tunnel_token = self._tunnel_token_value() or ""
+        for project in self.pm.list():
+            target = self.pm.get(project.id) or project
+            target.permission_mode = source.permission_mode
+            target.client_target = source.client_target
+            target.connection = source.connection
+            target.public_hostname = source.public_hostname
+            target.windows_enabled = source.windows_enabled
+            target.gemini_redirect_uri = source.gemini_redirect_uri
+            self.pm.update(target)
+            if tunnel_token:
+                remember_project_tunnel_token(target.id, tunnel_token)
+            else:
+                clear_project_tunnel_token(target.id)
+        self._append_log(f"已将连接与权限设置保存到 {len(projects)} 个项目。")
+        QMessageBox.information(self, "批量保存完成", f"连接与权限已同步到 {len(projects)} 个项目。")
+        self._refresh_project_list()
 
     def _save_project_settings(
         self,
@@ -2489,9 +2704,6 @@ class MainWindow(QMainWindow):
         selected_unit = self.pm.unit(selected.id) if selected is not None else None
         state = self._project_state(selected)
         busy = self._is_project_busy(selected.id) if selected is not None else False
-        if selected is not None and state in (EngineState.IDLE, EngineState.READY, EngineState.ERROR):
-            self._busy_project_ids.discard(selected.id)
-            busy = False
         is_entry = bool(
             selected is not None
             and self._service_root
@@ -2507,14 +2719,6 @@ class MainWindow(QMainWindow):
                 EngineState.STOPPING: "正在停止",
             }.get(state, state.value)
             self.status_label.setText(f"状态：{friendly_state}")
-        self.start_btn.setText("停止服务" if state == EngineState.READY else "启动服务")
-        if state == EngineState.STARTING:
-            self.start_btn.setText("启动中…")
-        elif state == EngineState.STOPPING:
-            self.start_btn.setText("停止中…")
-        self.start_btn.setEnabled(
-            selected is not None and state not in (EngineState.STARTING, EngineState.STOPPING)
-        )
         self.add_project_btn.setEnabled(True)
         self.remove_project_btn.setEnabled(
             selected is not None and not busy and state in (EngineState.IDLE, EngineState.ERROR)
@@ -2532,6 +2736,13 @@ class MainWindow(QMainWindow):
             self.bridge_check,
         ):
             widget.setEnabled(editable)
+        all_settings_editable = bool(
+            editable
+            and not self._has_active_projects()
+            and not any(self._is_project_busy(project.id) for project in self.pm.list())
+        )
+        self.save_all_project_settings_btn.setEnabled(all_settings_editable)
+        self._sync_all_projects_button()
         self._sync_connection_fields()
         if is_entry:
             components = self.coord.component_states()
