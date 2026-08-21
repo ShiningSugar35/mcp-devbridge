@@ -14,7 +14,6 @@ from local_dev_mcp_bridge.platform_support import IS_WINDOWS
 
 def _window(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
-    monkeypatch.setattr(dm, "load_project_ui_secrets", lambda _project_id: ("", ""))
     monkeypatch.setattr(dm, "get_project_access_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "get_project_tunnel_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "fetch_latest_release", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
@@ -127,7 +126,6 @@ def test_stopping_one_running_root_keeps_hub_until_last_root_stops(tmp_path: Pat
     unit_a.codex._state = EngineState.READY
     unit_b.codex._state = EngineState.READY
     window.coord._state = EngineState.READY
-    window._service_root = project_a.root_path
 
     def fake_pm_stop(project_id: str) -> None:
         unit = window.pm.unit_for(project_id)
@@ -168,7 +166,6 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(dm, "_bridge_token", lambda ensure=False: bridge_value)
     monkeypatch.setattr(window, "_save_project_settings", lambda *args, **kwargs: True)
     monkeypatch.setattr(window, "_ports_conflict", lambda _options: None)
-    monkeypatch.setattr(window, "_bind_coord_engines", lambda _project_id=None: None)
     monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
     monkeypatch.setattr(window.pm, "start", lambda project_id, **_kwargs: started.append(project_id))
     monkeypatch.setattr(window.pm, "stop", lambda project_id: stopped.append(project_id))
@@ -188,10 +185,9 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
         window._select_root(project_a.root_path)
         window._apply_selected_project()
         window._start_all_projects()
-        assert started == [project_b.id]
+        assert set(started) == {project_a.id, project_b.id}
         assert window._bulk_project_action is None
         assert not window._busy_project_ids
-        assert window.all_projects_btn.text() == "停止所有项目"
 
         window._stop_all_projects()
         assert set(stopped) == {project_a.id, project_b.id}

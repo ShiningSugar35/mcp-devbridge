@@ -23,7 +23,6 @@ def test_update_version_helpers_and_bundled_script() -> None:
 
 def test_ready_project_stop_button_waits_for_async_busy_release(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
-    monkeypatch.setattr(dm, "load_project_ui_secrets", lambda _project_id: ("", ""))
     monkeypatch.setattr(dm, "get_project_access_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "get_project_tunnel_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "fetch_latest_release", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
@@ -63,7 +62,6 @@ def test_ready_project_stop_button_waits_for_async_busy_release(tmp_path: Path, 
 
 def test_update_button_hidden_until_new_release(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
-    monkeypatch.setattr(dm, "load_project_ui_secrets", lambda _project_id: ("", ""))
     monkeypatch.setattr(dm, "get_project_access_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "get_project_tunnel_token", lambda _project_id: None)
     app = QApplication.instance() or QApplication([])

@@ -27,28 +27,28 @@ class _MemoryStore:
         self.values.pop(key, None)
 
 
-def test_live_upgrade_script_snapshots_all_listening_project_roots() -> None:
+def test_live_upgrade_script_snapshots_equal_running_roots_and_shared_gateway() -> None:
     script = (Path(__file__).resolve().parents[1] / "scripts" / "live_upgrade.ps1").read_text(
         encoding="utf-8-sig"
     )
     assert "resume_project_roots" in script
     assert "$resumeProjectRoots" in script
     assert "Test-LoopbackPort -Port $candidatePort" in script
-    assert "project_roots = @($request.resume_project_roots)" in script
+    assert "project_roots = @($resumeRoots)" in script
+    assert "Get-ExpectedPort" in script
+    assert "$global.gateway_port" in script
+    assert "$project.gateway_port" not in script
+    assert "public entry project" not in script
     assert "install_dir = $currentInstallDir" in script
     assert '/DIR="{0}"' in script
     assert 'Join-Path $installDir "MCPDevBridge.exe"' in script
 
 
-def test_upgrade_resume_restores_entry_and_additional_projects(
-    tmp_path: Path, monkeypatch,
-) -> None:
+def test_upgrade_resume_restores_all_roots_without_entry_owner(tmp_path: Path, monkeypatch) -> None:
     _MemoryStore.values = {}
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setattr(dm, "SecretsStore", _MemoryStore)
     monkeypatch.setattr(device_hub, "SecretsStore", _MemoryStore)
-    monkeypatch.setattr(dm, "load_project_ui_secrets", lambda _project_id: ("", ""))
-    monkeypatch.setattr(dm, "get_project_access_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "get_project_tunnel_token", lambda _project_id: None)
 
     root_a = tmp_path / "project-a"
@@ -61,36 +61,24 @@ def test_upgrade_resume_restores_entry_and_additional_projects(
 
     app = QApplication.instance() or QApplication([])
     window = dm.MainWindow()
-    calls: list[tuple[str, str]] = []
+    calls: list[str] = []
     try:
         window._app_config.first_system_risk_accepted = True
         window._app_config.full_system_risk_accepted = True
-        monkeypatch.setattr(
-            window,
-            "_start_service",
-            lambda: calls.append(("entry", window._selected_root())),
-        )
-        monkeypatch.setattr(
-            window,
-            "_start_project_engine_for",
-            lambda project: calls.append(("extra", project.root_path)),
-        )
+        monkeypatch.setattr(window, "_start_project_engine_for", lambda project: calls.append(project.root_path))
         request = constants.config_dir() / "upgrade-resume.json"
         request.parent.mkdir(parents=True, exist_ok=True)
         request.write_text(
-            json.dumps(
-                {
-                    "project_root": project_a.root_path,
-                    "project_roots": [project_a.root_path, project_b.root_path],
-                }
-            ),
+            json.dumps({"project_roots": [project_a.root_path, project_b.root_path]}),
             encoding="utf-8",
         )
 
         window._resume_upgrade_if_requested()
 
-        assert calls[0] == ("entry", project_a.root_path)
-        assert ("extra", project_b.root_path) in calls
+        assert set(calls) == {project_a.root_path, project_b.root_path}
+        assert len(calls) == 2
+        assert not hasattr(window, "_service_root")
+        assert not hasattr(window, "_start_service")
         assert not request.exists()
     finally:
         window._force_exit = True

@@ -2,7 +2,7 @@
 
 ## Supported environments
 
-| Item | Current v0.8.2 support |
+| Item | Current v0.8.3 support |
 |---|---|
 | Windows | Windows 10/11 x64 desktop release; PowerShell 5.1+ is supported. |
 | Linux | x86_64 desktop build and user-level installer; release CI/build baseline is Ubuntu 22.04. |
@@ -69,3 +69,8 @@ Device routing and active-root routing are independent. After a remote device is
 ## Release-build compatibility note
 
 PyInstaller Linux artifacts should be built on a sufficiently old supported Linux baseline because the frozen bundle does not make glibc backward-compatible. The release workflow therefore uses Ubuntu 22.04 rather than an arbitrarily newer runner image.
+
+
+## Shared local/public routing
+
+Local and public connections use the same shared Gateway routing semantics. Local skips only the public Tunnel; it does not bind the client to one project port. The Gateway port belongs to AppConfig/Hub rather than ProjectConfig.

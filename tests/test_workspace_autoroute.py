@@ -370,3 +370,49 @@ def test_gateway_routes_codexpro_supertool_by_nested_absolute_path(
     )
     assert response.status_code == 200, response.text
     assert routed_ports == [19001]
+
+
+def test_single_hub_session_routes_two_equal_roots_without_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One Hub bearer/session can alternate roots without an entry/current project."""
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg-no-entry"))
+    root_a = tmp_path / "root-a"
+    root_b = tmp_path / "root-b"
+    root_a.mkdir()
+    root_b.mkdir()
+    target_a = root_a / "a.txt"
+    target_b = root_b / "b.txt"
+    target_a.write_text("a", encoding="utf-8")
+    target_b.write_text("b", encoding="utf-8")
+    gateway = _gateway_for_roots(tmp_path, {"a": root_a, "b": root_b})
+    routed_ports: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        routed_ports.append(urlparse(str(request.url)).port or 0)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"content": []}})
+
+    gateway._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TestClient(gateway.app, raise_server_exceptions=False)
+    headers = {
+        "Authorization": "Bearer hub-credential",
+        "Content-Type": "application/json",
+        "mcp-session-id": "one-hub-session",
+    }
+    for request_id, target in ((1, target_a), (2, target_b), (3, target_a)):
+        response = client.post(
+            "/mcp",
+            content=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": "read", "arguments": {"path": str(target)}},
+                }
+            ),
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+
+    assert routed_ports == [19000, 19001, 19000]
+    assert "one-hub-session" not in gateway._session_workspaces

@@ -211,7 +211,7 @@ class TestMCPIntegration:
                     ClientSession(streams_b[0], streams_b[1]) as session_b,
                 ):
                     await session_b.initialize()
-                    # 两个会话默认都绑到入口项目 A
+                    # 该底层引擎测试的两个会话都从引擎本地默认根 A 开始；Hub 层不存在入口项目
                     ra = await _mcp_call(session_a, "list_directory", {"path": "."})
                     rb = await _mcp_call(session_b, "list_directory", {"path": "."})
                     assert "marker_A.txt" in ra["text"]

@@ -14,7 +14,6 @@ import local_dev_mcp_bridge.desktop_main as dm
 
 def _window(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
-    monkeypatch.setattr(dm, "load_project_ui_secrets", lambda _project_id: ("", ""))
     monkeypatch.setattr(dm, "get_project_access_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "get_project_tunnel_token", lambda _project_id: None)
     first = tmp_path / "first"
@@ -56,7 +55,6 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
         unit_a = window.pm.unit_for(project_a.id)
         assert unit_a is not None
         unit_a.codex._state = dm.EngineState.READY
-        window._service_root = project_a.root_path
         window.coord._state = dm.EngineState.READY
         window._refresh_project_list()
 

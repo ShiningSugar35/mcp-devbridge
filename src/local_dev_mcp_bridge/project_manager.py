@@ -10,7 +10,7 @@ Architecture (多项目并行开发):
   "Workspace root is outside allowed roots" failure.
 * ``ProjectManager`` owns the catalog (``projects.json`` via ``config_store``),
   the running units and port allocation. ``enabled`` is retained for config/API
-  compatibility; v0.8.2 desktop routing treats every running unit as active.
+  compatibility; v0.8.3 desktop routing treats every running unit as active.
 * Pure Python (no Qt) so the whole lifecycle is unit-testable.
 """
 
@@ -52,7 +52,6 @@ class ProjectView:
     root_path: str
     codexpro_port: int
     windows_bridge_port: int
-    gateway_port: int
     enabled: bool
     windows_enabled: bool
     state: str
@@ -177,7 +176,7 @@ class ProjectManager:
 
     # ------------------------------------------------------------- catalog
     def list(self) -> list[ProjectConfig]:
-        """Loaded projects with ids/all per-project ports backfilled and persisted."""
+        """Loaded projects with ids/per-project engine ports backfilled and persisted."""
         projects = load_projects()
         changed = False
         for index, project in enumerate(projects):
@@ -189,7 +188,7 @@ class ProjectManager:
                 root = Path(project.root_path).expanduser()
                 project.display_name = root.name or root.drive or str(root)
                 changed = True
-            if not project.codexpro_port or not project.windows_bridge_port or not project.gateway_port:
+            if not project.codexpro_port or not project.windows_bridge_port:
                 assign_project_ports(projects, index=index)
                 changed = True
         if changed:
@@ -269,13 +268,12 @@ class ProjectManager:
         )
         if idx is None:
             return
-        if not project.codexpro_port or not project.windows_bridge_port or not project.gateway_port:
+        if not project.codexpro_port or not project.windows_bridge_port:
             assign_project_ports(projects, index=idx)
             save_projects(projects)
             migrated = projects[idx]
             project.codexpro_port = migrated.codexpro_port
             project.windows_bridge_port = migrated.windows_bridge_port
-            project.gateway_port = migrated.gateway_port
 
     # --------------------------------------------------------------- units
     def unit(self, project_id: str) -> ProjectUnit | None:
@@ -396,7 +394,6 @@ class ProjectManager:
             root_path=project.root_path,
             codexpro_port=project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT,
             windows_bridge_port=project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT,
-            gateway_port=project.gateway_port or constants.DEFAULT_GATEWAY_PORT,
             enabled=project.enabled,
             windows_enabled=project.windows_enabled,
             state=state.value,

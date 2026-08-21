@@ -2,11 +2,11 @@
 
 > 让 ChatGPT、Gemini 等支持 MCP 的客户端安全连接本机开发目录，并在多个运行根之间按路径自动路由。
 
-MCP DevBridge 是一款 PySide6 桌面桥接工具。Windows 10/11 是主要发行平台；v0.8.2 同时提供 Linux / SteamOS Desktop Mode 的构建、用户目录安装和升级链。
+MCP DevBridge 是一款 PySide6 桌面桥接工具。Windows 10/11 是主要发行平台；v0.8.3 同时提供 Linux / SteamOS Desktop Mode 的构建、用户目录安装和升级链。
 
 它**不提供模型推理，也不调用 OpenAI / Gemini 模型 API**。客户端是否允许写入、是否需要额外确认，以及相关额度/套餐限制，仍由对应平台决定。
 
-## v0.8.2 的核心变化
+## v0.8.3 的核心变化
 
 ### 所有运行根同时 active
 
@@ -41,16 +41,18 @@ D:\meme
 
 路径安全没有因为自动路由而放松：`..`、symlink/junction 逃逸和本地工具越界 `cwd` 都会被拒绝；根盘扫描遇到无权限目录会跳过并返回 warning，而不是让整次扫描失败。
 
+Hub 本身只有一个全局 Gateway 端口和一个客户端访问 Bearer；每个项目只保留自己的内部 CodexPro / Windows-MCP 端口与上游凭据。旧配置中的 per-project gateway_port 会被兼容读取后忽略，不再形成入口端口。
+
 ### 多根 Hub 生命周期
 
-公网模式下 Gateway/Tunnel 是共享 Hub 连接。桌面可能借一个运行项目完成首次编排，但该项目没有额外路由权限。
+Gateway/Tunnel 是独立于项目的共享 Hub 连接。Hub 启停不再绑定任何项目根、项目端口或项目 Bearer；项目只负责自己的 CodexPro/Windows 内部引擎。
 
 - 停止一个运行根：只停止该根的 ProjectUnit，其它运行根和 Hub 保持可用。
 - 停止最后一个运行根：再关闭共享 Gateway/Tunnel。
 - “启动所有项目 / 停止所有项目”用于批量生命周期控制。
 - 项目表只保留：名称 / 路径 / 状态 / 端口 / 操作。
 
-> `Local` 模式为了向后兼容仍直接连接所选 CodexPro loopback，不经过公网 Hub Gateway；需要“一个客户端地址跨多个根自动路由”时，应使用 Gateway/Hub 路径。
+> `Local` 模式同样经过共享 loopback Gateway，只是不建立公网 Tunnel。无论 Local 还是公网模式，一个客户端地址都可以在所有 READY 根之间按 path/cwd/task 自动路由，不需要先选入口项目。
 
 ## 架构概览
 
@@ -79,10 +81,10 @@ CodexPro 提供文件、Git、Shell、异步任务、代码分析等开发工具
 从 GitHub Release 下载：
 
 ```text
-MCPDevBridge-Setup-0.8.2.exe
+MCPDevBridge-Setup-0.8.3.exe
 ```
 
-安装器为 per-user 安装，不要求管理员权限。v0.8.2 显式保留安装目录选择页，用户可以安装到默认目录，也可以选择其它目录。
+安装器为 per-user 安装，不要求管理员权限。v0.8.3 显式保留安装目录选择页，用户可以安装到默认目录，也可以选择其它目录。
 
 正式包自带固定版本的 Node.js、uv/uvx 和 cloudflared 私有运行时，不要求把这些工具安装到系统 PATH。可选 Windows-MCP 仍由内置 uvx 按锁定版本首次获取。
 
@@ -100,13 +102,13 @@ MCPDevBridge-Setup-0.8.2.exe
 GitHub Release 提供：
 
 ```text
-MCPDevBridge-Linux-x86_64-0.8.2.tar.gz
+MCPDevBridge-Linux-x86_64-0.8.3.tar.gz
 ```
 
 解压后执行：
 
 ```bash
-tar -xzf MCPDevBridge-Linux-x86_64-0.8.2.tar.gz
+tar -xzf MCPDevBridge-Linux-x86_64-0.8.3.tar.gz
 cd MCPDevBridge
 ./install.sh
 ```
@@ -134,7 +136,7 @@ SteamOS 建议在 Desktop Mode 使用用户目录安装，不改写只读系统�
 | Cloudflare Named Tunnel | 固定域名，公网长期地址 | 主 Hub / 长期使用 |
 | ngrok 固定域名 | 固定 ngrok hostname | 已有 ngrok reserved domain |
 | Quick Tunnel | 随机 `trycloudflare.com`，重建会变化 | 临时测试 / 远端设备回传 |
-| Local | 仅 loopback，直连所选 CodexPro | 本机单引擎开发 |
+| Local | 仅 loopback，共享 Gateway，多根自动路由 | 本机开发 / 无公网暴露 |
 
 所有公网模式都终止在 Gateway；CodexPro、Gateway、Windows 桥本身只监听 loopback。
 
@@ -191,13 +193,13 @@ npm run smoke
 完整 Windows 发布构建：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.2
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.3
 ```
 
 产物：
 
 ```text
-release/MCPDevBridge-Setup-0.8.2.exe
+release/MCPDevBridge-Setup-0.8.3.exe
 ```
 
 ### Linux build host
@@ -206,13 +208,13 @@ release/MCPDevBridge-Setup-0.8.2.exe
 uv venv --python 3.12
 uv pip install -p .venv -e '.[dev,package]'
 cd third_party/codexpro && npm ci && npm run build && cd ../..
-bash scripts/build_linux.sh 0.8.2
+bash scripts/build_linux.sh 0.8.3
 ```
 
 产物：
 
 ```text
-release/MCPDevBridge-Linux-x86_64-0.8.2.tar.gz
+release/MCPDevBridge-Linux-x86_64-0.8.3.tar.gz
 ```
 
 CI 的 Linux 构建基线为 Ubuntu 22.04，以避免在过新的 glibc 环境构建后失去对较旧发行环境的兼容性。
@@ -221,13 +223,13 @@ CI 的 Linux 构建基线为 Ubuntu 22.04，以避免在过新的 glibc 环境�
 
 桌面启动后检查 GitHub Release，之后按固定周期检查更新。Windows 使用内置 `live_upgrade.ps1` 做 detached 升级接力；Linux 使用随包提供的 `live_upgrade.sh`。升级接力文件只保存非敏感恢复元数据，真正凭据在新进程启动后从 SecretsStore 重新读取。
 
-当前维护版本：**0.8.2**。`v0.9.x` 远端 tag/历史仍保留，但不属于本维护线，也不会被 v0.8.2 发布覆盖或 force-push。
+当前维护版本：**0.8.3**。`v0.9.x` 远端 tag/历史仍保留，但不属于本维护线，也不会被 v0.8.3 发布覆盖或 force-push。
 
 ## 文档
 
 - `AGENTS.md`：开发/Agent 快速约束。
 - `项目架构.md`：当前架构与数据流。
-- `开发计划.md`：v0.8.2 维护目标和发布门。
+- `开发计划.md`：v0.8.3 维护目标和发布门。
 - `进度验收.md`：当前发布的真实测试/构建/Release 证据。
 - `docs/en/ARCHITECTURE.md`：English architecture.
 - `docs/en/COMPATIBILITY.md`：Windows / Linux / SteamOS compatibility.

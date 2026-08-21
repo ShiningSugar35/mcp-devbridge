@@ -43,31 +43,16 @@ function Test-LoopbackPort {
 }
 
 function Get-ExpectedPort {
-    param([string]$Root)
-    $projectsPath = Join-Path $ConfigDir "projects.json"
     $configPath = Join-Path $ConfigDir "config.json"
-    $project = $null
-    if (Test-Path $projectsPath) {
+    if (Test-Path $configPath) {
         try {
-            $payload = Get-Content -LiteralPath $projectsPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $project = @($payload.projects) | Where-Object { $_.root_path -and ([IO.Path]::GetFullPath($_.root_path).TrimEnd('\') -ieq [IO.Path]::GetFullPath($Root).TrimEnd('\')) } | Select-Object -First 1
+            $global = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($global -and [int]$global.gateway_port -gt 0) { return [int]$global.gateway_port }
         }
         catch { }
     }
-    $global = $null
-    if (Test-Path $configPath) {
-        try { $global = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
-    }
-    if ($project -and $project.connection -eq "local") {
-        if ([int]$project.codexpro_port -gt 0) { return [int]$project.codexpro_port }
-        if ($global -and [int]$global.codexpro_port -gt 0) { return [int]$global.codexpro_port }
-        return 8787
-    }
-    if ($project -and [int]$project.gateway_port -gt 0) { return [int]$project.gateway_port }
-    if ($global -and [int]$global.gateway_port -gt 0) { return [int]$global.gateway_port }
     return 8786
 }
-
 function New-DesktopShortcut {
     param([string]$TargetExe)
     $desktop = [Environment]::GetFolderPath("Desktop")
@@ -118,7 +103,7 @@ if (-not $Worker) {
     }
     if ($FallbackExe) { $FallbackExe = [IO.Path]::GetFullPath($FallbackExe) }
 
-    # Preserve every currently-running project engine, not only the public entry project.
+    # Preserve every currently-running project engine. No project is a Hub entry/owner.
     # Each additional project has its own CodexPro port and can be restored independently
     # after the desktop process tree is replaced by the installer.
     $resumeProjectRoots = @()
@@ -141,13 +126,9 @@ if (-not $Worker) {
             Write-UpgradeLog "Unable to snapshot additional running projects: $($_.Exception.Message)"
         }
     }
-    if ($ProjectRoot -and $resumeProjectRoots -notcontains $ProjectRoot) {
-        $resumeProjectRoots = @($ProjectRoot) + @($resumeProjectRoots)
-    }
 
     $request = [ordered]@{
         installer_path = $InstallerPath
-        project_root = $ProjectRoot
         resume_project_roots = @($resumeProjectRoots)
         old_pid = $OldPid
         fallback_exe = $FallbackExe
@@ -204,18 +185,17 @@ try {
     $installDir = [string]$request.install_dir
     if ($installDir) { $installDir = [IO.Path]::GetFullPath($installDir) }
     $resumePath = Join-Path $ConfigDir "upgrade-resume.json"
-    if ($projectRoot) {
+    $resumeRoots = @($request.resume_project_roots)
+    if ($resumeRoots.Count -gt 0) {
         Write-JsonAtomic -Path $resumePath -Value ([ordered]@{
-            project_root = $projectRoot
-            project_roots = @($request.resume_project_roots)
+            project_roots = @($resumeRoots)
             requested_at = (Get-Date).ToString("o")
         })
-        Write-UpgradeLog "Resume request written for project: $projectRoot"
+        Write-UpgradeLog "Resume request written for $($resumeRoots.Count) equal running roots."
     } else {
         Remove-Item -LiteralPath $resumePath -Force -ErrorAction SilentlyContinue
-        Write-UpgradeLog "No active project; update will restart the desktop without restoring a service."
+        Write-UpgradeLog "No running project roots; update will restart only the desktop."
     }
-
     Start-Sleep -Seconds 2
     $oldProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -ieq "MCPDevBridge.exe" }
@@ -267,11 +247,11 @@ try {
             Write-UpgradeLog "New MCP DevBridge exited early: $($newProcess.ExitCode)"
             break
         }
-        if (-not $projectRoot) {
+        if ($resumeRoots.Count -eq 0) {
             $ready = $true
             break
         }
-        $expectedPort = Get-ExpectedPort -Root $projectRoot
+        $expectedPort = Get-ExpectedPort
         if (Test-LoopbackPort -Port $expectedPort) {
             $ready = $true
             break

@@ -32,7 +32,6 @@ def _window(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setattr(dm, "SecretsStore", MemoryStore)
     monkeypatch.setattr(device_hub, "SecretsStore", MemoryStore)
-    monkeypatch.setattr(dm, "load_project_ui_secrets", lambda _project_id: ("", ""))
     monkeypatch.setattr(dm, "get_project_access_token", lambda _project_id: None)
     monkeypatch.setattr(dm, "get_project_tunnel_token", lambda _project_id: None)
     project_root = tmp_path / "project"

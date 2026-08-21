@@ -1,8 +1,8 @@
-﻿"""Multi-session workspace switching on the tools layer.
+"""Multi-session workspace switching on the tools layer.
 
 Two sessions (``mcp-session-id`` headers) operate on two different projects in
 the same backend process; sessions never leak into each other, and requests
-without a session id keep the default (entry) project.
+without a session id keep the engine-local default root.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def test_session_key_parsing() -> None:
     ) == "s3"
 
 
-def test_default_session_uses_entry_project(tools: tuple[LocalDevTools, Path, Path]) -> None:
+def test_default_session_uses_engine_default_root(tools: tuple[LocalDevTools, Path, Path]) -> None:
     dev, dir_a, _dir_b = tools
     listing = dev.list_directory("")
 

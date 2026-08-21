@@ -180,23 +180,22 @@ class TestPortInUseDetection:
 
 
 class TestCoordinatorPorts:
-    def test_start_options_defaults(self) -> None:
+    def test_start_options_defaults_to_shared_gateway_only(self) -> None:
         from local_dev_mcp_bridge.app_state import StartOptions
 
-        opts = StartOptions(project_root="C:/proj")
+        opts = StartOptions()
         assert opts.gateway_port == constants.DEFAULT_GATEWAY_PORT
-        assert opts.codexpro_port == constants.DEFAULT_CODEXPRO_PORT
-        assert opts.windows_mcp_port == constants.DEFAULT_WINDOWS_MCP_PORT
+        assert not hasattr(opts, "codexpro_port")
+        assert not hasattr(opts, "windows_mcp_port")
+        assert not hasattr(opts, "project_root")
 
-    def test_start_options_custom_ports_respected(self) -> None:
+    def test_start_options_custom_gateway_port_respected(self) -> None:
         from local_dev_mcp_bridge.app_state import StartOptions
 
-        opts = StartOptions(project_root="C:/proj", gateway_port=9990, codexpro_port=9991, windows_mcp_port=9992)
+        opts = StartOptions(gateway_port=9990)
         assert opts.gateway_port == 9990
-        assert opts.codexpro_port == 9991
-        assert opts.windows_mcp_port == 9992
 
-    def test_engine_port_check_blocks_occupied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_shared_gateway_port_check_blocks_occupied(self) -> None:
         from local_dev_mcp_bridge.app_state import ServiceCoordinator, StartOptions
         from local_dev_mcp_bridge.engines import SpawnError
 
@@ -204,29 +203,10 @@ class TestCoordinatorPorts:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         occupied = listener.getsockname()[1]
-
-        class FakeManager:
-            state = None
-            is_running = False
-            port = occupied
-            error = None
-
-            def start(self, *a, **k):
-                raise AssertionError("pre-check must block before start")
-
-            def stop(self):
-                pass
-
-            def wait_ready(self) -> bool:
-                return True
-
-        coord = ServiceCoordinator(  # type: ignore[reportArgumentType]
-            codex=FakeManager(), windows=FakeManager(), tunnel=FakeManager()  # type: ignore[reportArgumentType]
-        )
+        coord = ServiceCoordinator()
         try:
-            opts = StartOptions(project_root="C:/proj", codex_token="t" * 32, codexpro_port=occupied)
             with pytest.raises(SpawnError):
-                coord.start(opts)
+                coord.start(StartOptions(gateway_port=occupied))
             assert coord.running is False
         finally:
             listener.close()

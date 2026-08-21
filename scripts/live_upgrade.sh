@@ -41,7 +41,7 @@ if [[ -f "$CONFIG_DIR/projects.json" ]]; then
   "$NODE" - "$CONFIG_DIR/projects.json" "$CONFIG_DIR/upgrade-resume.json" "$PROJECT_ROOT" <<'NODEJS' || true
 const fs = require("fs");
 const net = require("net");
-const [projectsPath, outPath, requestedRoot] = process.argv.slice(2);
+const [projectsPath, outPath] = process.argv.slice(2);
 let payload = {};
 try { payload = JSON.parse(fs.readFileSync(projectsPath, "utf8")); } catch (_) {}
 const projects = Array.isArray(payload.projects) ? payload.projects : [];
@@ -61,17 +61,8 @@ function listening(port) {
   for (const project of projects) {
     if (await listening(project.codexpro_port)) roots.push(String(project.root_path || ""));
   }
-  const requested = String(requestedRoot || "");
-  if (requested && !roots.includes(requested)) roots.unshift(requested);
-  const primary = requested || roots[0] || "";
-  if (primary) fs.writeFileSync(outPath, JSON.stringify({project_root: primary, project_roots: roots}, null, 2));
+  if (roots.length) fs.writeFileSync(outPath, JSON.stringify({project_roots: roots}, null, 2));
 })();
-NODEJS
-elif [[ -n "$PROJECT_ROOT" ]]; then
-  "$NODE" - "$CONFIG_DIR/upgrade-resume.json" "$PROJECT_ROOT" <<'NODEJS'
-const fs = require("fs");
-const [outPath, root] = process.argv.slice(2);
-fs.writeFileSync(outPath, JSON.stringify({project_root: root, project_roots: [root]}, null, 2));
 NODEJS
 fi
 
@@ -102,19 +93,12 @@ bash "$SOURCE/install.sh" "${install_args[@]}"
 nohup "$TARGET_DIR/MCPDevBridge" >/dev/null 2>&1 &
 NEW_PID=$!
 
-EXPECTED_PORT="$("$NODE" - "$CONFIG_DIR/projects.json" "$CONFIG_DIR/upgrade-resume.json" <<'NODEJS'
+EXPECTED_PORT="$("$NODE" - "$CONFIG_DIR/config.json" <<'NODEJS'
 const fs = require("fs");
-const path = require("path");
-const [projectsPath, resumePath] = process.argv.slice(2);
-let projects = {}; let resume = {};
-try { projects = JSON.parse(fs.readFileSync(projectsPath, "utf8")); } catch (_) {}
-try { resume = JSON.parse(fs.readFileSync(resumePath, "utf8")); } catch (_) {}
-const root = String(resume.project_root || "");
-const rows = Array.isArray(projects.projects) ? projects.projects : [];
-const match = rows.find((p) => root && path.resolve(String(p.root_path || "")) === path.resolve(root));
-if (!match) process.stdout.write("0");
-else if (String(match.connection || "") === "local") process.stdout.write(String(Number(match.codexpro_port) || 8787));
-else process.stdout.write(String(Number(match.gateway_port) || 8786));
+const [configPath] = process.argv.slice(2);
+let config = {};
+try { config = JSON.parse(fs.readFileSync(configPath, "utf8")); } catch (_) {}
+process.stdout.write(String(Number(config.gateway_port) || 8786));
 NODEJS
 )"
 

@@ -1,4 +1,4 @@
-"""OAuth gateway: public entry terminated by the Cloudflare Named Tunnel.
+"""Shared OAuth/MCP Hub gateway; public modes terminate at the configured tunnel.
 
 Listens on loopback only (``127.0.0.1:GATEWAY_PORT``). The Cloudflare route
 for ``mcp.<domain>`` points at this app (instead of the engine), so the same
@@ -710,34 +710,6 @@ class OAuthGateway:
         cid = html.escape(request.query_params.get("id", ""))
         return HTMLResponse(_PAGE.format(rows="".join(rows), cid=cid))
 
-    def _build_workspace_options(self) -> str:
-        """Build <option> tags for available projects (for consent page dropdown)."""
-        if self._workspace_registry is None:
-            options = ['<option value="">（当前激活项目）</option>']
-        else:
-            options = ['<option value="" selected disabled>（请选择一个运行中的项目）</option>']
-        if self._workspace_registry is not None:
-            try:
-                from .config_store import load_projects
-
-                projects = load_projects()
-                for p in projects:
-                    if p.id:
-                        port = ""
-                        info = self._workspace_registry(p.id)
-                        if info:
-                            port = f"（运行中 :{info[0]}）"
-                        selected = ""
-                        name = p.display_name or Path(p.root_path).name
-                        options.append(
-                            f'<option value="{html.escape(p.id)}" {selected}>'
-                            f"{html.escape(name)} - {html.escape(p.root_path)}{html.escape(port)}"
-                            f"</option>"
-                        )
-            except Exception:
-                pass
-        return "\n".join(options)
-
     async def _consent_submit(self, request: Request) -> Response:
         form = await request.form()
         consent_id = str(form.get("id", ""))
@@ -1339,7 +1311,7 @@ class OAuthGateway:
         return (
             f"已切换到电脑：{target.name}\n"
             f"后续工具调用请携带 {_ROUTE_DEVICE_ARG}={device_id}；这不依赖底层 MCP transport session。\n"
-            "该电脑会自动选择唯一运行的工作区；有多个时可继续切换工作区。"
+            "该电脑内部会按 path/cwd/task 自动路由；显式工作区切换只作为兼容覆盖。"
         )
 
     def _audit_gateway_tool(
@@ -1804,11 +1776,11 @@ class OAuthGateway:
         )
 
     def _effective_workspace(self, token_workspace: str, session_id: str, *, pinned: bool = False) -> str:
-        """Resolve a workspace without binding OAuth identity to one project.
+        """Resolve one upstream for this call without creating an implicit entry root.
 
-        Direct per-project Bearer credentials remain pinned for backward compatibility.
-        OAuth sessions can target any running root. With no explicit routing evidence,
-        a deterministic running root supplies the bootstrap fallback.
+        Only an explicit compatibility switch is persisted in ``_session_workspaces``.
+        Automatic schema/bootstrap fallback is deterministic but stateless, so path,
+        cwd, task and opaque workspace-handle evidence remain free to route every call.
         """
         if pinned and token_workspace:
             return token_workspace
@@ -1820,16 +1792,10 @@ class OAuthGateway:
             if selected and selected not in running and session_id:
                 self._session_workspaces.pop(session_id, None)
         if token_workspace and (not running or token_workspace in running):
-            chosen = token_workspace
-        elif len(running) == 1:
-            chosen = running[0]
-        else:
-            chosen = self._stable_workspace_id(running)
-        if chosen and session_id:
-            with self._session_lock:
-                self._session_workspaces[session_id] = chosen
-        return chosen
-
+            return token_workspace
+        if len(running) == 1:
+            return running[0]
+        return self._stable_workspace_id(running)
     def _list_workspaces(self) -> str:
         """Build a text report of all registered projects with status."""
         lines = ["已注册的工作区：", ""]
@@ -1854,13 +1820,24 @@ class OAuthGateway:
         return "\n".join(lines)
 
     def _get_current_workspace(self, workspace_id: str, session_id: str) -> str:
-        """Return the current session workspace, applying automatic selection."""
-        effective = self._effective_workspace(workspace_id, session_id)
-        if not effective:
-            return "当前没有运行中的工作区。请先在 MCP DevBridge 桌面启动一个项目服务。"
-        root = str(self._resolve_workspace_path(effective) or "未知")
-        return f"当前工作区：id={effective}\n路径：{root}"
-
+        """Report explicit compatibility override state, not a fabricated entry root."""
+        running = self._running_workspace_ids()
+        with self._session_lock:
+            selected = self._session_workspaces.get(session_id, "") if session_id else ""
+        explicit = selected
+        if explicit and explicit in running:
+            root = str(self._resolve_workspace_path(explicit) or "未知")
+            return (
+                f"当前存在显式工作区覆盖：id={explicit}\n路径：{root}\n"
+                "这是兼容覆盖；带 path/cwd/task 的调用仍按更强证据自动路由。"
+            )
+        if not running:
+            return "当前没有运行中的工作区。请先在 MCP DevBridge 桌面启动一个或多个项目。"
+        roots = [str(self._resolve_workspace_path(project_id) or project_id) for project_id in running]
+        return (
+            "当前会话未固定工作区；所有运行根平等参与自动路由。\n"
+            + "\n".join(f"- {root}" for root in roots)
+        )
     def _do_switch_workspace(self, project_id: str, session_id: str) -> str:
         """Switch the current session's workspace binding."""
         # Verify the project exists

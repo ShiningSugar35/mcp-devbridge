@@ -1,8 +1,8 @@
 # Security
 
-## v0.8.2 security model
+## v0.8.3 security model
 
-MCP DevBridge intentionally grants a remote MCP client powerful local-development capabilities. v0.8.2 expands routing across multiple simultaneously-running roots, but that routing layer does not expand the filesystem boundary beyond roots the user explicitly started.
+MCP DevBridge intentionally grants a remote MCP client powerful local-development capabilities. v0.8.3 expands routing across multiple simultaneously-running roots, but that routing layer does not expand the filesystem boundary beyond roots the user explicitly started.
 
 ## Network boundary
 
@@ -81,7 +81,7 @@ Gateway comparisons for compatible Bearer authentication use timing-safe equalit
 
 ## OAuth Hub model
 
-v0.8.2 OAuth authorizes the Hub. The browser consent page does not require selecting an “entry project”. After authorization, the concrete active root is selected from the actual tool call’s routing evidence and the Gateway swaps to that project’s upstream credential for the proxied request.
+v0.8.3 OAuth authorizes the Hub. The browser consent page does not require selecting an “entry project”. After authorization, the concrete active root is selected from the actual tool call’s routing evidence and the Gateway swaps to that project’s upstream credential for the proxied request.
 
 Legacy per-project Bearer behavior may remain for compatibility. It must not become a hidden routing fence for a normal Hub OAuth session.
 
@@ -105,4 +105,9 @@ Linux/SteamOS installs are user-level. `install.sh` canonicalizes custom target 
 
 Relative `XDG_CONFIG_HOME` / `XDG_DATA_HOME` values are treated as invalid rather than being used as attacker-controlled relative filesystem roots.
 
-Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.2 maintenance release.
+Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.3 maintenance release.
+
+
+## Hub credential isolation
+
+The client-facing Hub bearer is global to the shared Gateway. Project access values authenticate Gateway-to-CodexPro upstream hops only and are never inherited from or promoted into the Hub bearer. This prevents any project credential from becoming an implicit entry identity.

@@ -806,7 +806,7 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
     text = result["result"]["content"][0]["text"]
     assert WORKSPACE_B_ID in text
 
-    # Meanwhile, session "sess-gemini" (same token) should still be on workspace A
+    # An untouched session has no implicit entry/current project.
     r3 = mw_env.client.post(
         "/mcp",
         content=rpc_gcw,
@@ -819,7 +819,9 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
     assert r3.status_code == 200
     result3 = json.loads(r3.text)
     text3 = result3["result"]["content"][0]["text"]
-    assert WORKSPACE_A_ID in text3, f"Expected workspace A for sess-gemini, got: {text3}"
+    assert "未固定工作区" in text3
+    assert "所有运行根平等参与自动路由" in text3
+    assert "sess-gemini" not in mw_env.gateway._session_workspaces
 
 
 def test_switch_workspace_changes_real_proxy_target(mw_env: _MultiWorkspaceEnv) -> None:

@@ -137,7 +137,7 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         <p>这是推荐的长期连接方式。你给 MCP DevBridge 准备一个固定域名和 Cloudflare Named Tunnel，
         之后电脑重启、程序重启，ChatGPT 仍然使用同一个 MCP 地址。</p>
         <p>你通常只需要准备三项：固定域名、Tunnel Token、Cloudflare 中指向本机 Gateway 的 Service URL。
-        “公网入口端口”没有特殊需求时保持默认。</p>""",
+        “共享 Hub 端口”没有特殊需求时保持默认。</p>""",
     ),
     ManualTopic(
         "ngrok",

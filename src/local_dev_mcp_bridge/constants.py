@@ -104,7 +104,7 @@ ACCESS_TOKEN_USERNAME = "LocalDevMCPBridge"
 ACCESS_TOKEN_CRED_NAME = "LocalDevMCPBridge/AccessToken"
 CLOUDFLARE_TOKEN_CRED_NAME = "LocalDevMCPBridge/CloudflareToken"
 
-# OAuth (Phase 8): public entry gateway + single-user authorization server.
+# OAuth (Phase 8): shared OAuth/MCP Hub gateway + single-user authorization server.
 GATEWAY_HOST = "127.0.0.1"
 OAUTH_SCOPE = "ACCESS_VIEW_MANAGE_MCP_CONTENT"
 OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600  # short-lived per MCP spec recs

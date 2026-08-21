@@ -32,20 +32,20 @@ def test_new_project_defaults_to_full_access_chatgpt() -> None:
     assert project.enabled is False
 
 
-def test_project_access_values_are_isolated_and_legacy_is_migrated() -> None:
+def test_project_access_values_are_isolated_from_shared_hub_credential() -> None:
     store: Any = MemoryStore()
-    legacy = "legacy-access-value"
-    store.set(constants.ACCESS_TOKEN_CRED_NAME, legacy)
+    hub_value = "hub-access-value"
+    store.set(constants.ACCESS_TOKEN_CRED_NAME, hub_value)
 
-    assert get_project_access_token("project-a", store=store) == legacy
-    # Only the first project inherits the old shared value; subsequent projects
-    # receive unique credentials so Bearer routing is unambiguous.
+    assert get_project_access_token("project-a", store=store) is None
     assert get_project_access_token("project-b", store=store) is None
+    project_a_value = ensure_project_access_token("project-a", store=store)
     project_b_value = ensure_project_access_token("project-b", store=store)
-    assert project_b_value and project_b_value != legacy
-    assert get_project_access_token("project-a", store=store, migrate_legacy=False) == legacy
-    assert get_project_access_token("project-b", store=store, migrate_legacy=False) == project_b_value
-
+    assert project_a_value != hub_value
+    assert project_b_value != hub_value
+    assert project_a_value != project_b_value
+    assert get_project_access_token("project-a", store=store) == project_a_value
+    assert get_project_access_token("project-b", store=store) == project_b_value
 
 def test_project_tunnel_values_are_isolated() -> None:
     store: Any = MemoryStore()

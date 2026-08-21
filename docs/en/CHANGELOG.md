@@ -2,6 +2,14 @@
 
 All dates are local development dates.
 
+## 0.8.3 (2026-08-21) — entry-project removal hotfix
+
+- Remove the remaining internal entry/bootstrap ownership: the shared Hub no longer owns a project CodexPro/Windows engine, Local mode routes through the shared Gateway, per-project Gateway ports are removed, and automatic fallback no longer persists a session current workspace.
+- Use one Hub-scoped client Bearer and one shared Gateway port for every READY root; per-project secrets remain internal upstream credentials only.
+- Remove the project-table Entry column and all service-root/bootstrap ownership paths; starting any project brings up the shared Hub if needed, stopping one project leaves every other READY root untouched, and the Hub stops only after the last root stops.
+- Restore every previously running root equally after live upgrade; the legacy single `project_root` handoff field is accepted only as compatibility input and never regains priority.
+- Keep `devbridge_switch_workspace` only as an explicit compatibility override. Normal path/cwd/task routing requires no switch and a single Hub session can alternate between roots without persisting an implicit current workspace.
+
 ## 0.8.2 (2026-08-21) — active-root autorouting and Linux/SteamOS recovery
 
 - Replace the user-facing entry/current-workspace model with peer active roots: every READY project root participates in routing, and descendants inherit the root boundary without per-subdirectory registration.
@@ -12,7 +20,7 @@ All dates are local development dates.
 - Remove the desktop entry column, keep all running roots active, preserve the shared Hub while any root remains, and add bulk start/stop plus bulk connection/permission settings.
 - Keep the Windows Inno Setup destination-directory page available so users can choose a custom installation location.
 - Restore Linux/SteamOS Desktop Mode support without reintroducing the v0.9+ multi-Agent runtime: XDG-aware config/data paths, Secret Service/AES-GCM storage, POSIX shell/process handling, safe custom user-level installation, live upgrade, PyInstaller packaging, and Ubuntu 22.04 CI/release builds.
-- Keep v0.9.x branches/tags as untouched history; v0.8.2 remains the maintenance release line.
+- Keep v0.9.x branches/tags as untouched history; v0.8.2 remains preserved release history; v0.8.3 is the current maintenance release line.
 
 ## 0.8.1 (2026-08-17) — stateless multi-workspace routing hotfix
 
@@ -23,7 +31,7 @@ All dates are local development dates.
 - Fix Gateway-local `run_command` / `run_program` parsing of MCP `params.arguments`; cap these synchronous compatibility tools at 20 seconds and direct long builds/tests/installations to background `bash` tasks with bounded `wait_task` / `get_task` polling to reduce ChatGPT tool-stream timeout risk.
 - Keep PySide async completion bridges alive until their GUI callback executes, preventing a project from reaching READY while the runtime log remains stuck at “starting”.
 - Give drive-root projects such as `C:\` and `D:\` non-empty display names.
-- Preserve all running project engines across detached upgrades: the updater snapshots listening project ports before terminating the old tree and the new desktop restores the entry service plus additional engines.
+- Preserve all running project engines across detached upgrades: the updater snapshots listening project ports before terminating the old tree and the new desktop restores every previously running root equally, then brings back the shared Hub.
 
 ## 0.8.0 (2026-08-17) — persistent pairing and bundled runtime
 

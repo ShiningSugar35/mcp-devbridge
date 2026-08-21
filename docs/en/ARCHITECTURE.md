@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current v0.8.2 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
+This document describes the current v0.8.3 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
 
 ## Runtime model
 
@@ -21,9 +21,9 @@ OAuth/Bearer Gateway (loopback)
                                       └── its own active roots
 ```
 
-Every READY project root is active and equal for routing. A project may be used as the desktop bootstrap context for the shared Gateway/Tunnel lifecycle, but it does not become an “entry workspace” with extra routing priority.
+Every READY project root is active and equal for routing. The shared Gateway/Tunnel lifecycle is independent from all project roots: ServiceCoordinator owns only shared transport, while ProjectManager owns every project engine.
 
-`Local` mode is intentionally different for backward compatibility: it skips the public Gateway/Tunnel and connects directly to the selected project’s loopback CodexPro endpoint. A single client address that must auto-route across multiple roots should use the Hub/Gateway path.
+`Local` mode uses the same shared loopback Gateway and multi-root routing layer, but does not start a public Tunnel. There is no selected-project CodexPro client endpoint in the normal workflow.
 
 ## Active-root routing
 
@@ -128,3 +128,8 @@ Windows releases are per-user Inno Setup installations and keep the directory se
 Linux/SteamOS releases install into a user-writable directory (default `~/.local/opt/MCPDevBridge`) and respect valid absolute `XDG_CONFIG_HOME` / `XDG_DATA_HOME` values. Relative XDG base-directory overrides are treated as invalid and fall back to the standard user locations. Linux installation refuses dangerous target roots and refuses to overwrite unrelated non-empty directories.
 
 Both platforms use detached live-upgrade helpers. Upgrade-resume files contain only non-secret metadata; the restarted application reloads protected values from `SecretsStore` before restoring services.
+
+
+### No entry port or entry credential
+
+The Hub has one global Gateway port and one client-facing bearer. Per-project CodexPro/Windows-MCP ports and upstream credentials are internal only. Legacy per-project `gateway_port` values are ignored during config loading.

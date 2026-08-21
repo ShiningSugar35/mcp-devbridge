@@ -84,7 +84,6 @@ class ProjectConfig(BaseModel):
     # 0 = 未分配，启动时回退到全局默认端口（constants.DEFAULT_*_PORT）。
     codexpro_port: int = 0
     windows_bridge_port: int = 0
-    gateway_port: int = 0
     windows_enabled: bool = False
     # v0.4 及更早用于“桌面启动自动恢复”。v0.5 桌面不再自动恢复；保留字段仅兼容旧 projects.json。
     enabled: bool = False

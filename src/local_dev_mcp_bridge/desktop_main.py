@@ -88,13 +88,10 @@ from .oauth_provider import get_or_create_gemini_client
 from .platform_support import IS_WINDOWS, open_in_file_manager
 from .project_manager import ProjectManager
 from .project_secrets import (
-    activate_project_access_token,
     clear_project_tunnel_token,
     ensure_project_access_token,
     get_project_access_token,
     get_project_tunnel_token,
-    load_project_ui_secrets,
-    regenerate_project_access_token,
     remember_project_tunnel_token,
 )
 from .secrets import SecretsStore, generate_token
@@ -212,6 +209,15 @@ def _bridge_token(ensure: bool = False) -> str:
     return value or ""
 
 
+def _hub_access_token(*, ensure: bool = False, regenerate: bool = False) -> str:
+    """One Hub-scoped client bearer, independent from project credentials."""
+    store = SecretsStore()
+    value = "" if regenerate else (store.get(constants.ACCESS_TOKEN_CRED_NAME) or "")
+    if not value and (ensure or regenerate):
+        value = generate_token(256)
+        store.set(constants.ACCESS_TOKEN_CRED_NAME, value)
+    return value
+
 def _tunnel_token_default() -> str:
     """Last-used Cloudflare tunnel token (remembered across starts)."""
     return SecretsStore().get(TUNNEL_TOKEN_CRED_NAME) or ""
@@ -251,11 +257,10 @@ class MainWindow(QMainWindow):
         self._signals = _Signals()
         self._signals.coord_event.connect(self._on_coord_event)
         self.coord.listen(self._emit_coord_event)
-        self._current_token = ""
+        self._current_token = _hub_access_token(ensure=True)
         self._bridge_token = _bridge_token()
         self._loading_project = False
         self._loaded_project_root = ""
-        self._service_root = ""
         self._busy_project_ids: set[str] = set()
         self._bulk_project_action: str | None = None
         self._closing = False
@@ -538,7 +543,7 @@ class MainWindow(QMainWindow):
         info_help_row.addStretch(1)
         info_help_row.addWidget(HelpButton(HELP_CONNECTION_INFO))
         tok_layout.addLayout(info_help_row)
-        self.token_edit = QLineEdit("选择项目后显示")
+        self.token_edit = QLineEdit(_hub_access_token(ensure=True))
         self.token_edit.setReadOnly(True)
         self.url_edit = QLineEdit("选择项目后显示")
         self.url_edit.setReadOnly(True)
@@ -558,10 +563,10 @@ class MainWindow(QMainWindow):
         tok_layout.addWidget(self.url_edit)
         tok_layout.addLayout(tok_row)
 
-        # --- gateway port (Cloudflare 公网入口端口)
+        # --- shared Hub Gateway port
         port_row = QHBoxLayout()
         port_row.setSpacing(8)
-        port_row.addWidget(self._help_label("公网入口端口", HELP_GATEWAY_PORT))
+        port_row.addWidget(self._help_label("共享 Hub 端口", HELP_GATEWAY_PORT))
         self.gateway_port_spin = QSpinBox()
         self.gateway_port_spin.setRange(1, 65535)
         self.gateway_port_spin.setValue(self._app_config.gateway_port)
@@ -733,12 +738,12 @@ class MainWindow(QMainWindow):
                     "请重新安装 MCP DevBridge 正式版；安装包会自带 uv/uvx。首次启用 Windows 控制时仍需要联网获取锁定的 Windows-MCP 组件。",
                 ))
 
-            access_value = get_project_access_token(project.id) or ""
+            access_value = _hub_access_token(ensure=True)
             if access_value:
-                ok_items.append("访问令牌已经准备好")
+                ok_items.append("共享 Hub 访问令牌已经准备好")
             else:
                 problems.append((
-                    "还没有访问令牌",
+                    "还没有共享 Hub 访问令牌",
                     "回到工作台，在“连接信息”里点击“重新生成”。",
                 ))
 
@@ -797,7 +802,7 @@ class MainWindow(QMainWindow):
                     "到“项目设置 → Gemini OAuth”，粘贴 Gemini Custom Connected App 提供的 Redirect URI。",
                 ))
 
-            ports = (project.gateway_port, project.codexpro_port, project.windows_bridge_port)
+            ports = (self._app_config.gateway_port, project.codexpro_port, project.windows_bridge_port)
             if not all(ports) or len(set(ports)) != 3:
                 problems.append((
                     "当前项目的内部端口配置有冲突",
@@ -805,7 +810,7 @@ class MainWindow(QMainWindow):
                 ))
             else:
                 details.append(
-                    f"内部端口：公网入口 {ports[0]} / 项目服务 {ports[1]} / Windows 控制 {ports[2]}"
+                    f"内部端口：共享 Hub {ports[0]} / 项目服务 {ports[1]} / Windows 控制 {ports[2]}"
                 )
 
             unit = self.pm.unit(project.id)
@@ -815,7 +820,7 @@ class MainWindow(QMainWindow):
                 url = (
                     self.coord.public_url
                     if self.coord.public_url
-                    else f"http://127.0.0.1:{project.codexpro_port}/mcp"
+                    else self._local_url()
                 )
                 try:
                     result = run_selftest(url, access_value or None)
@@ -1093,17 +1098,17 @@ class MainWindow(QMainWindow):
         self._flash_button_success(self.pair_code_btn, "已复制")
         self._append_log("已生成一次性设备配对码，并复制到剪贴板。")
 
-    def _hub_credential_project(self) -> ProjectConfig | None:
-        if self._service_root:
-            project = self.pm.by_root(self._service_root)
-            if project is not None:
-                return project
+    def _hub_transport_project(self) -> ProjectConfig | None:
+        """Return settings used by the shared transport, never a routing owner."""
+        selected = self._project_config()
+        if selected is not None:
+            return selected
         projects = self.pm.list()
         ready = next((project for project in projects if self._project_state(project) == EngineState.READY), None)
         return ready or (projects[0] if projects else None)
 
-    def _public_entry_for_pairing(self) -> tuple[str, str] | None:
-        project = self._hub_credential_project()
+    def _public_hub_for_pairing(self) -> tuple[str, str] | None:
+        project = self._hub_transport_project()
         if project is None or self.coord.state != EngineState.READY or not self.coord.public_url:
             return None
         try:
@@ -1112,13 +1117,12 @@ class MainWindow(QMainWindow):
             method = ConnectionMethod.LOCAL
         if method == ConnectionMethod.LOCAL or not self.coord.public_url.startswith("https://"):
             return None
-        token = get_project_access_token(project.id) or ""
-        return (self.coord.public_url, token) if token else None
-
+        bearer = _hub_access_token(ensure=True)
+        return (self.coord.public_url, bearer) if bearer else None
     def _join_remote_hub(self) -> None:
         hub_raw = self.hub_url_edit.text().strip()
         pair_code = self.hub_pair_edit.text().strip()
-        public = self._public_entry_for_pairing()
+        public = self._public_hub_for_pairing()
         if not hub_raw or len(pair_code) != 6:
             QMessageBox.warning(self, "还差一点", "请填写主 Hub 的 MCP 地址和 6 位配对码。")
             return
@@ -1208,7 +1212,7 @@ class MainWindow(QMainWindow):
             return
         hub_url = self._app_config.hub_url.strip()
         peer = SecretsStore().get(HUB_PEER_SECRET_KEY) or ""
-        public = self._public_entry_for_pairing()
+        public = self._public_hub_for_pairing()
         if not hub_url or not peer or public is None:
             return
         try:
@@ -1487,7 +1491,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "更新失败", str(result))
                 return
             try:
-                root = self._service_root or self._selected_root() or (self._app_config.active_workspace or "")
+                root = self._selected_root() or (self._app_config.active_workspace or "")
                 launch_update(result, project_root=root)
             except Exception as exc:
                 self.update_btn.setEnabled(True)
@@ -1782,9 +1786,9 @@ class MainWindow(QMainWindow):
             self.git_remote_edit.setText(project.default_push_remote or "")
             self.git_branch_edit.setText(project.default_push_branch or "")
             self.bridge_check.setChecked(project.windows_enabled)
-            self.gateway_port_spin.setValue(project.gateway_port or constants.DEFAULT_GATEWAY_PORT)
             self.gemini_uri_edit.setText(project.gemini_redirect_uri or "")
-            self._current_token, self._tunnel_token_default = load_project_ui_secrets(project.id)
+            self._current_token = _hub_access_token(ensure=True)
+            self._tunnel_token_default = get_project_tunnel_token(project.id) or ""
             self.cf_token_edit.setText(self._tunnel_token_default)
             self._load_gemini_credential_view(project.gemini_redirect_uri)
             self.test_output.setText(self._test_outputs.get(project.id, "（尚未运行）"))
@@ -2028,7 +2032,7 @@ class MainWindow(QMainWindow):
         access = ensure_project_access_token(project.id)
         bridge = _bridge_token(ensure=project.windows_enabled)
         self._set_project_busy(project.id, True)
-        self._append_log(f"正在启动项目引擎（{project.display_name}）…")
+        self._append_log(f"正在启动项目（{project.display_name}）…")
 
         def run() -> str:
             view = self.pm.start(
@@ -2038,21 +2042,32 @@ class MainWindow(QMainWindow):
                 execution_profile=PERMISSION_PROFILE.get(project.permission_mode, "full_system"),
                 windows_token=bridge,
             )
-            return f"项目引擎已连接：{project.display_name} @127.0.0.1:{view.codexpro_port}"
+            if not self.coord.running:
+                options = self._current_options()
+                conflict = self._ports_conflict(options)
+                if conflict:
+                    self.pm.stop(project.id)
+                    raise RuntimeError(conflict)
+                self.coord.start(options)
+                if self.coord.state != EngineState.READY:
+                    self.pm.stop(project.id)
+                    raise RuntimeError(self.coord.message or "共享 Hub 未进入已连接状态。")
+            return f"项目已连接：{project.display_name} @127.0.0.1:{view.codexpro_port}；共享 Hub 保持可用"
 
         def done(result: Any) -> None:
             self._set_project_busy(project.id, False)
             if isinstance(result, Exception):
-                self._append_log(f"启动项目引擎失败：{result}")
+                self._append_log(f"启动项目失败：{result}")
             else:
                 self._append_log(str(result))
+            self._sync_token_ui()
             self._poll_status()
 
         _run_async(run, done)
 
     def _stop_project_engine_for(self, project: ProjectConfig) -> None:
         self._set_project_busy(project.id, True)
-        self._append_log(f"正在停止项目引擎（{project.display_name}）…")
+        self._append_log(f"正在停止项目（{project.display_name}）…")
 
         def run() -> str:
             self.pm.stop(project.id)
@@ -2064,15 +2079,12 @@ class MainWindow(QMainWindow):
             ]
             if not remaining and (self.coord.running or self.coord.state == EngineState.ERROR):
                 self.coord.stop()
-                self._service_root = ""
-                return f"项目引擎已停止：{project.display_name}；已无运行项目，Hub 一并停止。"
-            if self._service_root and _same_root(project.root_path, self._service_root):
-                self._service_root = ""
-            return f"项目引擎已停止：{project.display_name}"
+                return f"项目已停止：{project.display_name}；已无运行项目，共享 Hub 一并停止。"
+            return f"项目已停止：{project.display_name}；其它运行根和共享 Hub 不受影响。"
 
         def done(result: Any) -> None:
             self._set_project_busy(project.id, False)
-            self._append_log(str(result) if not isinstance(result, Exception) else f"停止项目引擎出错：{result}")
+            self._append_log(str(result) if not isinstance(result, Exception) else f"停止项目出错：{result}")
             self._poll_status()
 
         _run_async(run, done)
@@ -2097,6 +2109,13 @@ class MainWindow(QMainWindow):
             if _same_root(project.root_path, self._app_config.active_workspace or ""):
                 self._app_config.active_workspace = ""
                 save_app_config(self._app_config)
+            remaining = [
+                candidate
+                for candidate in self.pm.list()
+                if self._project_state(candidate) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
+            ]
+            if not remaining and (self.coord.running or self.coord.state == EngineState.ERROR):
+                self.coord.stop()
             return f"已移除项目：{project.display_name}"
 
         def done(result: Any) -> None:
@@ -2111,8 +2130,6 @@ class MainWindow(QMainWindow):
         _run_async(run, done)
 
     def _has_active_projects(self) -> bool:
-        if self.coord.running or self.coord.state == EngineState.ERROR:
-            return True
         for project in self.pm.list():
             if self._project_state(project) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING):
                 return True
@@ -2148,83 +2165,71 @@ class MainWindow(QMainWindow):
             return
         if any(self._is_project_busy(project.id) for project in projects):
             return
-        entry = self._project_config()
-        if entry is None:
-            entry = projects[0]
-            self._select_root(entry.root_path)
+        if self._project_config() is None:
+            self._select_root(projects[0].root_path)
             self._apply_selected_project()
         if not self._save_project_settings(show_errors=True):
             return
         projects = self.pm.list()
-        entry = next((project for project in projects if project.id == entry.id), projects[0])
         if self._require_start_confirmations(projects):
             return
-
-        tokens = {project.id: ensure_project_access_token(project.id) for project in projects}
-        bridge_token = _bridge_token(ensure=any(project.windows_enabled for project in projects))
-        self._current_token = tokens[entry.id]
-        self._bridge_token = bridge_token
-        self._bind_coord_engines(entry.id)
         options = self._current_options()
-        options.codex_token = tokens[entry.id]
-        options.windows_token = bridge_token
         conflict = self._ports_conflict(options)
         if conflict:
             QMessageBox.warning(self, "端口被占用", conflict)
             return
-
+        access = {project.id: ensure_project_access_token(project.id) for project in projects}
+        bridge = _bridge_token(ensure=any(project.windows_enabled for project in projects))
         project_ids = {project.id for project in projects}
         self._bulk_project_action = "start"
         self._busy_project_ids.update(project_ids)
-        self._service_root = entry.root_path
-        self._append_log(f"正在启动全部 {len(projects)} 个项目…")
+        self._append_log(f"正在并列启动全部 {len(projects)} 个项目；没有入口项目…")
         self._poll_status()
 
         def run() -> str:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            self.coord.start(options)
-            if self.coord.state != EngineState.READY:
-                raise RuntimeError(self.coord.message or "Hub 编排项目未进入已连接状态。")
-            others = [project for project in projects if project.id != entry.id]
             failures: list[str] = []
-            if others:
-                max_workers = min(len(others), 8)
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(
-                            self.pm.start,
-                            project.id,
-                            codex_token=tokens[project.id],
-                            permission_mode=project.permission_mode,
-                            execution_profile=PERMISSION_PROFILE.get(project.permission_mode, "full_system"),
-                            windows_token=bridge_token,
-                        ): project
-                        for project in others
-                    }
-                    for future in as_completed(futures):
-                        project = futures[future]
-                        try:
-                            future.result()
-                        except Exception as exc:  # noqa: BLE001
-                            failures.append(f"{project.display_name}: {exc}")
-            started = len(projects) - len(failures)
+            started_ids: list[str] = []
+            max_workers = min(len(projects), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self.pm.start,
+                        project.id,
+                        codex_token=access[project.id],
+                        permission_mode=project.permission_mode,
+                        execution_profile=PERMISSION_PROFILE.get(project.permission_mode, "full_system"),
+                        windows_token=bridge,
+                    ): project
+                    for project in projects
+                }
+                for future in as_completed(futures):
+                    project = futures[future]
+                    try:
+                        future.result()
+                        started_ids.append(project.id)
+                    except Exception as exc:  # noqa: BLE001
+                        failures.append(f"{project.display_name}: {exc}")
+            if not started_ids:
+                raise RuntimeError("没有任何项目成功启动。" + (f" {failures[0]}" if failures else ""))
+            if not self.coord.running:
+                self.coord.start(options)
+                if self.coord.state != EngineState.READY:
+                    for project_id in started_ids:
+                        self.pm.stop(project_id)
+                    raise RuntimeError(self.coord.message or "共享 Hub 未进入已连接状态。")
             if failures:
                 preview = "；".join(failures[:3])
                 if len(failures) > 3:
                     preview += f"；另有 {len(failures) - 3} 个失败"
-                return f"全部启动完成：{started}/{len(projects)} 个项目可用。失败：{preview}"
-            return f"全部启动完成：{len(projects)}/{len(projects)} 个项目可用。"
+                return f"批量启动完成：{len(started_ids)}/{len(projects)} 个平等运行根可用。失败：{preview}"
+            return f"批量启动完成：{len(projects)}/{len(projects)} 个平等运行根全部可用。"
 
         def done(result: Any) -> None:
             self._bulk_project_action = None
             self._busy_project_ids.difference_update(project_ids)
-            if isinstance(result, Exception):
-                self._append_log(f"启动所有项目失败：{result}")
-                if self.coord.state != EngineState.READY:
-                    self._service_root = ""
-            else:
-                self._append_log(str(result))
+            self._append_log(str(result) if not isinstance(result, Exception) else f"启动所有项目失败：{result}")
             self._sync_token_ui()
             self._poll_status()
 
@@ -2248,7 +2253,7 @@ class MainWindow(QMainWindow):
                 try:
                     self.coord.stop()
                 except Exception as exc:  # noqa: BLE001
-                    failures.append(f"Hub 编排: {exc}")
+                    failures.append(f"共享 Hub: {exc}")
             max_workers = min(len(projects), 8)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(self.pm.stop, project.id): project for project in projects}
@@ -2263,28 +2268,18 @@ class MainWindow(QMainWindow):
                 if len(failures) > 3:
                     preview += f"；另有 {len(failures) - 3} 个失败"
                 return f"停止完成，但有 {len(failures)} 项异常：{preview}"
-            return f"已停止全部 {len(projects)} 个项目。"
+            return f"已停止全部 {len(projects)} 个项目和共享 Hub。"
 
         def done(result: Any) -> None:
             self._bulk_project_action = None
             self._busy_project_ids.difference_update(project_ids)
-            self._service_root = ""
             self._append_log(str(result) if not isinstance(result, Exception) else f"停止所有项目出错：{result}")
             self._poll_status()
 
         _run_async(run, done)
 
-    def _bind_coord_engines(self, project_id: str | None = None) -> None:
-        project_id = project_id or self._selected_project_id()
-        if not project_id:
-            return
-        unit = self.pm.unit_for(project_id)
-        if unit is not None:
-            self.coord.codex = unit.codex
-            self.coord.windows = unit.windows
-
     def _lookup_workspace(self, project_id: str) -> tuple[int, str] | None:
-        """Given a project_id, return (codexpro_port, root_path) if running, else None."""
+        """Return one running project's engine port/root for Hub routing."""
         project = self.pm.get(project_id)
         if project is None:
             return None
@@ -2296,13 +2291,10 @@ class MainWindow(QMainWindow):
 
     def _lookup_workspace_credential(self, project_id: str) -> str | None:
         return get_project_access_token(project_id)
-
     # -------------------------------------------------- service control
     def _toggle_service_for(self, project_root: str) -> None:
         project = self.pm.by_root(project_root)
-        if project is None:
-            return
-        if self._is_project_busy(project.id):
+        if project is None or self._is_project_busy(project.id):
             return
         self._select_root(project.root_path)
         self._apply_selected_project()
@@ -2310,39 +2302,20 @@ class MainWindow(QMainWindow):
         if unit is not None and unit.state == EngineState.READY:
             self._stop_project_engine_for(project)
             return
-        if self.coord.running:
-            self._start_project_engine_for(project)
+        if self._require_start_confirmations([project]):
             return
-        self._start_service()
+        if not self._save_project_settings(show_errors=True):
+            return
+        project = self.pm.get(project.id) or project
+        self._start_project_engine_for(project)
 
     def _current_options(self) -> StartOptions:
-        project = self._project_config()
-        codexpro_port = (
-            (project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT)
-            if project is not None
-            else self._app_config.codexpro_port
-        )
-        windows_mcp_port = (
-            (project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT)
-            if project is not None
-            else self._app_config.windows_mcp_port
-        )
         return StartOptions(
-            project_root=self._selected_root(),
-            permission_mode=self._selected_permission_mode(),
-            execution_profile=self._selected_execution_profile(),
-            full_system_confirmed=self._app_config.full_system_risk_accepted,
-            codex_token=self._current_token,
-            windows_enabled=bool(IS_WINDOWS and self.bridge_check.isChecked()),
-            windows_token=self._bridge_token,
             connection=self._selected_connection(),
             public_hostname=self.hostname_edit.text().strip(),
             tunnel_token=self._tunnel_token_value(),
-            gateway_port=project.gateway_port if project is not None and project.gateway_port else self._app_config.gateway_port,
-            codexpro_port=codexpro_port,
-            windows_mcp_port=windows_mcp_port,
+            gateway_port=self._app_config.gateway_port,
         )
-
     def _tunnel_token_value(self) -> str | None:
         field = self.cf_token_edit.text().strip()
         return field or self._tunnel_token_default or None
@@ -2451,7 +2424,7 @@ class MainWindow(QMainWindow):
         project.public_hostname = self.hostname_edit.text().strip()
         project.windows_enabled = bool(IS_WINDOWS and self.bridge_check.isChecked())
         project.gemini_redirect_uri = self.gemini_uri_edit.text().strip()
-        project.gateway_port = self.gateway_port_spin.value()
+        self._app_config.gateway_port = self.gateway_port_spin.value()
         project.git_user_name = git_vals["git_user_name"]
         project.git_user_email = git_vals["git_user_email"]
         project.default_push_remote = git_vals["default_push_remote"]
@@ -2460,76 +2433,6 @@ class MainWindow(QMainWindow):
         self._app_config.active_workspace = root
         save_app_config(self._app_config)
         return True
-
-    def _start_service(self) -> None:
-        project = self._project_config()
-        if project is None:
-            QMessageBox.warning(self, "未选择项目", "请先选择项目目录。")
-            return
-        if self._require_start_confirmations():
-            return
-        if self.coord.running:
-            self._append_log("公网入口服务已在运行。")
-            return
-        if not self._save_project_settings(show_errors=True):
-            return
-        self._current_token = activate_project_access_token(project.id)
-        self._bridge_token = _bridge_token(ensure=True)
-        self._bind_coord_engines(project.id)
-        options = self._current_options()
-        if not options.codex_token:
-            self._current_token = ensure_project_access_token(project.id)
-            options.codex_token = self._current_token
-        conflict = self._ports_conflict(options)
-        if conflict:
-            QMessageBox.warning(self, "端口被占用", conflict)
-            return
-        self._service_root = project.root_path
-        self._set_project_busy(project.id, True)
-        self.status_label.setText(f"状态：正在启动（{options.connection.label()}）…")
-        self._append_log(f"正在启动 {project.display_name}（{options.connection.label()}）…")
-
-        def run() -> str:
-            self.coord.start(options)
-            if self.coord.state != EngineState.READY:
-                raise RuntimeError(self.coord.message or "服务未进入已连接状态。")
-            return f"服务已连接：{self.coord.public_url or self._local_url()}"
-
-        def done(result: Any) -> None:
-            self._set_project_busy(project.id, False)
-            if isinstance(result, Exception):
-                self._append_log(f"启动失败：{result}")
-            else:
-                self._append_log(str(result))
-            self._sync_token_ui()
-            self._poll_status()
-
-        _run_async(run, done)
-
-    def _stop_service(self) -> None:
-        if not self.coord.running and self.coord.state != EngineState.ERROR:
-            return
-        project = self.pm.by_root(self._service_root) if self._service_root else self._project_config()
-        project_id = project.id if project is not None else ""
-        if project_id:
-            self._set_project_busy(project_id, True)
-        self.status_label.setText("状态：正在停止…")
-        self._append_log("正在停止公网入口服务…")
-
-        def run() -> str:
-            self.coord.stop()
-            return "服务已停止"
-
-        def done(result: Any) -> None:
-            if project_id:
-                self._set_project_busy(project_id, False)
-            self._append_log(
-                str(result) if not isinstance(result, Exception) else f"停止服务出错：{result}"
-            )
-            self._service_root = ""
-            self._poll_status()
-
-        _run_async(run, done)
 
     def _set_project_busy(self, project_id: str, busy: bool) -> None:
         if not project_id:
@@ -2554,10 +2457,8 @@ class MainWindow(QMainWindow):
 
     def _on_gateway_port_changed(self, _value: int) -> None:
         if not self._loading_project:
-            project = self._project_config()
-            if project is not None:
-                project.gateway_port = self.gateway_port_spin.value()
-                self.pm.update(project)
+            self._app_config.gateway_port = self.gateway_port_spin.value()
+            save_app_config(self._app_config)
         self._update_gateway_port_ui()
 
     def _update_gateway_port_ui(self) -> None:
@@ -2565,7 +2466,7 @@ class MainWindow(QMainWindow):
         port = self.gateway_port_spin.value()
         if port != constants.DEFAULT_GATEWAY_PORT:
             self.port_warn_label.setText(
-                f"端口修改后，请同步将 Cloudflare Tunnel 的 Service URL 修改为 "
+                f"Hub 端口修改后，请同步将 Cloudflare Tunnel 的 Service URL 修改为 "
                 f"{gateway_service_url(port)}，否则公网连接会失败。"
             )
             self.port_warn_label.setVisible(True)
@@ -2574,22 +2475,26 @@ class MainWindow(QMainWindow):
 
     def _check_gateway_port(self) -> None:
         port = self.gateway_port_spin.value()
-        if port_in_use(port):
+        if self.coord.running:
+            QMessageBox.information(self, "Hub 正在运行", f"共享 Hub 当前正在使用端口 {port}。")
+        elif port_in_use(port):
             QMessageBox.warning(
                 self,
                 "端口被占用",
-                f"端口 {port} 已被占用，启动开放公网连接会失败。\n"
-                "请关闭占用该端口的程序，或改用其他端口。",
+                f"共享 Hub 端口 {port} 已被占用。\n请关闭占用程序，或改用其他端口。",
             )
         else:
-            QMessageBox.information(self, "端口检测", f"端口 {port} 当前空闲，可以正常使用。")
+            QMessageBox.information(self, "端口检测", f"共享 Hub 端口 {port} 当前空闲，可以正常使用。")
 
     def _restore_default_gateway_port(self) -> None:
+        if self.coord.running:
+            QMessageBox.warning(self, "Hub 正在运行", "请先停止所有项目，再修改共享 Hub 端口。")
+            return
         self.gateway_port_spin.setValue(constants.DEFAULT_GATEWAY_PORT)
         QMessageBox.information(
             self,
             "已恢复默认",
-            f"公网入口端口已恢复为默认值 {constants.DEFAULT_GATEWAY_PORT}。",
+            f"共享 Hub 端口已恢复为默认值 {constants.DEFAULT_GATEWAY_PORT}。",
         )
 
     def _open_advanced_settings(self) -> None:
@@ -2605,10 +2510,9 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"高级设置 · {project.display_name or Path(project.root_path).name}")
         form = QFormLayout(dialog)
-        gateway_spin = QSpinBox()
-        gateway_spin.setRange(1, 65535)
-        gateway_spin.setValue(project.gateway_port or constants.DEFAULT_GATEWAY_PORT)
-        form.addRow("Gateway（公网入口）:", gateway_spin)
+        hub_label = QLineEdit(str(self._app_config.gateway_port))
+        hub_label.setReadOnly(True)
+        form.addRow("共享 Hub Gateway:", hub_label)
         codex_spin = QSpinBox()
         codex_spin.setRange(1, 65535)
         codex_spin.setValue(project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT)
@@ -2627,11 +2531,12 @@ class MainWindow(QMainWindow):
         form.addRow(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        ports = (gateway_spin.value(), codex_spin.value(), windows_spin.value())
+        ports = (self._app_config.gateway_port, codex_spin.value(), windows_spin.value())
         if len(set(ports)) != 3:
-            QMessageBox.warning(self, "端口冲突", "当前项目的 Gateway、CodexPro、Windows-MCP 端口必须互不相同。")
+            QMessageBox.warning(self, "端口冲突", "共享 Gateway、当前项目 CodexPro、Windows-MCP 端口必须互不相同。")
             return
-        project.gateway_port, project.codexpro_port, project.windows_bridge_port = ports
+        project.codexpro_port = codex_spin.value()
+        project.windows_bridge_port = windows_spin.value()
         self._app_config.legacy_backend_port = legacy_spin.value()
         save_app_config(self._app_config)
         try:
@@ -2639,28 +2544,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
             return
-        self._loading_project = True
-        try:
-            self.gateway_port_spin.setValue(project.gateway_port)
-        finally:
-            self._loading_project = False
-        self._append_log(f"{project.display_name} 的内部端口已保存。")
+        self._append_log(f"{project.display_name} 的项目引擎端口已保存；Gateway 端口仍由共享 Hub 管理。")
         self._refresh_project_list()
         self._update_gateway_port_ui()
 
     def _ports_conflict(self, options: StartOptions) -> str | None:
-        if not self.coord.codex.is_running and port_in_use(options.codexpro_port):
-            return f"CodexPro 引擎端口 {options.codexpro_port} 已被占用。请先停止占用该端口的程序。"
-        if (
-            options.windows_enabled
-            and not self.coord.windows.is_running
-            and port_in_use(options.windows_mcp_port)
-        ):
-            return f"Windows 控制桥端口 {options.windows_mcp_port} 已被占用。请先停止占用该端口的程序。"
-        if options.connection != ConnectionMethod.LOCAL and port_in_use(options.gateway_port):
-            return f"Gateway 端口 {options.gateway_port} 已被占用，公网连接无法建立。请先停止占用该端口的程序。"
+        if not self.coord.running and port_in_use(options.gateway_port):
+            return f"共享 Gateway 端口 {options.gateway_port} 已被占用。请先停止占用该端口的程序。"
         return None
-
     # -------------------------------------------------- coordinator events
     def _emit_coord_event(self, state: EngineState, message: str | None) -> None:
         self._signals.coord_event.emit(state, message)
@@ -2671,14 +2562,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- status / URL
     def _local_url(self) -> str:
-        project = self._project_config()
-        port = (
-            project.codexpro_port
-            if project is not None and project.codexpro_port
-            else constants.DEFAULT_CODEXPRO_PORT
-        )
-        return f"http://127.0.0.1:{port}/mcp"
-
+        return f"http://127.0.0.1:{self._app_config.gateway_port}{constants.DEFAULT_MCP_PATH}"
     def _display_url(self) -> str:
         project = self._project_config()
         if self.coord.public_url:
@@ -2736,8 +2620,8 @@ class MainWindow(QMainWindow):
         editable = bool(
             selected is not None and not busy and state in (EngineState.IDLE, EngineState.ERROR)
         )
+        self.gateway_port_spin.setEnabled(not self.coord.running and not self._has_active_projects())
         for widget in (
-            self.gateway_port_spin,
             self.advanced_btn,
             self.permission_combo,
             self.client_combo,
@@ -2764,7 +2648,7 @@ class MainWindow(QMainWindow):
         )
         bridge_label = "Windows 控制" if IS_WINDOWS else "Linux 原生工具"
         self.component_status.setText(
-            f"项目服务：{codex_state} · 公网入口：{gateway_state} · "
+            f"项目服务：{codex_state} · 共享 Gateway：{gateway_state} · "
             f"公网连接：{tunnel_state} · {bridge_label}：{windows_state}"
         )
         self._refresh_project_list()
@@ -2787,12 +2671,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------ token helpers
     def _sync_token_ui(self) -> None:
-        project = self._project_config()
-        if project is None:
-            self._current_token = ""
-            self.token_edit.setText("选择项目后显示")
-            return
-        self._current_token = get_project_access_token(project.id) or ""
+        self._current_token = _hub_access_token(ensure=True)
         self.token_edit.setText(self._current_token or "尚未生成")
 
     def _copy_to_clipboard(self, text: str) -> None:
@@ -2801,18 +2680,13 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(text)
 
     def _regenerate_token(self) -> None:
-        project = self._project_config()
-        if project is None:
-            QMessageBox.warning(self, "未选择项目", "请先选择项目。")
+        if self._has_active_projects() or self.coord.running:
+            QMessageBox.warning(self, "Hub 正在运行", "请先停止所有项目，再重新生成共享 Hub 访问令牌。")
             return
-        unit = self.pm.unit(project.id)
-        if (unit is not None and unit.is_running) or self.coord.running:
-            QMessageBox.warning(self, "项目正在运行", "请先停止该项目服务，再重新生成访问令牌。")
-            return
-        self._append_log(f"正在重新生成 {project.display_name} 的访问令牌…")
+        self._append_log("正在重新生成共享 Hub 访问令牌…")
 
         def run() -> str:
-            return regenerate_project_access_token(project.id)
+            return _hub_access_token(regenerate=True)
 
         def done(result: Any) -> None:
             if isinstance(result, Exception):
@@ -2820,28 +2694,23 @@ class MainWindow(QMainWindow):
                 return
             self._current_token = str(result)
             self._sync_token_ui()
-            self._append_log("已重新生成当前项目访问令牌（只影响该项目）。")
+            self._append_log("已重新生成共享 Hub 访问令牌；所有项目仍使用各自内部引擎凭据。")
 
         _run_async(run, done)
-
     def _run_selftest(self) -> None:
         project = self._project_config()
         if project is None:
-            self.test_output.setText("（请先选择项目）")
+            self.test_output.setText("（请先选择一个运行项目作为自测目标）")
             return
         unit = self.pm.unit(project.id)
-        if unit is None or unit.state != EngineState.READY:
-            self.test_output.setText("（请先启动当前项目服务）")
+        if unit is None or unit.state != EngineState.READY or self.coord.state != EngineState.READY:
+            self.test_output.setText("（请先启动当前项目和共享 Hub）")
             return
         project_id = project.id
-        url = (
-            self.coord.public_url
-            if self.coord.public_url
-            else f"http://127.0.0.1:{project.codexpro_port}/mcp"
-        )
-        access_value = get_project_access_token(project.id) or ""
+        url = self.coord.public_url or self._local_url()
+        access_value = _hub_access_token(ensure=True)
         self.test_btn.setEnabled(False)
-        self.test_output.setText(f"正在自测 {url} …")
+        self.test_output.setText(f"正在通过共享 Hub 自测 {url} …")
 
         def run() -> SelftestResult:
             return run_selftest(url, access_value or None)
@@ -2854,15 +2723,14 @@ class MainWindow(QMainWindow):
                 lines = [f"{'✔' if s['ok'] else '✘'}  {s['step']}：{s['detail']}" for s in result.steps]
                 output = "\n".join(lines) if lines else "（无步骤）"
                 if result.ok:
-                    self._append_log("连接自测通过")
+                    self._append_log("共享 Hub 连接自测通过")
                 else:
-                    self._append_log(f"连接自测未通过：{result.error or '有步骤失败'}")
+                    self._append_log(f"共享 Hub 连接自测未通过：{result.error or '有步骤失败'}")
             self._test_outputs[project_id] = output
             if project_id == self._selected_project_id():
                 self.test_output.setText(output)
 
         _run_async(run, done)
-
     def _append_log(self, text: str) -> None:
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_text.appendPlainText(f"[{now}] {text}")
@@ -2877,7 +2745,7 @@ class MainWindow(QMainWindow):
             "run_command": "执行命令", "run_program": "运行程序", "start_process": "启动后台进程",
             "stop_process": "停止后台进程", "git_status": "查看 Git 状态", "git_diff": "查看代码差异",
             "git_commit": "提交 Git", "git_push": "推送 Git", "git_restore": "恢复 Git 文件",
-            "devbridge_list_workspaces": "查看项目列表", "devbridge_switch_workspace": "切换项目",
+            "devbridge_list_workspaces": "查看项目列表", "devbridge_switch_workspace": "显式项目覆盖",
             "devbridge_list_devices": "查看电脑列表", "devbridge_switch_device": "切换电脑",
             "get_task": "查看任务", "wait_task": "等待任务",
             "list_tasks": "查看任务列表", "cancel_task": "取消任务",
@@ -3037,10 +2905,10 @@ class MainWindow(QMainWindow):
         self.audit_view.setColumnWidth(4, 90)
 
     def _resume_upgrade_if_requested(self) -> None:
-        """Consume an installer handoff request and restore the previous entry service.
+        """Consume installer handoff and restore all previously running roots equally.
 
-        The detached updater writes only non-secret project metadata.  The new
-        process resolves protected values from SecretsStore after launch.
+        ``project_root`` is accepted only as a legacy handoff field. It is folded
+        into ``project_roots`` and never treated as an entry/owner project.
         """
         request_file = constants.config_dir() / "upgrade-resume.json"
         if not request_file.is_file():
@@ -3054,52 +2922,36 @@ class MainWindow(QMainWindow):
             request_file.unlink(missing_ok=True)
             return
         request_file.unlink(missing_ok=True)
-        project_root = str(payload.get("project_root") or "").strip()
         raw_project_roots = payload.get("project_roots") or []
-        project_roots = [
-            str(item).strip()
-            for item in raw_project_roots
-            if str(item).strip()
-        ] if isinstance(raw_project_roots, list) else []
-        if project_root and project_root not in project_roots:
-            project_roots.insert(0, project_root)
-        if not project_root:
-            self._append_log("升级接力未恢复服务：缺少项目路径。")
-            return
-        project = self.pm.by_root(project_root)
-        if project is None:
-            self._append_log(f"升级接力未恢复服务：项目不在列表中（{project_root}）。")
-            return
-        self._select_root(project.root_path)
-        self._apply_selected_project()
-        if project.permission_mode == "system" and (
-            not self._app_config.first_system_risk_accepted
-            or not self._app_config.full_system_risk_accepted
-        ):
-            self._append_log("升级接力未自动启动：完全访问模式尚未完成首次风险确认。")
-            return
-        self._append_log(f"检测到升级接力请求，正在恢复 {project.display_name or project.root_path} …")
-        self._start_service()
-        restored_extra = 0
-        for extra_root in project_roots:
-            if _same_root(extra_root, project.root_path):
+        project_roots = [str(item).strip() for item in raw_project_roots if str(item).strip()] if isinstance(raw_project_roots, list) else []
+        legacy_root = str(payload.get("project_root") or "").strip()
+        if legacy_root and legacy_root not in project_roots:
+            project_roots.append(legacy_root)
+        targets: list[ProjectConfig] = []
+        seen: set[str] = set()
+        for root in project_roots:
+            project = self.pm.by_root(root)
+            if project is None:
+                self._append_log(f"升级接力跳过不存在的项目：{root}")
                 continue
-            extra = self.pm.by_root(extra_root)
-            if extra is None:
-                self._append_log(f"升级接力跳过不存在的项目：{extra_root}")
+            if project.id in seen:
                 continue
-            if extra.permission_mode == "system" and (
+            seen.add(project.id)
+            if project.permission_mode == "system" and (
                 not self._app_config.first_system_risk_accepted
                 or not self._app_config.full_system_risk_accepted
             ):
-                self._append_log(f"升级接力未自动恢复 {extra.display_name or extra.root_path}：完全访问模式尚未确认。")
+                self._append_log(f"升级接力未自动恢复 {project.display_name or project.root_path}：完全访问模式尚未确认。")
                 continue
-            self._append_log(f"升级接力同时恢复项目引擎：{extra.display_name or extra.root_path}")
-            self._start_project_engine_for(extra)
-            restored_extra += 1
-        if restored_extra:
-            self._append_log(f"升级接力已安排恢复额外项目：{restored_extra} 个。")
-
+            targets.append(project)
+        if not targets:
+            self._append_log("升级接力没有需要恢复的运行项目。")
+            return
+        self._select_root(targets[0].root_path)
+        self._apply_selected_project()
+        self._append_log(f"检测到升级接力请求，正在平等恢复 {len(targets)} 个运行根；没有入口项目。")
+        for project in targets:
+            self._start_project_engine_for(project)
     # --------------------------------------------------------------- end
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         if (

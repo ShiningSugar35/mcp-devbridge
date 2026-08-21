@@ -153,29 +153,24 @@ def assign_project_ports(
     index: int | None = None,
     base_codex: int = constants.DEFAULT_CODEXPRO_PORT,
     base_windows: int = constants.DEFAULT_WINDOWS_MCP_PORT,
-    base_gateway: int = constants.DEFAULT_GATEWAY_PORT,
 ) -> list[ProjectConfig]:
-    """Assign per-project internal ports (0 = unset) without collisions.
+    """Assign only per-project engine ports without collisions.
 
-    ``index`` selects the project whose ports are being allocated (defaults to
-    the first project with any unset port). Uses the lowest free integer >= the
-    default base for each kind, skipping ports already claimed by other
-    projects (or by a coexisting project of the other kind when the bases
-    differ). Pure function; caller persists the result.
+    Gateway is a shared Hub service and therefore uses AppConfig.gateway_port;
+    it is deliberately not allocated per project.
     """
     used_codex = {p.codexpro_port for p in projects if p.codexpro_port}
     used_windows = {p.windows_bridge_port for p in projects if p.windows_bridge_port}
-    used_gateway = {p.gateway_port for p in projects if p.gateway_port}
 
     if index is None:
         for idx, project in enumerate(projects):
-            if not project.codexpro_port or not project.windows_bridge_port or not project.gateway_port:
+            if not project.codexpro_port or not project.windows_bridge_port:
                 index = idx
                 break
         if index is None:
             return projects
     target = projects[index]
-    all_used = used_codex | used_windows | used_gateway
+    all_used = used_codex | used_windows
     if not target.codexpro_port:
         port = find_free(base_codex, all_used)
         target.codexpro_port = port
@@ -184,12 +179,7 @@ def assign_project_ports(
         port = find_free(base_windows, all_used)
         target.windows_bridge_port = port
         all_used.add(port)
-    if not target.gateway_port:
-        port = find_free(base_gateway, all_used)
-        target.gateway_port = port
-        all_used.add(port)
     return projects
-
 
 def find_free(base: int, used: set[int]) -> int:
     port = base

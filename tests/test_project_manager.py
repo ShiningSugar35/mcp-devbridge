@@ -6,6 +6,7 @@ Real dual-engine spawn verification lives in test_parallel_real_engines
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -113,7 +114,7 @@ def test_add_assigns_unique_ports(manager: tuple[ProjectManager, Path]) -> None:
     assert proj_a.codexpro_port != proj_b.windows_bridge_port
 
 
-def test_list_backfills_ports_and_ids_for_legacy_configs(tmp_path: Path) -> None:
+def test_list_backfills_engine_ports_and_ids_for_legacy_configs(tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     os.environ["LOCALDEV_MCP_CONFIG_DIR"] = str(config_dir)
     try:
@@ -124,50 +125,51 @@ def test_list_backfills_ports_and_ids_for_legacy_configs(tmp_path: Path) -> None
             permission_mode="workspace",
         )
         save_projects([legacy])
-        pm = ProjectManager(unit_factory=lambda p: _FakeUnit(p))
-        projects = pm.list()
+        projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
         assert len(projects) == 1
         assert projects[0].id
         assert projects[0].codexpro_port == constants.DEFAULT_CODEXPRO_PORT
         assert projects[0].windows_bridge_port == constants.DEFAULT_WINDOWS_MCP_PORT
-        assert projects[0].gateway_port == constants.DEFAULT_GATEWAY_PORT
+        assert not hasattr(projects[0], "gateway_port")
     finally:
         os.environ.pop("LOCALDEV_MCP_CONFIG_DIR", None)
 
 
-def test_list_backfills_all_legacy_gateway_ports(tmp_path: Path) -> None:
+def test_legacy_per_project_gateway_port_is_ignored(tmp_path: Path) -> None:
     config_dir = tmp_path / "config-many"
     os.environ["LOCALDEV_MCP_CONFIG_DIR"] = str(config_dir)
     try:
-        first = ProjectConfig(
-            id="legacy-a",
-            display_name="legacy-a",
-            root_path=str(tmp_path / "legacy-a"),
-            codexpro_port=18787,
-            windows_bridge_port=28731,
-            gateway_port=0,
-        )
-        second = ProjectConfig(
-            id="legacy-b",
-            display_name="legacy-b",
-            root_path=str(tmp_path / "legacy-b"),
-            codexpro_port=18788,
-            windows_bridge_port=28732,
-            gateway_port=0,
-        )
-        save_projects([first, second])
+        payload = {
+            "projects": [
+                {
+                    "id": "legacy-a",
+                    "display_name": "legacy-a",
+                    "root_path": str(tmp_path / "legacy-a"),
+                    "codexpro_port": 18787,
+                    "windows_bridge_port": 28731,
+                    "gateway_port": 18786,
+                },
+                {
+                    "id": "legacy-b",
+                    "display_name": "legacy-b",
+                    "root_path": str(tmp_path / "legacy-b"),
+                    "codexpro_port": 18788,
+                    "windows_bridge_port": 28732,
+                    "gateway_port": 18789,
+                },
+            ]
+        }
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "projects.json").write_text(json.dumps(payload), encoding="utf-8")
         projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
-        assert all(project.gateway_port for project in projects)
-        assert projects[0].gateway_port != projects[1].gateway_port
+        assert all(not hasattr(project, "gateway_port") for project in projects)
         claimed = {
             *(project.codexpro_port for project in projects),
             *(project.windows_bridge_port for project in projects),
-            *(project.gateway_port for project in projects),
         }
-        assert len(claimed) == 6
+        assert len(claimed) == 4
     finally:
         os.environ.pop("LOCALDEV_MCP_CONFIG_DIR", None)
-
 
 def test_duplicate_add_returns_existing(manager: tuple[ProjectManager, Path]) -> None:
     pm, tmp = manager
@@ -286,8 +288,6 @@ def test_parallel_real_engines(real_manager: tuple[ProjectManager, Path]) -> Non
     proj_b.codexpro_port = 19788
     proj_a.windows_bridge_port = 29731
     proj_b.windows_bridge_port = 29732
-    proj_a.gateway_port = 19786
-    proj_b.gateway_port = 19789
     pm.reconfigure(proj_a)
     pm.reconfigure(proj_b)
     try:
@@ -322,7 +322,6 @@ def test_v081_drive_root_gets_nonempty_display_name(
                 root_path="C:\\",
                 codexpro_port=19001,
                 windows_bridge_port=29001,
-                gateway_port=19002,
             )
         ]
     )

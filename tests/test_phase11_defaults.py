@@ -29,4 +29,4 @@ def test_new_project_public_and_optional_fields_start_clean() -> None:
     assert project.connection == "local"
     assert project.codexpro_port == 0
     assert project.windows_bridge_port == 0
-    assert project.gateway_port == 0
+    assert not hasattr(project, "gateway_port")

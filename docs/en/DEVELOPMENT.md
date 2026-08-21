@@ -80,16 +80,16 @@ Changes to Gateway/CodexPro routing must preserve these invariants:
 
 ## Windows packaging
 
-Build the complete v0.8.2 release candidate with:
+Build the complete v0.8.3 release candidate with:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.2
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.3
 ```
 
 The build uses a versioned staging directory and verifies the private runtime payload before compiling the Inno Setup installer. The output installer is:
 
 ```text
-release/MCPDevBridge-Setup-0.8.2.exe
+release/MCPDevBridge-Setup-0.8.3.exe
 ```
 
 The Inno Setup definition uses per-user installation and `DisableDirPage=no`, so the destination-directory page remains available. Do not change this back to an automatically hidden directory page without an explicit product decision.
@@ -99,7 +99,7 @@ The Inno Setup definition uses per-user installation and `DisableDirPage=no`, so
 On the Linux build host:
 
 ```bash
-bash scripts/build_linux.sh 0.8.2
+bash scripts/build_linux.sh 0.8.3
 ```
 
 The script performs runtime preparation, CodexPro build, Python tests/lint/typecheck, the complete CodexPro smoke suite, PyInstaller, a frozen headless smoke, and tarball creation.
@@ -107,7 +107,7 @@ The script performs runtime preparation, CodexPro build, Python tests/lint/typec
 The output is:
 
 ```text
-release/MCPDevBridge-Linux-x86_64-0.8.2.tar.gz
+release/MCPDevBridge-Linux-x86_64-0.8.3.tar.gz
 ```
 
 The tarball includes `install.sh`. Installation defaults to `~/.local/opt/MCPDevBridge`, while `install.sh --target-dir <path>` supports a safe custom user-writable location.
@@ -126,15 +126,20 @@ Use the script’s dry-run path before changing release behavior.
 
 ## Git and release discipline
 
-The v0.8.2 maintenance branch is `release/v0.8.2`. The repository also contains newer historical v0.9.x tags/branches. Do not rewrite, delete, or force-push those histories as part of v0.8.2 maintenance.
+The v0.8.3 maintenance branch is `release/v0.8.3`. The repository also contains newer historical v0.9.x tags/branches. Do not rewrite, delete, or force-push those histories as part of v0.8.3 maintenance.
 
 A production release is complete only when:
 
 1. source gates pass from a clean candidate tree;
 2. the release commit is pushed;
-3. tag `v0.8.2` points to that exact commit;
+3. tag `v0.8.3` points to that exact commit;
 4. the GitHub Release workflow produces Windows and Linux assets from that tag;
 5. the published Release assets and checksums are verified;
 6. the Windows installed instance/shortcut is switched to the final release asset.
 
 Actual test counts, artifact sizes, hashes, commit IDs and final Release state are recorded in the root `进度验收.md`; do not copy stale numbers from older releases into this document.
+
+
+### Entry-model regression guard
+
+The v0.8.3 tests intentionally reject reintroducing project ownership into ServiceCoordinator. StartOptions must remain transport-only; ProjectConfig must not regain a Gateway port; automatic workspace fallback must remain stateless unless the client explicitly requests the compatibility switch tool.
