@@ -1,29 +1,108 @@
 # Security
 
-## v0.5.0 security model
+## v0.8.2 security model
 
-- All engines, Gateway and legacy backend bind to loopback only; only a configured tunnel is public.
-- Public Cloudflare/ngrok/Quick traffic terminates at the OAuth/Bearer Gateway, never directly at CodexPro.
-- Bearer and Cloudflare tunnel values are **per project** and stored in Windows Credential Manager or the DPAPI fallback; they are not plaintext fields in `projects.json`.
-- Legacy shared Bearer migration is single-owner: the first compatible project can inherit the old value, while later projects receive unique credentials. This keeps direct-Bearer workspace routing unambiguous.
-- Gateway comparisons use timing-safe equality. OAuth workspace routing replaces the public credential with the target project's upstream Bearer.
-- With a workspace registry, Gemini consent requires an explicitly selected **running** workspace: missing selection returns 400; a stopped workspace returns 409; neither path issues an authorization code.
-- Audit and diagnostic views never print protected values; sensitive parameter names remain redacted.
-- Desktop new projects intentionally default to `system + full_system` (“完全访问（危险）”). The first actual use still requires the one-time risk acknowledgement. Users can explicitly reduce access to `workspace + developer` or read-only.
-- The application blocks known destructive disk/system command patterns in every execution profile.
-- Window shutdown performs process cleanup off the GUI thread.
-- Upgrade handoff files contain only non-secret metadata; the new process reloads protected values from SecretsStore.
+MCP DevBridge intentionally grants a remote MCP client powerful local-development capabilities. v0.8.2 expands routing across multiple simultaneously-running roots, but that routing layer does not expand the filesystem boundary beyond roots the user explicitly started.
 
-## v0.7 Multi-Device security
+## Network boundary
 
-- Pairing codes are six-digit, single-use and memory-only with a ten-minute lifetime. They are never persisted.
-- `devices.json` contains only device id/name, endpoint and timestamps. Remote MCP Bearer values and heartbeat secrets are stored in Windows Credential Manager / DPAPI-backed `SecretsStore`.
-- Heartbeats require the per-device secret and update the remote endpoint; remote endpoints must use HTTPS (loopback HTTP exists only for local development/tests).
-- The Hub swaps its own client credential for the selected remote device's Bearer only on the outbound proxy request. Device credentials are not returned through MCP tools or written to audit/network logs.
-- Gateway tool audit continues using the existing redaction policy, including complete masking of command/content/patch values and secret-like key names.
-- A remote device using Local-only mode cannot join a Hub because its loopback address is not reachable from another physical computer.
+- CodexPro, the OAuth/Bearer Gateway, optional Windows-MCP, and the legacy backend bind to loopback interfaces.
+- Public traffic reaches the Gateway only through an explicitly configured Cloudflare/ngrok/Quick Tunnel.
+- Public clients authenticate with OAuth or a compatible Bearer path before requests are proxied upstream.
+- Loopback-anonymous behavior exists only for local compatibility paths; control/public paths continue to require authentication as defined by the component.
+- Public URL and credential are separate concepts. Bearer tokens, OAuth secrets, tunnel tokens, and heartbeat secrets must never be embedded in the public MCP URL.
 
-## v0.7.1 command task security
+## Multi-root authorization and routing
 
-Every public `bash` invocation is a task, but task execution does not bypass normal security. The in-memory task registry is shared across MCP server/session instances inside one CodexPro process, but every lookup remains workspace-scoped. `bash` uses the same PathGuard, workspace selection, bash session guard, safe/developer/full policy and destructive-command blocks before spawning. Task output is redacted before MCP responses and stored only in memory-bounded rolling buffers. `cancel_task` terminates the process tree rather than only the shell parent. No task command/output transcript is persisted by the task manager, and running tasks are intentionally not resumed after a DevBridge restart.
-The 600-second orchestration watchdog is non-destructive: it only annotates stale task snapshots and never sends a signal to the child process.
+Every READY project root is active at the same time. This is a routing model, not a permission bypass.
+
+- Absolute paths are canonicalized before matching active roots.
+- The most specific containing active root wins when roots are nested.
+- Relative paths route automatically only when exactly one active root is supported by the evidence.
+- Equally-valid matches are rejected as ambiguous and require an absolute path.
+- A `task_id` is bound to the root/engine that created it.
+- An opaque CodexPro `workspace_id` is only weak follow-up affinity and cannot override stronger path/cwd evidence.
+- A historical session/workspace selection or bootstrap project must not silently override an explicit target path.
+- One tool call that clearly spans multiple active roots must be split or explicitly disambiguated rather than silently executed in one root.
+
+## Filesystem containment
+
+Containment uses canonical/real-path semantics. Textual prefix checks are insufficient.
+
+- `..` cannot escape the routed root.
+- POSIX symlinks and Windows symlinks/junctions cannot make a textual in-root path resolve outside the root.
+- Gateway-local `run_command` / `run_program` validates `cwd` through the same root boundary before spawning.
+- Root-drive tree/inventory scans may encounter protected directories. `EACCES` / `EPERM` subtrees are skipped with warnings so scanning continues, but the permission error never grants access to those directories.
+- Scoped Git discovery may walk upward only to identify the nearest repository relevant to the target path; it does not broaden arbitrary file access.
+
+## Permission and execution profiles
+
+The desktop combines file permissions with command profiles:
+
+| Desktop mode | File permission | Command profile |
+|---|---|---|
+| Read-only | `read_only` | `safe` |
+| Project workspace | `workspace` | `developer` |
+| Full access (default, dangerous) | `system` | `full_system` |
+
+New desktop projects intentionally default to full access. The first actual use still requires the one-time risk acknowledgement. Users can reduce permission to project-workspace or read-only mode.
+
+`system/full_system` permits system-level work such as registry or environment configuration when requested. It does not disable hard blocks for known destructive disk/boot/system command patterns. Path restrictions on a tool’s working directory also remain separate from what an explicitly-authorized system command is allowed to do.
+
+## Shell task security
+
+Every public CodexPro `bash` invocation uses the same PathGuard, workspace selection, Bash session policy, execution profile, destructive-command checks, and environment sanitization before spawning.
+
+`BashTaskManager` is process-scoped so a task can be found across MCP transport/session replacement, while task ownership remains workspace-scoped. Output is stored only in bounded in-memory rolling buffers and is redacted before MCP responses. `cancel_task` terminates the process tree rather than only the shell parent.
+
+The 600-second orchestration watchdog is advisory. It marks a stale snapshot and supplies a resume hint; it never changes task status or sends a termination signal. Running tasks are intentionally not persisted across DevBridge/CodexPro restarts.
+
+## Secrets storage
+
+### Windows
+
+Protected values prefer Windows Credential Manager. The existing encrypted DPAPI file is retained as the fallback. Secrets are not plaintext fields in `projects.json`.
+
+### Linux / SteamOS
+
+Protected values prefer the desktop Secret Service when available. The fallback is an AES-GCM encrypted user-level store. New key/ciphertext files are created with user-only permissions where POSIX mode bits are available, and the application config directories are created with user-only access.
+
+### Common rules
+
+The following must never be written in plaintext to repository files, normal config JSON, audit logs, URLs, or upgrade-resume metadata:
+
+- MCP Bearer tokens;
+- OAuth client/access/refresh secrets;
+- Cloudflare tunnel tokens;
+- remote-device Bearer/heartbeat credentials;
+- other values whose field names are recognized as secret-like.
+
+Gateway comparisons for compatible Bearer authentication use timing-safe equality where applicable.
+
+## OAuth Hub model
+
+v0.8.2 OAuth authorizes the Hub. The browser consent page does not require selecting an “entry project”. After authorization, the concrete active root is selected from the actual tool call’s routing evidence and the Gateway swaps to that project’s upstream credential for the proxied request.
+
+Legacy per-project Bearer behavior may remain for compatibility. It must not become a hidden routing fence for a normal Hub OAuth session.
+
+## Multi-device security
+
+Pairing codes are short-lived and memory-only. `devices.json` contains non-secret identity/endpoint/timestamp metadata only; per-device authentication and heartbeat secrets remain in `SecretsStore`.
+
+Remote endpoints must be HTTPS except explicitly local development/test paths. The Hub uses a remote device credential only for the outbound proxy request and does not return that credential through MCP tools.
+
+Device selection and active-root routing are separate boundaries: selecting a remote device does not expose its filesystem paths to local path resolution; routing is delegated to that device.
+
+## Audit and logging
+
+Gateway audit is on the real public `tools/call` path. Sensitive arguments such as command/content/patch values and recognized secret-like keys are redacted before persistence or display. Diagnostic and process logs must avoid printing credentials, tokens, or raw authorization headers.
+
+## Installer and update security
+
+Windows releases are per-user and support a user-selected install location. Detached upgrade metadata is non-secret; the restarted process reloads credentials from `SecretsStore`.
+
+Linux/SteamOS installs are user-level. `install.sh` canonicalizes custom target directories and refuses destructive roots such as `/`, `$HOME`, and `$HOME/.local`, as well as unrelated non-empty targets. Desktop-entry command lines are escaped before being written.
+
+Relative `XDG_CONFIG_HOME` / `XDG_DATA_HOME` values are treated as invalid rather than being used as attacker-controlled relative filesystem roots.
+
+Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.2 maintenance release.

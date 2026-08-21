@@ -2,6 +2,18 @@
 
 All dates are local development dates.
 
+## 0.8.2 (2026-08-21) — active-root autorouting and Linux/SteamOS recovery
+
+- Replace the user-facing entry/current-workspace model with peer active roots: every READY project root participates in routing, and descendants inherit the root boundary without per-subdirectory registration.
+- Route absolute targets to the most specific containing root; route relative targets only when the evidence is unique; reject ambiguous same-name paths instead of guessing.
+- Preserve task affinity across follow-up task calls while treating opaque CodexPro workspace handles as weaker than current path/cwd evidence.
+- Harden containment with canonical real paths, including `..` and symlink/junction escapes, and validate Gateway-local command/program `cwd` before execution.
+- Make drive-root inventory/tree inspection tolerate inaccessible subdirectories with warnings and continue; make scoped Git operations discover the nearest nested repository.
+- Remove the desktop entry column, keep all running roots active, preserve the shared Hub while any root remains, and add bulk start/stop plus bulk connection/permission settings.
+- Keep the Windows Inno Setup destination-directory page available so users can choose a custom installation location.
+- Restore Linux/SteamOS Desktop Mode support without reintroducing the v0.9+ multi-Agent runtime: XDG-aware config/data paths, Secret Service/AES-GCM storage, POSIX shell/process handling, safe custom user-level installation, live upgrade, PyInstaller packaging, and Ubuntu 22.04 CI/release builds.
+- Keep v0.9.x branches/tags as untouched history; v0.8.2 remains the maintenance release line.
+
 ## 0.8.1 (2026-08-17) — stateless multi-workspace routing hotfix
 
 - Fix ChatGPT custom-app calls falling back to the Hub entry workspace when the client recreates the underlying MCP transport session between tool-call batches.
@@ -43,7 +55,7 @@ All dates are local development dates.
 - Restored the complete CodexPro Windows smoke chain by aligning stale Tool Cards, connection-test, doctor/settings and execute-handoff expectations with current behavior.
 - Verification before packaging: 304 Python tests passed; Ruff clean; Pyright 0/0; TypeScript build green; full `npm run smoke` green, including real MCP `bash → wait_task` and cancel-process-tree coverage.
 
-## 0.7.0 (2026-08-13)## 0.7.0 (2026-08-13) — Multi-Device Hub and beginner-facing UX
+## 0.7.0 (2026-08-13) — Multi-Device Hub and beginner-facing UX
 
 - Added a device registry with stable local identity, one-time pairing codes, encrypted per-device Bearer/heartbeat credentials and heartbeat-based presence.
 - Added Hub routes `/device/register` and `/device/heartbeat`; remote Quick Tunnel URL changes are learned automatically from heartbeats.
