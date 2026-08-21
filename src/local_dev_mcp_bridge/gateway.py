@@ -231,7 +231,7 @@ button{{font-size:15px;padding:8px 22px;border-radius:6px;cursor:pointer}}
 <body><h1>MCP DevBridge - 访问授权</h1>
 <p>AI 客户端正在请求访问这个 MCP DevBridge Hub。</p>
 <dl>{rows}</dl>
-<p class="note">授权后无需在这里选择项目。连接成功后可以在同一个 ChatGPT / Gemini 会话中切换在线电脑和工作区；只有一个可用目标时会自动选择。</p>
+<p class="note">授权后无需选择“入口项目”。本机所有运行中的工作区根会同时参与自动路由；有多台在线电脑时仍可按需切换目标设备。</p>
 <form method="post" action="/consent">
 <input type="hidden" name="id" value="{cid}">
 <button type="submit" name="decision" value="allow" class="allow">允许访问</button>

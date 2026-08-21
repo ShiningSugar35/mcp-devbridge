@@ -499,8 +499,8 @@ def test_secrets_not_logged_to_disk(env: _Env, tmp_path: Path) -> None:
 
 WORKSPACE_A_ID = "workspace-aaaa"
 WORKSPACE_B_ID = "workspace-bbbb"
-WORKSPACE_A_ROOT = "C:\\Projects\\Alpha"
-WORKSPACE_B_ROOT = "C:\\Projects\\Beta"
+WORKSPACE_A_ROOT = "C:\\Projects\\Alpha" if os.name == "nt" else "/Projects/Alpha"
+WORKSPACE_B_ROOT = "C:\\Projects\\Beta" if os.name == "nt" else "/Projects/Beta"
 
 
 def test_workspace_from_subject_parsing() -> None:
@@ -645,7 +645,7 @@ def test_consent_page_has_no_workspace_selector(env: _Env) -> None:
     assert page.status_code == 200
     assert "允许访问" in page.text
     assert 'name="workspace_id"' not in page.text
-    assert "连接成功后" in page.text
+    assert "所有运行中的工作区根" in page.text
 
 
 def test_oauth_token_is_hub_scoped_not_workspace_scoped(mw_env: _MultiWorkspaceEnv) -> None:
@@ -733,7 +733,7 @@ def test_direct_project_bearer_authenticates_hub_without_pinning_workspace(
             "method": "tools/call",
             "params": {
                 "name": "read",
-                "arguments": {"path": WORKSPACE_B_ROOT + r"\README.md"},
+                "arguments": {"path": os.path.join(WORKSPACE_B_ROOT, "README.md")},
             },
         }
     )
@@ -1268,7 +1268,7 @@ def test_v082_workspace_handle_affinity_survives_followup_without_path(
                 "method": "tools/call",
                 "params": {
                     "name": "open_workspace",
-                    "arguments": {"root": WORKSPACE_B_ROOT + r"\Nested"},
+                    "arguments": {"root": os.path.join(WORKSPACE_B_ROOT, "Nested")},
                 },
             }
         ),

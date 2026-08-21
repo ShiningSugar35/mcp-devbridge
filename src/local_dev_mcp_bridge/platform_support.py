@@ -89,8 +89,8 @@ def desktop_dir() -> Path:
         return Path.home() / "Desktop"
     # KDE/SteamOS respects XDG user dirs.  Avoid invoking shell code just to find
     # it; parse the generated config if present and otherwise use ~/Desktop.
-    xdg_config = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    config_root = Path(xdg_config).expanduser() if xdg_config else Path.home() / ".config"
+    config_root = _xdg_home("XDG_CONFIG_HOME", Path.home() / ".config")
+
     config = config_root / "user-dirs.dirs"
     if config.is_file():
         try:
@@ -113,12 +113,21 @@ def linux_install_root() -> Path:
     return Path.home() / ".local" / "opt" / "MCPDevBridge"
 
 
+def _xdg_home(name: str, fallback: Path) -> Path:
+    """Return an XDG base directory, ignoring invalid relative overrides."""
+    raw = os.environ.get(name, "").strip()
+    candidate = Path(raw).expanduser() if raw else None
+    return candidate if candidate is not None and candidate.is_absolute() else fallback
+
+
 def linux_desktop_entry_path() -> Path:
-    return Path.home() / ".local" / "share" / "applications" / "mcp-devbridge.desktop"
+    data_home = _xdg_home("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    return data_home / "applications" / "mcp-devbridge.desktop"
 
 
 def linux_autostart_entry_path() -> Path:
-    return Path.home() / ".config" / "autostart" / "mcp-devbridge.desktop"
+    config_home = _xdg_home("XDG_CONFIG_HOME", Path.home() / ".config")
+    return config_home / "autostart" / "mcp-devbridge.desktop"
 
 
 __all__ = [

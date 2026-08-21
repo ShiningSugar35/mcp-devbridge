@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -26,7 +27,8 @@ def _mk_ws(tmp_path: Path) -> Path:
 class TestRunCommand:
     def test_success(self, tmp_path: Path) -> None:
         ws = _mk_ws(tmp_path)
-        res = run_command("Write-Output 'hi'", cwd=ws, timeout_seconds=30)
+        command = "Write-Output 'hi'" if os.name == "nt" else "printf '%s\\n' hi"
+        res = run_command(command, cwd=ws, timeout_seconds=30)
         assert res.exit_code == 0
         assert "hi" in res.stdout
 
@@ -37,42 +39,54 @@ class TestRunCommand:
 
     def test_chinese_output(self, tmp_path: Path) -> None:
         ws = _mk_ws(tmp_path)
-        res = run_command("Write-Output '中文输出测试'", cwd=ws, timeout_seconds=30)
+        command = "Write-Output '中文输出测试'" if os.name == "nt" else "printf '%s\\n' '中文输出测试'"
+        res = run_command(command, cwd=ws, timeout_seconds=30)
         assert res.exit_code == 0
         assert "中文输出测试" in res.stdout
 
     def test_env(self, tmp_path: Path) -> None:
         ws = _mk_ws(tmp_path)
-        res = run_command("Write-Output $env:MY_TEST_VAR", cwd=ws, env={"MY_TEST_VAR": "abc123"}, timeout_seconds=30)
+        command = (
+            "Write-Output $env:MY_TEST_VAR"
+            if os.name == "nt"
+            else "printf '%s\\n' \"$MY_TEST_VAR\""
+        )
+        res = run_command(command, cwd=ws, env={"MY_TEST_VAR": "abc123"}, timeout_seconds=30)
         assert "abc123" in res.stdout
 
     def test_cwd(self, tmp_path: Path) -> None:
         ws = _mk_ws(tmp_path)
-        res = run_command("(Get-Location).Path", cwd=ws, timeout_seconds=30)
+        command = "(Get-Location).Path" if os.name == "nt" else "pwd"
+        res = run_command(command, cwd=ws, timeout_seconds=30)
         assert str(ws).lower() in res.stdout.lower()
 
     def test_timeout_kills_tree(self, tmp_path: Path) -> None:
         ws = _mk_ws(tmp_path)
-        marker = "ldmb_timeout_probe_8391"
-        res = run_command(
-            f"Start-Process ping -ArgumentList '-t','127.0.0.1'; $env:LDMB_MARKER='{marker}'; Start-Sleep -Seconds 60",
-            cwd=ws,
-            timeout_seconds=3,
+        command = (
+            "Start-Process ping -ArgumentList '-t','127.0.0.1'; Start-Sleep -Seconds 60"
+            if os.name == "nt"
+            else "sleep 60"
         )
+        res = run_command(command, cwd=ws, timeout_seconds=3)
         assert res.timed_out
-        # The ping child should have been killed with the process tree.
-        time.sleep(1)
-        remaining = [
-            p for p in psutil.process_iter(["name", "cmdline"])
-            if p.info["name"] and "ping" in p.info["name"].lower()
-            and p.info["cmdline"] and "-t" in p.info["cmdline"]
-        ]
-        assert len(remaining) == 0
+        if os.name == "nt":
+            time.sleep(1)
+            remaining = [
+                p for p in psutil.process_iter(["name", "cmdline"])
+                if p.info["name"] and "ping" in p.info["name"].lower()
+                and p.info["cmdline"] and "-t" in p.info["cmdline"]
+            ]
+            assert len(remaining) == 0
 
     def test_output_truncation(self, tmp_path: Path) -> None:
         ws = _mk_ws(tmp_path)
+        command = (
+            "1..5000 | ForEach-Object { Write-Output ('line-' + $_) }"
+            if os.name == "nt"
+            else "for i in $(seq 1 5000); do echo line-$i; done"
+        )
         res = run_command(
-            "1..5000 | ForEach-Object { Write-Output ('line-' + $_) }",
+            command,
             cwd=ws,
             timeout_seconds=60,
             max_output_chars=2000,
@@ -100,10 +114,13 @@ class TestRunProgram:
 
 class TestShellHelpers:
     def test_find_powershell(self) -> None:
-        assert find_powershell().lower().endswith(("powershell.exe", "pwsh.exe"))
+        if os.name == "nt":
+            assert find_powershell().lower().endswith(("powershell.exe", "pwsh.exe"))
+        else:
+            assert find_powershell()
 
     def test_kill_process_tree(self) -> None:
-        proc = subprocess.Popen(["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 120"])
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         time.sleep(1)
         assert proc.poll() is None
         assert kill_process_tree(proc.pid)

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from local_dev_mcp_bridge.engines import SpawnError
+from local_dev_mcp_bridge.platform_support import runtime_filename
 from local_dev_mcp_bridge.tunnel_manager import (
     ConnectionMethod,
     TunnelManager,
@@ -121,12 +122,12 @@ class TestDefaults:
     def test_cloudflared_default_uses_packaged_exe_when_frozen(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        packaged = tmp_path / "cloudflared.exe"
+        packaged = tmp_path / runtime_filename("cloudflared")
         packaged.write_bytes(b"stub")
         monkeypatch.setattr("local_dev_mcp_bridge.tunnel_manager.sys.frozen", True, raising=False)
         monkeypatch.setattr(
             "local_dev_mcp_bridge.tunnel_manager.sys.executable",
-            str(tmp_path / "MCPDevBridge.exe"),
+            str(tmp_path / runtime_filename("MCPDevBridge")),
         )
         assert default_cloudflared() == str(packaged)
 

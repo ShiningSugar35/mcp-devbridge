@@ -307,6 +307,7 @@ def test_parallel_real_engines(real_manager: tuple[ProjectManager, Path]) -> Non
     assert not port_listening(b.codexpro_port)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows drive-root naming regression")
 def test_v081_drive_root_gets_nonempty_display_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

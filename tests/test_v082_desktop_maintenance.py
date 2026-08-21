@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QGroupBox, QMessageBox, QPushButton
 
 import local_dev_mcp_bridge.desktop_main as dm
 from local_dev_mcp_bridge.engines import EngineState
+from local_dev_mcp_bridge.platform_support import IS_WINDOWS
 
 
 def _window(tmp_path: Path, monkeypatch):
@@ -104,7 +105,7 @@ def test_save_connection_and_permission_card_to_all_projects(tmp_path: Path, mon
             assert saved.client_target == "gemini"
             assert saved.connection == dm.ConnectionMethod.CLOUDFLARE.value
             assert saved.public_hostname == "mcp.example.com"
-            assert saved.windows_enabled is True
+            assert saved.windows_enabled is IS_WINDOWS
             assert saved.gemini_redirect_uri == "https://example.com/oauth/callback"
             assert remembered[project_id] == "placeholder-value"
         saved_b = window.pm.get(project_b.id)

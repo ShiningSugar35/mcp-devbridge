@@ -79,6 +79,22 @@ def test_posix_popen_kwargs_do_not_emit_windows_creationflags(monkeypatch) -> No
     assert ps.run_platform_kwargs() == {}
 
 
+def test_linux_platform_paths_follow_absolute_xdg_overrides(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(ps, "IS_WINDOWS", False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    assert ps.linux_desktop_entry_path() == tmp_path / "data" / "applications" / "mcp-devbridge.desktop"
+    assert ps.linux_autostart_entry_path() == tmp_path / "config" / "autostart" / "mcp-devbridge.desktop"
+
+
+def test_linux_platform_paths_ignore_relative_xdg_overrides(monkeypatch) -> None:
+    monkeypatch.setattr(ps, "IS_WINDOWS", False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative-config")
+    monkeypatch.setenv("XDG_DATA_HOME", "relative-data")
+    assert ps.linux_desktop_entry_path() == Path.home() / ".local" / "share" / "applications" / "mcp-devbridge.desktop"
+    assert ps.linux_autostart_entry_path() == Path.home() / ".config" / "autostart" / "mcp-devbridge.desktop"
+
+
 def test_linux_release_asset_prefix(monkeypatch) -> None:
     monkeypatch.setattr(updates, "IS_WINDOWS", False)
     monkeypatch.setattr(updates, "IS_LINUX", True)
