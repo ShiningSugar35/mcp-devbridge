@@ -10,7 +10,7 @@ Architecture (多项目并行开发):
   "Workspace root is outside allowed roots" failure.
 * ``ProjectManager`` owns the catalog (``projects.json`` via ``config_store``),
   the running units and port allocation. ``enabled`` is retained for config/API
-  compatibility; v0.8.3 desktop routing treats every running unit as active.
+  compatibility; current desktop routing treats every running unit as active.
 * Pure Python (no Qt) so the whole lifecycle is unit-testable.
 """
 

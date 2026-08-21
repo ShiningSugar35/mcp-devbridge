@@ -172,7 +172,8 @@ try {
 await fs.writeFile(path.join(tmp, 'package.json'), JSON.stringify({
   scripts: {
     'test': "node --test",
-    'build:clients': "node -e \"console.log('clients ok')\""
+    'build:clients': "node -e \"console.log('clients ok')\"",
+    'test:longrun': "node -e \"setTimeout(() => console.log('LONG_RUN_OK'), 8000)\""
   }
 }, null, 2), 'utf8');
 await fs.mkdir(path.join(tmp, 'src'), { recursive: true });
@@ -242,7 +243,7 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'long_run_start', 'long_run_status', 'long_run_update', 'long_run_review', 'long_run_complete', 'long_run_list', 'long_run_cancel', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
 const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
@@ -250,6 +251,9 @@ const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 const bashSchemaProperties = toolsByName.get('bash')?.inputSchema?.properties ?? {};
 if ('timeout_ms' in bashSchemaProperties) {
   throw new Error(`bash should not expose timeout_ms: ${JSON.stringify(bashSchemaProperties)}`);
+}
+if (!('long_run_id' in bashSchemaProperties) || !('long_run_step_id' in bashSchemaProperties)) {
+  throw new Error(`bash missing durable long-run attachment fields: ${JSON.stringify(bashSchemaProperties)}`);
 }
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -422,6 +426,93 @@ if (current.structuredContent.codexpro_tool !== 'open_current_workspace') throw 
 if (current.structuredContent.tool_mode !== 'full') throw new Error(`open_current_workspace did not expose tool_mode: ${current.structuredContent.tool_mode}`);
 if (current.structuredContent.skill_inventory?.length) {
   throw new Error('open_current_workspace discovered skills by default');
+}
+const longRunStarted = await client.request('tools/call', {
+  name: 'long_run_start',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    title: 'stdio durable run',
+    objective: 'verify browser-safe plan, task, review and completion gates',
+    steps: [
+      { title: 'prepare', acceptance_criteria: ['prepared evidence exists'] },
+      { title: 'execute', acceptance_criteria: ['background execution is terminal and evidenced'] }
+    ],
+    acceptance_criteria: ['completion is refused before a current PASS review']
+  }
+});
+const longRunId = longRunStarted.structuredContent.run_id;
+if (!/^lr_/.test(longRunId ?? '')) throw new Error(`long_run_start did not return a run id: ${JSON.stringify(longRunStarted.structuredContent)}`);
+await expectToolError('long_run_complete', {
+  workspace_id: current.structuredContent.workspace_id,
+  run_id: longRunId,
+  summary: 'must not complete early'
+}, /cannot complete|step s1/i);
+await client.request('tools/call', {
+  name: 'long_run_update',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    run_id: longRunId,
+    step_id: 's1',
+    step_status: 'done',
+    evidence: ['stdio smoke prepared the fixture']
+  }
+});
+const longRunTask = await client.request('tools/call', {
+  name: 'bash',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    command: 'npm run test:longrun',
+    long_run_id: longRunId,
+    long_run_step_id: 's2'
+  }
+});
+if (longRunTask.structuredContent.task?.status !== 'running') throw new Error(`attached task was not running after start: ${JSON.stringify(longRunTask.structuredContent)}`);
+await client.request('tools/call', {
+  name: 'long_run_update',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    run_id: longRunId,
+    step_id: 's2',
+    step_status: 'done',
+    evidence: ['background task id persisted before terminal result']
+  }
+});
+await expectToolError('long_run_review', {
+  workspace_id: current.structuredContent.workspace_id,
+  run_id: longRunId,
+  verdict: 'pass',
+  summary: 'must not pass while background work is still running',
+  evidence: ['review inspected attached background task']
+}, /background work is not terminal|running/i);
+const longRunTaskDone = await waitForTask(client, longRunTask, current.structuredContent.workspace_id, 10);
+if (longRunTaskDone.structuredContent.task.status !== 'completed') throw new Error(`attached long-run task did not complete: ${JSON.stringify(longRunTaskDone.structuredContent)}`);
+await client.request('tools/call', {
+  name: 'long_run_review',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    run_id: longRunId,
+    verdict: 'pass',
+    summary: 'all plan criteria and attached background work are complete',
+    evidence: ['LONG_RUN_OK task completed with exit code 0']
+  }
+});
+const longRunComplete = await client.request('tools/call', {
+  name: 'long_run_complete',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    run_id: longRunId,
+    summary: 'stdio durable long-run quality gate passed'
+  }
+});
+if (longRunComplete.structuredContent.status !== 'completed') throw new Error(`long_run_complete failed: ${JSON.stringify(longRunComplete.structuredContent)}`);
+const longRunStatePath = path.join(tmp, '.ai-bridge', 'long-runs', `${longRunId}.json`);
+if (!(await fs.stat(longRunStatePath)).isFile()) throw new Error('durable long-run JSON was not persisted');
+const longRunList = await client.request('tools/call', {
+  name: 'long_run_list',
+  arguments: { workspace_id: current.structuredContent.workspace_id }
+});
+if (!longRunList.structuredContent.runs?.some?.((run) => run.run_id === longRunId && run.status === 'completed')) {
+  throw new Error(`long_run_list did not recover completed run: ${JSON.stringify(longRunList.structuredContent)}`);
 }
 const currentWithSkills = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false, include_skills: true } });
 const activeSmokeSkills = currentWithSkills.structuredContent.skill_inventory?.filter?.((skill) => skill.name === 'smoke-skill') ?? [];
@@ -1252,8 +1343,8 @@ async function assertToolMode(mode, expected, hidden, extraEnv = {}) {
   modeClient.close();
 }
 
-await assertToolMode('', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'show_changes', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
-await assertToolMode('minimal', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'show_changes'], ['inspect_workspace', 'tree', 'search', 'load_skill', 'view_image', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
+await assertToolMode('', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'show_changes', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'long_run_start', 'long_run_status', 'long_run_update', 'long_run_review', 'long_run_complete', 'long_run_list', 'long_run_cancel'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
+await assertToolMode('minimal', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'apply_patch', 'bash', 'get_task', 'wait_task', 'list_tasks', 'cancel_task', 'show_changes', 'long_run_start', 'long_run_status', 'long_run_update', 'long_run_review', 'long_run_complete', 'long_run_list', 'long_run_cancel'], ['inspect_workspace', 'tree', 'search', 'load_skill', 'view_image', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
 await assertToolMode('', ['codexpro', 'server_config', 'show_changes', 'search'], ['inspect_workspace'], { CODEXPRO_ANALYSIS: '0' });
 
 const handoffWriteClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--write', 'handoff'], {

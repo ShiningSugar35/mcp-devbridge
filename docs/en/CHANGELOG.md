@@ -2,6 +2,17 @@
 
 All dates are local development dates.
 
+## 0.8.4 (2026-08-22) — durable long-run orchestration
+
+- Add durable `long_run_start/status/list/update/review/complete/cancel` MCP tools for multi-phase or multi-hour work. Plans, acceptance criteria, evidence, checkpoints, review rounds and task recovery state are persisted under `.ai-bridge/long-runs/` instead of relying on a live browser request or model context.
+- Require evidence before a plan step can be marked done; track work revisions so any post-review work invalidates an older PASS until the current revision is reviewed again.
+- Add evaluator/rework gates: FAIL reviews must identify failed criteria and actionable rework, reopen affected steps, and stay bounded by a maximum review count.
+- Attach background `bash` tasks directly to durable runs with optional `long_run_id` / `long_run_step_id`; final review/completion refuses while attached work is running/cancelling or is unknown after a process restart without explicit terminal evidence.
+- Keep background tasks execution-unbounded while keeping MCP polling bounded; return adaptive 5/15/30-second polling hints so ChatGPT/Codex/browser hosts do not need a minutes/hours-long `tools/call`.
+- Harden local `loop-handoff`: two-hour executor default, one-hour reviewer/test defaults, five evaluator/rework iterations, durable phase/timestamp/exit-code/terminal-reason state, and fail-closed exception recording.
+- Keep native `io.modelcontextprotocol/tasks` as a future negotiated path instead of making it a baseline dependency, because current host/client support is still uneven; the ordinary-tool durable fallback works with existing MCP hosts.
+- Raise the bundled CodexPro MCP SDK minimum to `@modelcontextprotocol/sdk ^1.30.0` (current resolved 1.30.0) and retain zero-known-vulnerability npm audit.
+
 ## 0.8.3 (2026-08-21) — entry-project removal hotfix
 
 - Remove the remaining internal entry/bootstrap ownership: the shared Hub no longer owns a project CodexPro/Windows engine, Local mode routes through the shared Gateway, per-project Gateway ports are removed, and automatic fallback no longer persists a session current workspace.
@@ -20,7 +31,7 @@ All dates are local development dates.
 - Remove the desktop entry column, keep all running roots active, preserve the shared Hub while any root remains, and add bulk start/stop plus bulk connection/permission settings.
 - Keep the Windows Inno Setup destination-directory page available so users can choose a custom installation location.
 - Restore Linux/SteamOS Desktop Mode support without reintroducing the v0.9+ multi-Agent runtime: XDG-aware config/data paths, Secret Service/AES-GCM storage, POSIX shell/process handling, safe custom user-level installation, live upgrade, PyInstaller packaging, and Ubuntu 22.04 CI/release builds.
-- Keep v0.9.x branches/tags as untouched history; v0.8.2 remains preserved release history; v0.8.3 is the current maintenance release line.
+- Keep v0.9.x branches/tags as untouched history; v0.8.2/v0.8.3 remain preserved release history; v0.8.4 is the current maintenance release line.
 
 ## 0.8.1 (2026-08-17) — stateless multi-workspace routing hotfix
 

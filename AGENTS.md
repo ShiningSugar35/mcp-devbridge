@@ -1,20 +1,21 @@
-# AGENTS.md — MCP DevBridge v0.8.3 维护指南
+# AGENTS.md — MCP DevBridge v0.8.4 维护指南
 
-本文件是仓库内 AI/Agent 与工程师的快速入口。当前维护线是 `release/v0.8.3`；v0.9+ 历史保留在远端，不得为了“补功能”把多 Agent runtime 重新混回本维护线。
+本文件是仓库内 AI/Agent 与工程师的快速入口。当前维护线是 `release/v0.8.4`；v0.9+ 历史保留在远端，不得为了“补功能”把多 Agent runtime 重新混回本维护线。
 
 ## 1. 开工阅读顺序
 
 1. `AGENTS.md`：当前硬约束与开发入口。
-2. `项目架构.md`：v0.8.3 真实运行架构、路由、安全和平台边界。
+2. `项目架构.md`：v0.8.4 真实运行架构、路由、安全和平台边界。
 3. `开发计划.md`：当前维护目标与发布门。
 4. `进度验收.md`：本轮实际验证结果与发布状态。
-5. `docs/en/`：公开英文架构、兼容、安全、开发与变更记录。
+5. `docs/en/LONG_RUNNING_TASKS.md`：数小时任务的 durable plan/checkpoint/review/rework 契约。
+6. `docs/en/` 其它文件：公开英文架构、兼容、安全、开发与变更记录。
 
 若文档与代码冲突，以**当前代码 + 可复现测试**为准，并在同一变更中修正文档。
 
 ## 2. 当前产品语义
 
-MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP 与 Hub Gateway，把本地开发目录提供给 ChatGPT / Gemini 等 MCP 客户端。Windows 是主要桌面平台；v0.8.3 同时恢复 Linux / SteamOS Desktop Mode 的用户目录安装、运行、升级与构建链。
+MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP 与 Hub Gateway，把本地开发目录提供给 ChatGPT / Gemini 等 MCP 客户端。Windows 是主要桌面平台；v0.8.4 同时恢复 Linux / SteamOS Desktop Mode 的用户目录安装、运行、升级与构建链。
 
 ### 多根路由是硬约束
 
@@ -35,6 +36,17 @@ MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP �
 - 根盘扫描遇到 `EACCES/EPERM` 等不可读目录应记录 warning 并继续，而不是让整次 tree/inventory/inspect 失败。
 - Git 工具在给定路径向上发现最近 Git 仓库，因此磁盘根项目下的嵌套仓库可直接使用。
 
+### 长任务执行纪律也是硬约束
+
+- 多阶段任务或预计超过约 2 分钟的工作，在有写权限时先调用 `long_run_start`，把 objective、steps 与 acceptance criteria 持久化。
+- 长命令只通过后台 `bash` 执行，并用 `long_run_id` / `long_run_step_id` 绑定；禁止把 build/test/install/upload 放进同步 `run_command` / `run_program` 等待数分钟。
+- 每个阶段完成后用 `long_run_update` 写 checkpoint/证据；步骤不能在无证据时标记 `done`。
+- 实现完成后必须 `long_run_review`。FAIL 必须形成可执行返工并重新审查；任何 review 后的工作变化都会让旧 PASS 失效。
+- `long_run_complete` 是最终 return 门：步骤、证据、最新 PASS revision 与后台任务状态全部通过前，不得向用户声称“一条龙已完成”。
+- 浏览器刷新、Connector 重连、上下文压缩后，以 `.ai-bridge/long-runs/<run_id>.json` 为事实源，通过 `long_run_list/status` 恢复；不得靠聊天记忆猜进度。
+- MCP/CodexPro 重启后若旧 `task_id` 变成 unknown，必须提供明确终态证据后再 resolve；不得把“找不到任务”当成成功。
+- 原生 MCP `io.modelcontextprotocol/tasks` 未来按 capability negotiation 接入；当前普通 tool-level durable fallback 不能因为宿主暂不支持 extension 而失效。
+
 ## 3. Hub、设备与连接方式
 
 公网模式链路：
@@ -54,7 +66,7 @@ OAuth/Bearer Gateway (loopback)
 - Gateway/Tunnel 是共享 Hub 连接，不属于某个“入口项目”。
 - 单独停止一个根不得影响其它 READY 根；最后一个运行根停止后才关闭共享 Hub/Tunnel。
 - 多设备选择与本机多根选择是两层概念。多台设备在线时可显式选择设备；目标设备内部仍按自己的 active roots 自动路由。
-- `Local` 模式是兼容的直接 loopback CodexPro 连接，不经过公网 Hub Gateway，因此它只代表所选本地引擎；需要同一个客户端地址跨多个根自动路由时使用 Hub/Gateway 路径。
+- `Local` 模式同样经过共享 loopback Gateway，只是不建立公网 Tunnel；一个 Local MCP 地址也能在所有 READY 根之间自动路由。
 
 ## 4. 安全与密钥
 
@@ -79,6 +91,7 @@ OAuth/Bearer Gateway (loopback)
 | `platform_support.py` | Windows/Linux 平台差异、XDG/桌面路径、进程参数 |
 | `secrets.py` | Windows Credential/DPAPI 与 Linux secret-service/AES-GCM |
 | `update_manager.py` | GitHub Release 检查、资产选择、更新接力 |
+| `third_party/codexpro/src/longRunOps.ts` | durable 长任务 plan/checkpoint/evidence/review/rework/completion 状态机 |
 | `third_party/codexpro/` | 项目文件/Git/Shell/任务/分析主引擎 fork |
 | `scripts/build.ps1` | Windows 测试、构建、PyInstaller、Inno Setup |
 | `scripts/build_linux.sh` | Linux 测试、CodexPro smoke、PyInstaller、tar.gz |
@@ -106,7 +119,7 @@ npm run smoke
 发布构建：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.3
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.4
 ```
 
 ### Linux / SteamOS build host
@@ -115,22 +128,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Versi
 uv venv --python 3.12
 uv pip install -p .venv -e '.[dev,package]'
 cd third_party/codexpro && npm ci && npm run build && cd ../..
-bash scripts/build_linux.sh 0.8.3
+bash scripts/build_linux.sh 0.8.4
 ```
 
 Linux release 以 Ubuntu 22.04 构建以保持较旧 glibc 基线；SteamOS Desktop Mode 真机验证是额外兼容证据，不得用“未真机”掩盖 CI/构建失败。
 
 ## 7. 发布门
 
-发布 v0.8.3 前至少必须满足：
+发布 v0.8.4 前至少必须满足：
 
 - `git diff --check` 通过，工作树只包含有意变更；生成物、缓存、安装运行文件不得 track。
 - Python Ruff、Pyright、全量 pytest 通过。
-- CodexPro TypeScript build、完整 smoke 通过；根盘不可读目录与 nested Git 回归必须包含在 smoke/pytest 中。
+- CodexPro TypeScript build、完整 smoke 通过；必须包含 durable long-run persistence/restart/evidence/stale-review/rework/running-task gates，以及根盘不可读目录与 nested Git 回归。
 - `uv lock --check` 通过；PowerShell 与 Bash 发布脚本语法检查通过。
-- Windows `build.ps1 -Version 0.8.3` 成功，安装器可选安装目录且 frozen payload 完整。
-- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-0.8.3.tar.gz`。
-- commit、branch push、`v0.8.3` tag、GitHub Release 资产必须指向同一源提交。
+- Windows `build.ps1 -Version 0.8.4` 成功，安装器可选安装目录且 frozen payload 完整。
+- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-0.8.4.tar.gz`。
+- commit、branch push、`v0.8.4` tag、GitHub Release 资产必须指向同一源提交。
 - v0.9.x tags/branches 是历史，不删除、不改写、不 force-push。
 
 最终实测结果只写入 `进度验收.md`；禁止复制旧版本的测试数量、SHA-256 或“已发布”状态冒充本轮证据。

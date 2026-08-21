@@ -1,0 +1,149 @@
+# Long-running task orchestration (v0.8.4)
+
+## Problem
+
+Browser-hosted MCP clients are a poor place to keep a single tool request open for minutes or hours. A long-lived request can outlive a client tab, a proxy timeout, a transport session, model context, or the DevBridge process itself. v0.8.4 therefore separates **execution lifetime** from **MCP request lifetime**.
+
+A long run is not considered complete merely because an executor command exits. The required lifecycle is:
+
+```text
+requirement decomposition
+        ↓
+durable plan + acceptance criteria
+        ↓
+execute / checkpoint evidence
+        ↓
+quality review against current work revision
+        ↓
+FAIL ──→ explicit rework ──→ review again
+        ↓ PASS
+completion gate
+        ↓
+return final completion claim
+```
+
+## Research basis
+
+The design follows three converging patterns from current agent/MCP systems:
+
+1. **MCP Tasks**: the Model Context Protocol Tasks extension is designed for long-running operations. A server can return a durable task handle instead of blocking a connection; a client polls task state, can reconnect, and can retrieve the result later. The MCP documentation explicitly notes that client and intermediary timeouts make long-lived blocking connections impractical. Task support is extension-negotiated and host support varies.
+2. **mcp-agent**: `lastmile-ai/mcp-agent` exposes orchestrator/worker and evaluator-optimizer workflows, and can move the same workflow to a Temporal execution backend for pause/resume/retry/durable history. The evaluator-optimizer pattern iterates until an evaluator accepts the result or a bounded refinement limit is reached.
+3. **LangGraph**: LangGraph persists checkpoints at step/super-step boundaries for recovery and human-in-the-loop execution. Its durability guidance also recommends isolating side effects in durable tasks so resumed execution does not accidentally repeat work.
+
+References:
+
+- https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/extensions/tasks/overview.mdx
+- https://github.com/modelcontextprotocol/ext-tasks
+- https://github.com/lastmile-ai/mcp-agent
+- https://github.com/lastmile-ai/mcp-agent/blob/main/examples/temporal/README.md
+- https://github.com/langchain-ai/docs/blob/main/src/oss/langgraph/checkpointers.mdx
+- https://github.com/langchain-ai/langgraph/tree/main/libs/checkpoint
+
+### Why v0.8.4 does not require native MCP Tasks
+
+The 2026-07-28 protocol introduces the extension mechanism used by `io.modelcontextprotocol/tasks`, but support still varies by SDK and host. For example, the MCP Python SDK has tracked client-side task-result claiming/polling separately. DevBridge must continue to work in ChatGPT/Codex/Gemini/browser hosts that expose ordinary `tools/call` but do not advertise the Tasks extension.
+
+v0.8.4 therefore ships a **tool-level durable fallback** now. It uses ordinary MCP tools and can later be mapped to native MCP Tasks when both sides advertise the extension. This avoids silently returning a task-shaped response to a host that cannot consume it.
+
+## Durable run state
+
+CodexPro stores long-run state at:
+
+```text
+.ai-bridge/long-runs/<run_id>.json
+```
+
+The JSON is bounded, schema-validated, written atomically, protected by the normal workspace path guard, and serialized per run inside the process. It records:
+
+- stable `run_id`, workspace identity and root;
+- objective and run-level acceptance criteria;
+- ordered plan steps and per-step acceptance criteria;
+- step status, bounded evidence and notes;
+- `workRevision`, `planRevision`, and review round;
+- bounded checkpoints;
+- attached background `bash` task IDs;
+- explicit terminal resolutions for task IDs that become unknown after a DevBridge/CodexPro process restart;
+- reviewer PASS/FAIL, failed criteria and required rework;
+- final completion record.
+
+Secret-looking values are rejected from persisted plan/evidence text. State files are capped at 512 KiB, plans at 50 steps, checkpoints at 200 and review rounds at 20.
+
+## MCP tools
+
+The durable workflow is available in minimal, standard and full CodexPro tool modes when writes are enabled:
+
+- `long_run_start`
+- `long_run_status`
+- `long_run_list`
+- `long_run_update`
+- `long_run_review`
+- `long_run_complete`
+- `long_run_cancel`
+
+`bash` additionally accepts optional `long_run_id` and `long_run_step_id`. The task is created as an unbounded background process and the durable run is updated before control returns. If durable attachment fails, the newly-created process is cancelled instead of leaving an orphan that the plan does not know about.
+
+## Quality gates
+
+### Evidence gate
+
+A step cannot move to `done` without evidence. Evidence should be concise references to observable results such as test output, a commit, an artifact digest, a runtime observation, or a review result; it should not contain credentials or raw secrets.
+
+### Revision gate
+
+Any meaningful work update increments `workRevision`. A PASS review records the revision it inspected. Later work makes that PASS stale, so `long_run_complete` refuses to complete until the new revision is reviewed again.
+
+### Rework gate
+
+A FAIL review must contain actionable `required_rework` and identify at least one failed step or failed criterion. Failed steps are reopened. A review loop is bounded at 20 rounds to prevent unbounded evaluator churn.
+
+### Background-task gate
+
+`long_run_review` refuses PASS while an attached task is still `running`, `cancelling`, or unknown. `long_run_complete` performs the same fail-closed check. If an MCP/CodexPro process restart loses the in-memory task registry, an old task ID becomes `unknown`; completion then requires an explicit terminal resolution and evidence instead of guessing that the task succeeded.
+
+### Final-return gate
+
+CodexPro server instructions now tell capable model clients to create a durable long run for multi-phase or roughly >2-minute work and **not to send a final completion claim until `long_run_complete` succeeds**.
+
+This is an execution-discipline guardrail, not a way for the server to force a model to continue generating forever. The durable state exists specifically so a later tool call, reconnect, or new model turn can recover the exact run status without relying on chat memory.
+
+## Timeout strategy
+
+- `bash`: background task; no fixed execution-time limit. It ends only when the child exits, fails, or is cancelled.
+- `wait_task`: bounded polling request; maximum 30 seconds. Reaching the poll deadline never stops the background process.
+- `get_task`: immediate snapshot.
+- task responses expose an adaptive `poll_after_seconds` hint (5 / 15 / 30 seconds based on elapsed time).
+- long-run status exposes `next_poll_after_seconds=30` while attached work is active.
+- `run_command` / `run_program`: remain short compatibility calls with a 20-second hard cap; builds, installs, crawls and other long work belong in `bash`.
+- local `execute-handoff`: default executor timeout is 2 hours (max 24 hours).
+- local `loop-handoff`: reviewer/test defaults are 1 hour and the default evaluator/rework budget is 5 iterations.
+
+No timeout above is treated as proof of successful work. A timeout or lost task must be reflected in persisted state and reviewed.
+
+## Local executor/reviewer loop
+
+`codexpro loop-handoff` remains useful when a local CLI agent can execute independently of the browser. v0.8.4 persists a versioned loop state containing:
+
+- lifecycle state (`running`, `completed`, `failed`, `cancelled`);
+- phase (`starting`, `executor`, `testing`, `reviewing`, `rework`, `passed`, `finished`);
+- start/update/finish timestamps;
+- iteration/max iteration;
+- plan hash;
+- executor/test/reviewer exit codes;
+- reviewer verdict and rejected-PASS reason;
+- terminal stop reason.
+
+A reviewer FAIL still must produce a usable changed follow-up plan before another iteration. A reviewer PASS cannot hide a failed executor/test unless the explicit override flag is enabled.
+
+## Recovery recipe
+
+After a browser refresh, context compaction, connector reconnect, or client change:
+
+1. call `long_run_list` in the intended workspace;
+2. select the durable `run_id`;
+3. call `long_run_status`;
+4. inspect open steps, latest review, task observations, and `completion_blockers`;
+5. resume only the unfinished phase;
+6. review again if the work revision changed;
+7. call `long_run_complete` before claiming completion.
+
+This makes the durable plan/checkpoints the source of truth rather than an opaque transport session or a model's temporary conversation state.

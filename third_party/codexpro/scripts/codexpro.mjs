@@ -139,7 +139,7 @@ Execute handoff options:
   --model <provider/model>  Optional model name passed to the adapter.
   --command <template>      Custom command template. Supports {{model}}, {{plan_file}}, {{plan_text}}, {{root}}.
   --dry-run                 Print the command that would run without executing it.
-  --timeout-ms <ms>         Execution timeout. Default: 600000.
+  --timeout-ms <ms>         Execution timeout. Default: 7200000 (2 hours); max: 24 hours.
   --max-output-bytes <n>    Max stdout/stderr excerpt bytes per stream. Default: 120000.
   --context-dir <dir>       Handoff directory. Default: .ai-bridge.
   --yes                     Run without interactive confirmation.
@@ -159,8 +159,10 @@ Loop handoff options:
   --review-command <template>
                              Local reviewer/orchestrator command. It should print CODEXPRO_REVIEW=PASS or CODEXPRO_REVIEW=FAIL.
                              On FAIL it must update .ai-bridge/current-plan.md before the next iteration.
-  --max-iters <n>           Maximum execute/review iterations. Default: 3.
+  --max-iters <n>           Maximum execute/review iterations. Default: 5.
   --run-tests <template>    Optional local verification command before review.
+  --review-timeout-ms <ms>  Reviewer timeout. Default: 3600000 (1 hour); max: 24 hours.
+  --test-timeout-ms <ms>    Verification timeout. Default: 3600000 (1 hour); max: 24 hours.
   --allow-implicit-review-verdict
                              Infer PASS/FAIL from reviewer exit code and plan changes when no CODEXPRO_REVIEW line is printed.
   --allow-review-pass-on-failure
@@ -1815,7 +1817,7 @@ function loadHandoffExecution(args) {
   const planPath = resolveWorkspaceFile(root, path.join(contextDir, 'current-plan.md'));
   const maxReadBytes = handoffMaxReadBytes();
   const maxOutputBytes = numberOption(args.maxOutputBytes ?? process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000);
-  const timeoutMs = numberOption(args.timeoutMs ?? args.timeout, 600_000, 1_000, 24 * 60 * 60_000);
+  const timeoutMs = numberOption(args.timeoutMs ?? args.timeout, 2 * 60 * 60_000, 1_000, 24 * 60 * 60_000);
   if (!fs.existsSync(planPath)) {
     throw new Error(`No handoff plan found at ${path.relative(root, planPath)}. Ask ChatGPT to call handoff_to_agent first.`);
   }
@@ -2488,7 +2490,7 @@ async function confirmLoopHandoff(args, root) {
     labelValue('Workspace', root),
     labelValue('Agent', args.agent ?? 'opencode'),
     ...(args.model ? [labelValue('Model', args.model)] : []),
-    labelValue('Max iters', args.maxIters ?? '3'),
+    labelValue('Max iters', args.maxIters ?? '5'),
     labelValue('Reviewer', args.reviewCommand ?? ''),
     'This runs local executor and reviewer commands in a bounded loop. It does not automate ChatGPT or any browser session.'
   ]);
@@ -2550,11 +2552,11 @@ async function runLoopHandoff(argv) {
   const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
   const contextDir = contextDirFromArgs(args);
   const paths = loopArtifactPaths(root, contextDir);
-  const maxIters = numberOption(args.maxIters ?? args.maxIterations, 3, 1, 25);
+  const maxIters = numberOption(args.maxIters ?? args.maxIterations, 5, 1, 25);
   const maxReadBytes = handoffMaxReadBytes();
   const maxOutputBytes = numberOption(args.maxOutputBytes ?? process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000);
-  const reviewTimeoutMs = numberOption(args.reviewTimeoutMs, 600_000, 1_000, 24 * 60 * 60_000);
-  const testTimeoutMs = numberOption(args.testTimeoutMs, 600_000, 1_000, 24 * 60 * 60_000);
+  const reviewTimeoutMs = numberOption(args.reviewTimeoutMs, 60 * 60_000, 1_000, 24 * 60 * 60_000);
+  const testTimeoutMs = numberOption(args.testTimeoutMs, 60 * 60_000, 1_000, 24 * 60 * 60_000);
 
   if (args.requireCleanGitStart) assertCleanGitStart(root, contextDir);
 
@@ -2589,8 +2591,34 @@ async function runLoopHandoff(argv) {
   let previousChangeFingerprint = '';
   let finalVerdict = 'FAIL';
   let stopReason = 'max_iters';
+  let finalIteration = 0;
+  let finalReviewerVerdict = null;
+  let finalRejectedPassReason = '';
+  let finalPlanHash = '';
+  let finalExecutorExitCode = null;
+  let finalTestExitCode = null;
+  let finalReviewerExitCode = null;
+  let finalNextPlanChanged = false;
+  let finalFollowupPlanExists = false;
+  let finalHasUsableFollowupPlan = false;
+  let finalChangedThisIteration = false;
+  let loopError = null;
+  const loopStartedAt = new Date().toISOString();
+  writeLoopState(paths, {
+    schemaVersion: 2,
+    state: 'running',
+    phase: 'starting',
+    startedAt: loopStartedAt,
+    updatedAt: loopStartedAt,
+    iteration: 0,
+    maxIters,
+    verdict: null,
+    stopReason: null
+  });
 
+  try {
   for (let iteration = 1; iteration <= maxIters; iteration += 1) {
+    finalIteration = iteration;
     if (iteration > 1) {
       const continueLoop = await confirmLoopContinuation(args, root, iteration, paths.planPath);
       if (!continueLoop) {
@@ -2606,6 +2634,19 @@ async function runLoopHandoff(argv) {
       statusLine('warn', 'Stopping because current-plan.md is still the empty scaffold.');
       break;
     }
+
+    writeLoopState(paths, {
+      schemaVersion: 2,
+      state: 'running',
+      phase: 'executor',
+      startedAt: loopStartedAt,
+      updatedAt: new Date().toISOString(),
+      iteration,
+      maxIters,
+      planHash: currentPlanHash,
+      verdict: null,
+      stopReason: null
+    });
 
     appendBridgeLog(root, contextDir, {
       event: 'loop_handoff_iteration_started',
@@ -2639,12 +2680,39 @@ async function runLoopHandoff(argv) {
     const iterationTestCommand = buildTestCommand(args, root, contextDir, iteration, paths);
     let testResult = null;
     if (iterationTestCommand) {
+      writeLoopState(paths, {
+        schemaVersion: 2,
+        state: 'running',
+        phase: 'testing',
+        startedAt: loopStartedAt,
+        updatedAt: new Date().toISOString(),
+        iteration,
+        maxIters,
+        planHash: currentPlanHash,
+        executorExitCode: execution.result?.exitCode ?? null,
+        verdict: null,
+        stopReason: null
+      });
       testResult = await runLoopCommand(iterationTestCommand, root, testTimeoutMs, maxOutputBytes, 'Test');
       writeLoopTestOutput(paths, testResult, commandDisplay(iterationTestCommand));
       statusLine(testResult.exitCode === 0 ? 'ok' : 'warn', `Tests exited with code ${testResult.exitCode ?? 'null'}${testResult.signal ? ` signal=${testResult.signal}` : ''}`);
     }
 
     const iterationReviewCommand = buildReviewerCommand(args, root, contextDir, iteration, paths);
+    writeLoopState(paths, {
+      schemaVersion: 2,
+      state: 'running',
+      phase: 'reviewing',
+      startedAt: loopStartedAt,
+      updatedAt: new Date().toISOString(),
+      iteration,
+      maxIters,
+      planHash: currentPlanHash,
+      executorExitCode: execution.result?.exitCode ?? null,
+      testExitCode: testResult?.exitCode ?? null,
+      verdict: null,
+      stopReason: null
+    });
     const beforeReviewPlanExists = fs.existsSync(paths.planPath);
     const beforeReviewPlan = beforeReviewPlanExists ? readTextFileBounded(paths.planPath, maxReadBytes) : '';
     const reviewResult = await runLoopCommand(iterationReviewCommand, root, reviewTimeoutMs, maxOutputBytes, 'Review');
@@ -2670,6 +2738,17 @@ async function runLoopHandoff(argv) {
       rejectedPassReason = 'tests_failed';
     }
 
+    finalReviewerVerdict = verdict;
+    finalRejectedPassReason = rejectedPassReason;
+    finalPlanHash = currentPlanHash;
+    finalExecutorExitCode = execution.result?.exitCode ?? null;
+    finalTestExitCode = testResult?.exitCode ?? null;
+    finalReviewerExitCode = reviewResult.exitCode;
+    finalNextPlanChanged = nextPlanChanged;
+    finalFollowupPlanExists = afterReviewPlanExists;
+    finalHasUsableFollowupPlan = Boolean(hasUsableFollowupPlan);
+    finalChangedThisIteration = changedThisIteration;
+
     appendBridgeLog(root, contextDir, {
       event: 'loop_handoff_iteration_finished',
       iteration,
@@ -2692,6 +2771,10 @@ async function runLoopHandoff(argv) {
       review_path: path.posix.join(contextDir, 'loop-review.md')
     });
     writeLoopState(paths, {
+      schemaVersion: 2,
+      state: 'running',
+      phase: acceptedVerdict === 'PASS' ? 'passed' : 'rework',
+      startedAt: loopStartedAt,
       updatedAt: new Date().toISOString(),
       iteration,
       maxIters,
@@ -2704,7 +2787,9 @@ async function runLoopHandoff(argv) {
       hasUsableFollowupPlan: Boolean(hasUsableFollowupPlan),
       changedThisIteration,
       executorExitCode: execution.result?.exitCode ?? null,
-      reviewerExitCode: reviewResult.exitCode
+      testExitCode: testResult?.exitCode ?? null,
+      reviewerExitCode: reviewResult.exitCode,
+      stopReason: acceptedVerdict === 'PASS' ? 'pass' : null
     });
 
     if (acceptedVerdict === 'PASS') {
@@ -2756,6 +2841,42 @@ async function runLoopHandoff(argv) {
 
     statusLine('wait', `Reviewer requested another iteration (${iteration}/${maxIters}).`);
   }
+  } catch (error) {
+    loopError = error;
+    finalVerdict = 'FAIL';
+    stopReason = 'exception';
+    appendBridgeLog(root, contextDir, {
+      event: 'loop_handoff_exception',
+      iteration: finalIteration,
+      error: redactForLog(error instanceof Error ? error.message : String(error))
+    });
+  }
+
+  const loopFinishedAt = new Date().toISOString();
+  const terminalState = loopError ? 'failed' : finalVerdict === 'PASS' ? 'completed' : stopReason === 'human_cancelled' ? 'cancelled' : 'failed';
+  writeLoopState(paths, {
+    schemaVersion: 2,
+    state: terminalState,
+    phase: 'finished',
+    startedAt: loopStartedAt,
+    updatedAt: loopFinishedAt,
+    finishedAt: loopFinishedAt,
+    iteration: finalIteration,
+    maxIters,
+    verdict: finalVerdict,
+    stopReason,
+    reviewerVerdict: finalReviewerVerdict,
+    rejectedPassReason: finalRejectedPassReason || undefined,
+    planHash: finalPlanHash || undefined,
+    nextPlanChanged: finalNextPlanChanged,
+    followupPlanExists: finalFollowupPlanExists,
+    hasUsableFollowupPlan: finalHasUsableFollowupPlan,
+    changedThisIteration: finalChangedThisIteration,
+    executorExitCode: finalExecutorExitCode,
+    testExitCode: finalTestExitCode,
+    reviewerExitCode: finalReviewerExitCode,
+    error: loopError ? redactForLog(loopError instanceof Error ? loopError.message : String(loopError)) : undefined
+  });
 
   appendBridgeLog(root, contextDir, {
     event: 'loop_handoff_finished',
@@ -2767,6 +2888,7 @@ async function runLoopHandoff(argv) {
   console.log(`Diff:   ${path.relative(root, paths.diffPath)}`);
   console.log(`Review: ${path.relative(root, paths.reviewPath)}`);
   console.log(`Log:    ${path.relative(root, paths.logPath)}`);
+  if (loopError) throw loopError;
   if (finalVerdict !== 'PASS') process.exitCode = 1;
 }
 

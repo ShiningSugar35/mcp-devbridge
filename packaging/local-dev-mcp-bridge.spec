@@ -9,7 +9,7 @@ from shutil import copy2
 import sys
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.8.3"
+PROJECT_VERSION = "0.8.4"
 IS_WINDOWS = sys.platform == "win32"
 TOOLS = ROOT / ".tools"
 RUNTIME = TOOLS if IS_WINDOWS else TOOLS / "linux"

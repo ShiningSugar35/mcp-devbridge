@@ -2,7 +2,7 @@
 
 ## Supported environments
 
-| Item | Current v0.8.3 support |
+| Item | Current v0.8.4 support |
 |---|---|
 | Windows | Windows 10/11 x64 desktop release; PowerShell 5.1+ is supported. |
 | Linux | x86_64 desktop build and user-level installer; release CI/build baseline is Ubuntu 22.04. |
@@ -30,15 +30,17 @@ Absolute paths route to the most specific containing active root. Relative paths
 1. **Cloudflare Named Tunnel** — stable hostname, recommended for a long-lived main Hub URL.
 2. **ngrok reserved/fixed domain** — stable ngrok hostname; source installs require ngrok to be available separately.
 3. **Quick Tunnel** — temporary `trycloudflare.com` URL; it changes when the tunnel is rebuilt and is useful for testing or remote-device backhaul.
-4. **Local** — loopback-only compatibility mode that connects directly to the selected CodexPro engine.
+4. **Local** — loopback-only mode that uses the same shared Gateway and multi-root routing semantics without starting a public Tunnel.
 
-All public modes terminate at the OAuth/Bearer Gateway. `Local` is intentionally single-engine/direct; use a public Hub/Gateway path when one MCP address must route across multiple active roots.
+All public modes and `Local` terminate at the shared OAuth/Bearer Gateway. `Local` differs only by skipping the public Tunnel; one local MCP address can route across every READY root.
 
 ## Ports
 
-Gateway, CodexPro, and optional Windows-MCP ports are allocated per project from the configured defaults while avoiding catalog collisions. Legacy backend compatibility remains separate. Port changes are locked while the affected project is running.
+The Gateway port is global Hub configuration (`AppConfig.gateway_port`). Each project owns only its internal CodexPro and optional Windows-MCP ports; those per-project engine ports are allocated without catalog collisions. Legacy per-project `gateway_port` values are compatibility input only and are ignored. Hub lifecycle has no bootstrap/owner project: any first READY root can cause the shared Hub to start, and the Hub remains available until the last running root stops.
 
-The shared public Hub lifecycle may be bootstrapped from one running project, but that project has no routing priority over other active roots.
+## Long-running workflows
+
+ChatGPT/Codex/Gemini/browser hosts can run multi-hour work without keeping one MCP request open. v0.8.4 exposes durable `long_run_*` tools over ordinary `tools/call`, persists plan/checkpoint/review state under `.ai-bridge/long-runs/`, and keeps long shell work in background `bash` tasks with bounded polling. Native `io.modelcontextprotocol/tasks` is not required for baseline compatibility; it can be negotiated later when both host and server support the extension. See `LONG_RUNNING_TASKS.md`.
 
 ## Windows desktop and installer
 

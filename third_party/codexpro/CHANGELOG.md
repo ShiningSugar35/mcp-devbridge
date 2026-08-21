@@ -2,6 +2,11 @@
 
 ## unreleased (fork: mcp-devBridge)
 
+- Added durable long-run orchestration tools (`long_run_start/status/list/update/review/complete/cancel`) with atomic persisted state, evidence-gated plan steps, work-revision-aware evaluator PASS/FAIL, bounded rework loops, background bash task attachment, restart recovery, secret rejection, and fail-closed completion gates.
+- Added adaptive bounded polling guidance for background tasks while keeping task execution itself unbounded. Browser/client reconnects can resume a run from `.ai-bridge/long-runs/<run_id>.json` instead of depending on one long MCP request or transient model context.
+- Hardened `loop-handoff` for hour-scale local agent work with longer explicit time budgets and durable phase/timestamp/exit/terminal-reason state.
+- Raised the declared MCP SDK floor to `@modelcontextprotocol/sdk ^1.30.0`; native MCP Tasks remains an optional future negotiated extension because host/client support is not yet universal.
+
 - Added `CODEXPRO_BASH_MODE=developer`: first-word allowlist for dev tools
   (pytest / pyright / ruff / git with full subcommands / npm / pnpm / yarn /
   bun / uv / python / tsc / eslint / cargo / go ...) with a hard block on

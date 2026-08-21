@@ -19,6 +19,7 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { registerWindowsBridgeTools } from "./windowsBridge.js";
+import { LongRunStore, summarizeLongRun, type LongRunState, type LongRunTaskObservation } from "./longRunOps.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const bashTasks = new BashTaskManager();
@@ -52,8 +53,16 @@ function textResult(text: string, structuredContent: Record<string, unknown> = {
   };
 }
 
+function bashTaskPollAfterSeconds(result: BashTaskSnapshot): number {
+  if (result.status === "completed" || result.status === "failed" || result.status === "cancelled") return 0;
+  if (result.durationMs < 30_000) return 5;
+  if (result.durationMs < 5 * 60_000) return 15;
+  return 30;
+}
+
 function bashTaskTextResult(result: BashTaskSnapshot): string {
   const terminal = result.status === "completed" || result.status === "failed" || result.status === "cancelled";
+  const pollAfterSeconds = bashTaskPollAfterSeconds(result);
   return [
     `# Task ${result.taskId}`,
     "",
@@ -68,7 +77,50 @@ function bashTaskTextResult(result: BashTaskSnapshot): string {
       : "Orchestration watchdog: active.",
     "",
     ...(result.resumeHint ? [result.resumeHint, ""] : []),
-    terminal ? "Task finished." : "Use wait_task/get_task to check progress, or cancel_task to stop it."
+    terminal ? "Task finished." : `Poll again in about ${pollAfterSeconds}s with wait_task/get_task, or cancel_task to stop it. For multi-hour work, persist a long_run and avoid holding one MCP request open.`
+  ].join("\n");
+}
+
+function observeLongRunTasks(workspace: Workspace, state: LongRunState): LongRunTaskObservation[] {
+  return state.taskIds.map((taskId) => {
+    try {
+      const task = bashTasks.get(workspace, taskId);
+      return {
+        taskId,
+        status: task.status,
+        detail: task.status === "running" || task.status === "cancelling"
+          ? `${task.durationMs} ms elapsed`
+          : `exit=${task.exitCode}${task.signal ? ` signal=${task.signal}` : ""}`
+      };
+    } catch {
+      const resolution = state.taskResolutions[taskId];
+      if (resolution) {
+        return { taskId, status: resolution.status, detail: `durably resolved: ${resolution.evidence}` };
+      }
+      return { taskId, status: "unknown", detail: "Task manager no longer has this id; explicit terminal resolution evidence is required before completion." };
+    }
+  });
+}
+
+function longRunText(state: LongRunState, observations: LongRunTaskObservation[] = [], blockers: string[] = []): string {
+  const done = state.steps.filter((step) => step.status === "done").length;
+  const latestReview = state.reviews.at(-1);
+  return [
+    `# Long Run ${state.runId}`,
+    "",
+    `Status: ${state.status}`,
+    `Progress: ${done}/${state.steps.length} (${state.steps.length ? Math.floor((done / state.steps.length) * 100) : 0}%)`,
+    `Work revision: ${state.workRevision}`,
+    `Review: ${latestReview ? `${latestReview.verdict.toUpperCase()} round ${latestReview.round} @ work revision ${latestReview.workRevision}` : "not yet reviewed"}`,
+    "",
+    "## Steps",
+    ...state.steps.map((step) => `- ${step.id} [${step.status}] ${step.title} — evidence ${step.evidence.length}`),
+    ...(observations.length ? ["", "## Background tasks", ...observations.map((task) => `- ${task.taskId}: ${task.status}${task.detail ? ` — ${task.detail}` : ""}`)] : []),
+    ...(blockers.length ? ["", "## Completion blockers", ...blockers.map((blocker) => `- ${blocker}`)] : []),
+    "",
+    state.status === "completed"
+      ? "Quality gate passed and this run is complete."
+      : "Persisted state is durable under .ai-bridge/long-runs. Reconnect with long_run_status instead of holding one MCP request open."
   ].join("\n");
 }
 
@@ -226,7 +278,14 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
   handoff_poll: "wait_for_handoff",
   pro_export: "export_pro_context",
   agent_handoff: "handoff_to_agent",
-  codex_handoff: "handoff_to_codex"
+  codex_handoff: "handoff_to_codex",
+  run_start: "long_run_start",
+  run_status: "long_run_status",
+  run_update: "long_run_update",
+  run_review: "long_run_review",
+  run_complete: "long_run_complete",
+  run_list: "long_run_list",
+  run_cancel: "long_run_cancel"
 };
 
 const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
@@ -325,7 +384,14 @@ const MINIMAL_TOOL_NAMES = [
   "wait_task",
   "list_tasks",
   "cancel_task",
-  "show_changes"
+  "show_changes",
+  "long_run_start",
+  "long_run_status",
+  "long_run_update",
+  "long_run_review",
+  "long_run_complete",
+  "long_run_list",
+  "long_run_cancel"
 ] as const;
 
 const STANDARD_TOOL_NAMES = [
@@ -372,7 +438,14 @@ const FULL_TOOL_NAMES = [
   "codex_context",
   "export_pro_context",
   "handoff_to_agent",
-  "handoff_to_codex"
+  "handoff_to_codex",
+  "long_run_start",
+  "long_run_status",
+  "long_run_update",
+  "long_run_review",
+  "long_run_complete",
+  "long_run_list",
+  "long_run_cancel"
 ] as const;
 
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
@@ -388,7 +461,14 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "cancel_task",
   "export_pro_context",
   "handoff_to_agent",
-  "handoff_to_codex"
+  "handoff_to_codex",
+  "long_run_start",
+  "long_run_status",
+  "long_run_update",
+  "long_run_review",
+  "long_run_complete",
+  "long_run_list",
+  "long_run_cancel"
 ]);
 
 function codexSessionToolNames(config: CodexProConfig): string[] {
@@ -415,6 +495,12 @@ function toolNamesForMode(config: CodexProConfig): string[] {
       if (toolIndex !== -1) names.splice(toolIndex, 1);
     }
   }
+  if (config.writeMode === "off") {
+    for (const longRunWriteTool of LONG_RUN_WRITE_TOOL_NAMES) {
+      const toolIndex = names.indexOf(longRunWriteTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
+  }
   if (config.writeMode === "handoff" && !names.includes("handoff_to_agent")) names.push("handoff_to_agent");
   if (!config.analysisEnabled) {
     const analysisIndex = names.indexOf("inspect_workspace");
@@ -429,9 +515,10 @@ function toolNamesForMode(config: CodexProConfig): string[] {
   for (const name of codexSessionToolNames(config)) {
     if (!names.includes(name)) names.push(name);
   }
-  return names;
+  return [...new Set(names)];
 }
 
+const LONG_RUN_WRITE_TOOL_NAMES = new Set<string>(["long_run_start", "long_run_update", "long_run_review", "long_run_complete", "long_run_cancel"]);
 const MINIMAL_TOOLS = new Set<string>(MINIMAL_TOOL_NAMES);
 const STANDARD_TOOLS = new Set<string>(STANDARD_TOOL_NAMES);
 const registeredToolNamesByServer = new WeakMap<object, string[]>();
@@ -451,6 +538,7 @@ function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if ((name === "bash" || BASH_TASK_TOOL_NAMES.has(name)) && config.bashMode === "off") return false;
   if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
+  if (LONG_RUN_WRITE_TOOL_NAMES.has(name) && config.writeMode === "off") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (name === "inspect_workspace" && !config.analysisEnabled) return false;
@@ -497,14 +585,18 @@ function serverInstructions(config: CodexProConfig): string {
     "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
     bashInstruction,
-    "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
+    config.writeMode !== "off"
+      ? "6. For multi-phase work or anything expected to take more than about two minutes, create a durable long_run_start plan before side effects. Attach background bash tasks with long_run_id/long_run_step_id, checkpoint evidence after each phase, run long_run_review, rework on FAIL, and do not give the user a final completion answer until long_run_complete succeeds."
+      : "6. Durable long-run writes are unavailable because write mode is off; do not claim a quality-gated long-run workflow is active.",
+    "7. Long-run state lives under .ai-bridge/long-runs and survives client disconnects/reconnects. Keep individual MCP calls short; resume with long_run_status instead of blocking one request for minutes or hours.",
+    "8. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
-      ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
+      ? `9. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
     config.requireBashSession && config.bashSessionId
-      ? `8. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
+      ? `10. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
       : config.bashSessionId
-        ? `8. Bash session label for this server is "${config.bashSessionId}".`
+        ? `10. Bash session label for this server is "${config.bashSessionId}".`
         : "",
     "",
     `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
@@ -935,6 +1027,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = new WorkspaceManager(config);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
+  const longRuns = new LongRunStore(config.contextDir, guard);
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
@@ -1065,6 +1158,16 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         maxOutputBytes: config.maxOutputBytes,
         maxSearchResults: config.maxSearchResults,
         blockedGlobs: config.blockedGlobs,
+        longRunPolicy: {
+          enabled: !config.connectionTest,
+          durableStateDir: `${config.contextDir}/long-runs`,
+          planRequired: true,
+          stepEvidenceRequired: true,
+          passReviewRequired: true,
+          staleReviewRejected: true,
+          runningTaskCompletionBlocked: true,
+          nativeMcpTasksExtension: "not emitted by baseline connector; tool-level durable fallback remains compatible with hosts that do not advertise io.modelcontextprotocol/tasks"
+        },
         registeredTools: registeredToolNames(server),
         registeredToolCount: registeredToolNames(server).length
       };
@@ -1972,7 +2075,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
         command: z.string().describe("Command to run as a task."),
         session_id: z.string().optional().describe(config.requireBashSession && config.bashSessionId ? `Required bash session id for this server: ${config.bashSessionId}.` : "Optional bash session id. If configured on the server, a provided value must match it."),
-        cwd: z.string().optional().describe("Working directory relative to workspace root. Default: .")
+        cwd: z.string().optional().describe("Working directory relative to workspace root. Default: ."),
+        long_run_id: z.string().optional().describe("Optional durable long-run id from long_run_start. When present, this background task is attached to that run before returning."),
+        long_run_step_id: z.string().optional().describe("Optional plan step id (for example s2) to associate with long_run_id. Requires long_run_id.")
       },
       annotations: BASH_ANNOTATIONS,
       _meta: {
@@ -1983,11 +2088,43 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
+      const longRunId = String(args.long_run_id ?? "").trim();
+      const longRunStepId = String(args.long_run_step_id ?? "").trim();
+      if (longRunStepId && !longRunId) throw new CodexProError("long_run_step_id requires long_run_id.");
+      if (longRunId) {
+        if (config.writeMode === "off") throw new CodexProError("Cannot attach bash to a durable long run because CODEXPRO_WRITE_MODE=off.");
+        const runState = await longRuns.read(workspace, longRunId);
+        if (["completed", "cancelled", "failed"].includes(runState.status)) {
+          throw new CodexProError(`Cannot attach a task to terminal long run ${longRunId} (${runState.status}).`);
+        }
+        if (longRunStepId && !runState.steps.some((step) => step.id === longRunStepId)) {
+          throw new CodexProError(`Unknown long-run step: ${longRunStepId}.`);
+        }
+      }
       const task = bashTasks.start(config, guard, workspace, String(args.command ?? ""), {
         cwd: args.cwd,
         sessionId: args.session_id
       });
-      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+      if (longRunId) {
+        try {
+          await longRuns.update(workspace, longRunId, {
+            ...(longRunStepId ? { stepId: longRunStepId } : {}),
+            taskId: task.taskId,
+            checkpoint: `Started background task ${task.taskId}: ${task.command}`
+          });
+        } catch (error) {
+          bashTasks.cancel(workspace, task.taskId);
+          throw error;
+        }
+      }
+      return textResult(bashTaskTextResult(task), {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        task_id: task.taskId,
+        poll_after_seconds: bashTaskPollAfterSeconds(task),
+        ...(longRunId ? { long_run_id: longRunId, long_run_step_id: longRunStepId || null } : {}),
+        task
+      });
     }
   );
 
@@ -2012,7 +2149,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const task = bashTasks.get(workspace, String(args.task_id ?? ""));
-      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, poll_after_seconds: bashTaskPollAfterSeconds(task), task });
     }
   );
 
@@ -2039,7 +2176,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const waitMs = Math.max(1, Number(args.wait_seconds ?? 15)) * 1_000;
       const task = await bashTasks.wait(workspace, String(args.task_id ?? ""), waitMs);
-      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, poll_after_seconds: bashTaskPollAfterSeconds(task), task });
     }
   );
 
@@ -2092,6 +2229,238 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const task = bashTasks.cancel(workspace, String(args.task_id ?? ""));
       return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "long_run_start",
+    {
+      title: "Start Long Run",
+      description:
+        "Create a durable, quality-gated execution plan for multi-phase or >2 minute work. State is persisted under .ai-bridge/long-runs so browser/client disconnects do not erase the plan. Use this before long-running side effects, then checkpoint with long_run_update, review with long_run_review, and only finish after long_run_complete succeeds.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the selected workspace."),
+        title: z.string().min(1).max(500).describe("Short run title."),
+        objective: z.string().min(1).max(4000).describe("Concrete outcome this run must produce."),
+        steps: z.array(z.object({
+          title: z.string().min(1).max(500),
+          acceptance_criteria: z.array(z.string().min(1).max(2000)).min(1).max(30)
+        })).min(1).max(50).describe("Ordered implementation/research/release steps. Each step must have objective acceptance criteria."),
+        acceptance_criteria: z.array(z.string().min(1).max(2000)).max(30).optional().describe("Optional run-level acceptance criteria in addition to per-step criteria.")
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const state = await longRuns.start(workspace, {
+        title: args.title,
+        objective: args.objective,
+        steps: args.steps,
+        acceptanceCriteria: args.acceptance_criteria
+      });
+      const observations = observeLongRunTasks(workspace, state);
+      const blockers = longRuns.completionBlockers(state, observations);
+      return textResult(longRunText(state, observations, blockers), summarizeLongRun(state, observations));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "long_run_status",
+    {
+      title: "Long Run Status",
+      description:
+        "Read one durable long-run plan, progress, review state, background-task observations, and completion blockers. Use this after reconnect/context compaction instead of relying on chat memory.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the selected workspace."),
+        run_id: z.string().describe("Run id returned by long_run_start.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const state = await longRuns.read(workspace, String(args.run_id ?? ""));
+      const observations = observeLongRunTasks(workspace, state);
+      const blockers = state.status === "completed" ? [] : longRuns.completionBlockers(state, observations);
+      return textResult(longRunText(state, observations, blockers), {
+        ...summarizeLongRun(state, observations),
+        completion_blockers: blockers
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "long_run_list",
+    {
+      title: "List Long Runs",
+      description: "List recent durable long-run plans in this workspace so interrupted browser/client sessions can resume by run_id.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the selected workspace.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const states = await longRuns.list(workspace);
+      const runs = states.map((state) => {
+        const done = state.steps.filter((step) => step.status === "done").length;
+        return {
+          run_id: state.runId,
+          title: state.title,
+          status: state.status,
+          progress: `${done}/${state.steps.length}`,
+          review_round: state.reviewRound,
+          updated_at: state.updatedAt
+        };
+      });
+      const text = runs.length
+        ? ["# Long Runs", "", ...runs.map((run) => `- ${run.run_id}  ${run.status}  ${run.progress}  ${run.title}`)].join("\n")
+        : "# Long Runs\n\nNo durable long runs in this workspace.";
+      return textResult(text, { workspace_id: workspace.id, root: workspace.root, runs });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "long_run_update",
+    {
+      title: "Update Long Run",
+      description:
+        "Checkpoint durable long-run progress. Marking a step done requires concrete evidence. Attach background task ids, or explicitly resolve task ids that became unknown after an MCP process restart. Any work change invalidates an older PASS review until the current revision is reviewed again.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the selected workspace."),
+        run_id: z.string().describe("Run id returned by long_run_start."),
+        step_id: z.string().optional().describe("Step id such as s1."),
+        step_status: z.enum(["pending", "in_progress", "done", "blocked"]).optional(),
+        note: z.string().max(2000).optional(),
+        evidence: z.array(z.string().min(1).max(2000)).max(30).optional().describe("Concrete evidence such as test output, artifact hash, commit, observed behavior, or review result. Required when first marking a step done."),
+        checkpoint: z.string().max(2000).optional().describe("Durable progress note independent of transient chat context."),
+        task_id: z.string().max(160).optional().describe("Attach an existing bash task id to this run. Prefer bash.long_run_id for automatic attachment."),
+        resolve_task_id: z.string().max(160).optional().describe("Task id to resolve explicitly when it is unknown after MCP restart/reconnect."),
+        resolve_task_status: z.enum(["completed", "failed", "cancelled"]).optional(),
+        resolve_task_evidence: z.string().max(2000).optional().describe("Required evidence for explicit terminal task resolution.")
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const state = await longRuns.update(workspace, String(args.run_id ?? ""), {
+        stepId: args.step_id,
+        stepStatus: args.step_status,
+        note: args.note,
+        evidence: args.evidence,
+        taskId: args.task_id,
+        resolveTaskId: args.resolve_task_id,
+        resolveTaskStatus: args.resolve_task_status,
+        resolveTaskEvidence: args.resolve_task_evidence,
+        checkpoint: args.checkpoint
+      });
+      const observations = observeLongRunTasks(workspace, state);
+      const blockers = longRuns.completionBlockers(state, observations);
+      return textResult(longRunText(state, observations, blockers), {
+        ...summarizeLongRun(state, observations),
+        completion_blockers: blockers
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "long_run_review",
+    {
+      title: "Review Long Run",
+      description:
+        "Evaluate current completion against the persisted plan. PASS is accepted only after every step is done with evidence and no attached task is still running/unknown. FAIL must identify failed criteria and actionable rework; affected steps are reopened and a new work revision requires another review.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the selected workspace."),
+        run_id: z.string().describe("Run id returned by long_run_start."),
+        verdict: z.enum(["pass", "fail"]),
+        summary: z.string().min(1).max(4000),
+        failed_step_ids: z.array(z.string()).max(50).optional(),
+        failed_criteria: z.array(z.string().min(1).max(2000)).max(30).optional(),
+        required_rework: z.array(z.string().min(1).max(2000)).max(30).optional(),
+        evidence: z.array(z.string().min(1).max(2000)).min(1).max(30).describe("Evidence used by the evaluator, e.g. tests, diff review, runtime verification, release checks.")
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      if (args.verdict === "pass") {
+        const before = await longRuns.read(workspace, String(args.run_id ?? ""));
+        const observations = observeLongRunTasks(workspace, before);
+        const unresolved = observations.filter((task) => task.status === "running" || task.status === "cancelling" || task.status === "unknown");
+        if (unresolved.length) {
+          throw new CodexProError(`PASS review rejected because background work is not terminal/resolved:\n- ${unresolved.map((task) => `${task.taskId}: ${task.status}`).join("\n- ")}`);
+        }
+      }
+      const state = await longRuns.review(workspace, String(args.run_id ?? ""), {
+        verdict: args.verdict,
+        summary: args.summary,
+        failedStepIds: args.failed_step_ids,
+        failedCriteria: args.failed_criteria,
+        requiredRework: args.required_rework,
+        evidence: args.evidence
+      });
+      const observations = observeLongRunTasks(workspace, state);
+      const blockers = longRuns.completionBlockers(state, observations);
+      return textResult(longRunText(state, observations, blockers), {
+        ...summarizeLongRun(state, observations),
+        completion_blockers: blockers
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "long_run_complete",
+    {
+      title: "Complete Long Run",
+      description:
+        "Final quality gate for a durable run. Refuses completion unless every step is done with evidence, the latest PASS review covers the current work revision, and no attached bash task is running/cancelling or unknown without explicit terminal resolution. Call this before sending the user's final completion answer.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the selected workspace."),
+        run_id: z.string().describe("Run id returned by long_run_start."),
+        summary: z.string().min(1).max(4000).describe("Final completion summary grounded in the persisted evidence.")
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const before = await longRuns.read(workspace, String(args.run_id ?? ""));
+      const observations = observeLongRunTasks(workspace, before);
+      const state = await longRuns.complete(workspace, before.runId, args.summary, observations);
+      return textResult(longRunText(state, observations), summarizeLongRun(state, observations));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "long_run_cancel",
+    {
+      title: "Cancel Long Run",
+      description:
+        "Mark a durable long-run plan cancelled with a reason. This changes orchestration state only; cancel attached command processes separately with cancel_task when needed.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the selected workspace."),
+        run_id: z.string().describe("Run id returned by long_run_start."),
+        reason: z.string().min(1).max(2000)
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const state = await longRuns.cancel(workspace, String(args.run_id ?? ""), args.reason);
+      const observations = observeLongRunTasks(workspace, state);
+      return textResult(longRunText(state, observations), summarizeLongRun(state, observations));
     }
   );
 

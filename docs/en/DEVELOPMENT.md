@@ -48,7 +48,7 @@ npm run smoke
 npm audit --omit=dev
 ```
 
-The smoke suite includes the release-critical root-scan, nested-Git, async-task, HTTP/widget and handoff paths. Root-drive scans are expected to skip inaccessible subdirectories with warnings rather than fail the complete scan.
+The smoke suite includes the release-critical root-scan, nested-Git, async-task, durable long-run, HTTP/widget and handoff paths. The long-run smoke covers persisted restart recovery, concurrent checkpoints, evidence requirements, stale-review rejection, rework, running/unknown task completion gates, secret rejection and path/symlink containment. Root-drive scans are expected to skip inaccessible subdirectories with warnings rather than fail the complete scan.
 
 Before committing a release candidate also run:
 
@@ -78,18 +78,42 @@ Changes to Gateway/CodexPro routing must preserve these invariants:
 
 `tests/test_workspace_autoroute.py` and the CodexPro smoke scripts are the primary regression coverage for this contract.
 
-## Windows packaging
+## Durable long-run regression contract
 
-Build the complete v0.8.3 release candidate with:
+Changes to long-running orchestration must preserve these invariants:
+
+- multi-phase work can persist a plan independently of the current MCP transport/session;
+- a step cannot become `done` without evidence;
+- meaningful work after a PASS makes that review stale;
+- FAIL review requires actionable rework and reopens affected steps;
+- PASS/completion is rejected while an attached background task is running/cancelling;
+- an unknown task after a process restart is fail-closed until explicit terminal evidence is persisted;
+- durable state rejects secret-looking text, stays bounded, uses guarded paths and atomic replacement;
+- ordinary MCP calls remain short/poll-based; the client is never required to keep one `tools/call` open for hours;
+- local `loop-handoff` persists its current phase and terminal reason even when executor/reviewer/test raises or times out.
+
+Run targeted checks from `third_party/codexpro` with:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.3
+npm run build
+node scripts/long-run-smoke.mjs
+node scripts/execute-handoff-smoke.mjs
+```
+
+Then run the complete `npm run smoke`. Native MCP Tasks support, if added later, must be capability-negotiated and must not break the ordinary-tool fallback described in `LONG_RUNNING_TASKS.md`.
+
+## Windows packaging
+
+Build the complete v0.8.4 release candidate with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.4
 ```
 
 The build uses a versioned staging directory and verifies the private runtime payload before compiling the Inno Setup installer. The output installer is:
 
 ```text
-release/MCPDevBridge-Setup-0.8.3.exe
+release/MCPDevBridge-Setup-0.8.4.exe
 ```
 
 The Inno Setup definition uses per-user installation and `DisableDirPage=no`, so the destination-directory page remains available. Do not change this back to an automatically hidden directory page without an explicit product decision.
@@ -99,7 +123,7 @@ The Inno Setup definition uses per-user installation and `DisableDirPage=no`, so
 On the Linux build host:
 
 ```bash
-bash scripts/build_linux.sh 0.8.3
+bash scripts/build_linux.sh 0.8.4
 ```
 
 The script performs runtime preparation, CodexPro build, Python tests/lint/typecheck, the complete CodexPro smoke suite, PyInstaller, a frozen headless smoke, and tarball creation.
@@ -107,7 +131,7 @@ The script performs runtime preparation, CodexPro build, Python tests/lint/typec
 The output is:
 
 ```text
-release/MCPDevBridge-Linux-x86_64-0.8.3.tar.gz
+release/MCPDevBridge-Linux-x86_64-0.8.4.tar.gz
 ```
 
 The tarball includes `install.sh`. Installation defaults to `~/.local/opt/MCPDevBridge`, while `install.sh --target-dir <path>` supports a safe custom user-writable location.
@@ -126,13 +150,13 @@ Use the script’s dry-run path before changing release behavior.
 
 ## Git and release discipline
 
-The v0.8.3 maintenance branch is `release/v0.8.3`. The repository also contains newer historical v0.9.x tags/branches. Do not rewrite, delete, or force-push those histories as part of v0.8.3 maintenance.
+The v0.8.4 maintenance branch is `release/v0.8.4`. The repository also contains newer historical v0.9.x tags/branches. Do not rewrite, delete, or force-push those histories as part of v0.8.4 maintenance.
 
 A production release is complete only when:
 
 1. source gates pass from a clean candidate tree;
 2. the release commit is pushed;
-3. tag `v0.8.3` points to that exact commit;
+3. tag `v0.8.4` points to that exact commit;
 4. the GitHub Release workflow produces Windows and Linux assets from that tag;
 5. the published Release assets and checksums are verified;
 6. the Windows installed instance/shortcut is switched to the final release asset.
@@ -142,4 +166,4 @@ Actual test counts, artifact sizes, hashes, commit IDs and final Release state a
 
 ### Entry-model regression guard
 
-The v0.8.3 tests intentionally reject reintroducing project ownership into ServiceCoordinator. StartOptions must remain transport-only; ProjectConfig must not regain a Gateway port; automatic workspace fallback must remain stateless unless the client explicitly requests the compatibility switch tool.
+The v0.8.4 tests intentionally reject reintroducing project ownership into ServiceCoordinator. StartOptions must remain transport-only; ProjectConfig must not regain a Gateway port; automatic workspace fallback must remain stateless unless the client explicitly requests the compatibility switch tool.
