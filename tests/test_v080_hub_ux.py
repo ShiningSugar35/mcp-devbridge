@@ -42,7 +42,7 @@ def test_ready_project_stop_button_waits_for_async_busy_release(tmp_path: Path, 
         window._poll_status()
         assert project.id in window._busy_project_ids
         row = window._row_of_root(project.root_path)
-        button = window.project_table.cellWidget(row, 5)
+        button = window.project_table.cellWidget(row, 4)
         assert isinstance(button, QPushButton)
         assert button.text() == "停止服务"
         assert not button.isEnabled()

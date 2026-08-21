@@ -327,6 +327,7 @@ name = "local-dev-mcp-bridge"
 version = "0.8.2"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "platformdirs" },
@@ -351,6 +352,7 @@ package = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=44.0.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "mcp", specifier = "==2.0.0" },

@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
+
+from .platform_support import IS_WINDOWS
 
 APP_IDENT = "LocalDevMCPBridge"
 
 
 def _base_config_dir() -> Path:
     if os.environ.get("LOCALDEV_MCP_CONFIG_DIR"):
-        return Path(os.environ["LOCALDEV_MCP_CONFIG_DIR"]).resolve()
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / APP_IDENT
+        return Path(os.environ["LOCALDEV_MCP_CONFIG_DIR"]).expanduser().resolve()
+    if IS_WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / APP_IDENT
+    # SteamOS/Arch and other Linux desktops follow XDG. Keeping all mutable
+    # state under the user's home also avoids SteamOS' read-only base system.
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    xdg_path = Path(xdg).expanduser() if xdg else None
+    base = xdg_path if xdg_path is not None and xdg_path.is_absolute() else Path.home() / ".config"
+    return base / APP_IDENT
 
 
 def config_dir() -> Path:
@@ -130,4 +140,8 @@ RATE_LIMITED = "RATE_LIMITED"
 
 def ensure_dirs() -> None:
     for d in (config_dir(), log_dir(), process_log_dir(), backup_dir()):
-        d.mkdir(parents=True, exist_ok=True)
+        missing = not d.exists()
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not IS_WINDOWS and missing:
+            with contextlib.suppress(OSError):
+                d.chmod(0o700)

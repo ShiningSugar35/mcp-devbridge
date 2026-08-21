@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  windows-test:
     runs-on: windows-latest
     env:
       PYTHONIOENCODING: utf-8
@@ -74,3 +74,64 @@ jobs:
           foreach ($path in @(".tools/node.exe", ".tools/uv.exe", ".tools/uvx.exe", ".tools/cloudflared.exe")) {
             if (-not (Test-Path -LiteralPath $path)) { throw "missing runtime: $path" }
           }
+
+  linux-steamos-test:
+    # Build/test on an older glibc than current SteamOS/Arch for better binary portability.
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux desktop runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 xdg-utils
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: 3.12
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: third_party/codexpro/package-lock.json
+
+      - name: Setup Linux venv
+        run: |
+          uv venv --python 3.12
+          uv pip install -p .venv -e ".[dev,package]"
+
+      - name: Build CodexPro engine
+        working-directory: third_party/codexpro
+        run: npm ci && npm run build
+
+      - name: Prepare native Linux private runtimes
+        run: bash scripts/prepare_runtime_linux.sh
+
+      - name: Verify shell scripts
+        run: bash -n scripts/prepare_runtime_linux.sh scripts/install_linux.sh scripts/live_upgrade.sh scripts/build_linux.sh
+
+      - name: Lint and typecheck
+        run: |
+          .venv/bin/python -m ruff check src tests
+          .venv/bin/python -m pyright --pythonpath .venv/bin/python src tests
+
+      - name: Unit tests on Linux
+        run: .venv/bin/python -m pytest tests/ -q --disable-warnings
+
+      - name: CodexPro full smoke on Linux bash
+        working-directory: third_party/codexpro
+        run: npm run smoke
+
+      - name: Verify Linux private runtimes
+        run: |
+          test -x .tools/linux/node
+          test -x .tools/linux/cloudflared
+          .tools/linux/node --version
+          .tools/linux/cloudflared --version

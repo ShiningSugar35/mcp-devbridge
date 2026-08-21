@@ -702,7 +702,10 @@ def test_generic_oauth_defaults_to_entry_workspace(mw_env: _MultiWorkspaceEnv) -
     assert routed_to == [18787]
 
 
-def test_direct_project_bearer_routes_to_matching_workspace(mw_env: _MultiWorkspaceEnv) -> None:
+def test_direct_project_bearer_authenticates_hub_without_pinning_workspace(
+    mw_env: _MultiWorkspaceEnv,
+) -> None:
+    """Legacy project bearers stay valid but path routing can reach any active root."""
     routed_to: list[int] = []
 
     class _Router(httpx.AsyncHTTPTransport):
@@ -720,6 +723,29 @@ def test_direct_project_bearer_routes_to_matching_workspace(mw_env: _MultiWorksp
         headers={"Authorization": f"Bearer {mw_env.credential_b}"},
     )
     assert response.status_code == 200, response.text
+    assert routed_to == [18788]  # no path keeps legacy bearer affinity for compatibility
+
+    routed_to.clear()
+    rpc = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 73,
+            "method": "tools/call",
+            "params": {
+                "name": "read",
+                "arguments": {"path": WORKSPACE_B_ROOT + r"\README.md"},
+            },
+        }
+    )
+    routed = mw_env.client.post(
+        "/mcp",
+        content=rpc,
+        headers={
+            "Authorization": f"Bearer {mw_env.credential_a}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert routed.status_code == 200, routed.text
     assert routed_to == [18788]
     assert mw_env.calls_b[-1]["authorization"] == f"Bearer {mw_env.credential_b}"
 
@@ -1165,6 +1191,109 @@ def test_v081_switch_workspace_returns_route_without_transport_session(
     assert "error" not in data
     assert data["result"]["structuredContent"]["devbridge_workspace_id"] == WORKSPACE_B_ID
 
+
+
+def test_v082_relative_path_ambiguity_requires_absolute_path(
+    mw_env: _MultiWorkspaceEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_a = tmp_path / "aa"
+    # Deliberately use different root-string lengths: relative-path ambiguity
+    # must not be resolved by whichever configured root happens to be longer.
+    root_b = tmp_path / "much-longer-root-name"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "README.md").write_text("a", encoding="utf-8")
+    (root_b / "README.md").write_text("b", encoding="utf-8")
+    monkeypatch.setattr(
+        mw_env.gateway,
+        "_running_workspace_roots",
+        lambda: [("left", root_a), ("right", root_b)],
+    )
+    with pytest.raises(ValueError, match="绝对路径"):
+        mw_env.gateway._workspace_for_path("README.md")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows drive-letter routing regression")
+def test_v082_cross_drive_absolute_path_routes_without_switch(
+    mw_env: _MultiWorkspaceEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        mw_env.gateway,
+        "_running_workspace_roots",
+        lambda: [("root-c", Path("C:\\")), ("root-d", Path("D:\\"))],
+    )
+    assert mw_env.gateway._workspace_for_path(r"D:\Environment\mcp\README.md") == "root-d"
+    assert mw_env.gateway._workspace_for_path(r"C:\Program Files (x86)\demo.txt") == "root-c"
+
+
+def test_v082_workspace_handle_affinity_survives_followup_without_path(
+    mw_env: _MultiWorkspaceEnv,
+) -> None:
+    """A CodexPro workspace_id returned by open_workspace must keep its root affinity."""
+    routed_to: list[int] = []
+
+    class _Router(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request):
+            from urllib.parse import urlparse
+
+            port = urlparse(str(request.url)).port or 18787
+            routed_to.append(port)
+            payload = json.loads(request.content.decode("utf-8")) if request.content else {}
+            tool = str((payload.get("params") or {}).get("name") or "")
+            if tool == "open_workspace":
+                return httpx.Response(
+                    200,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "result": {
+                            "content": [{"type": "text", "text": "opened"}],
+                            "structuredContent": {"workspace_id": "ws-beta-child"},
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": payload.get("id"), "result": {}},
+            )
+
+    mw_env.gateway._http = httpx.AsyncClient(transport=_Router())
+    headers = {"Authorization": f"Bearer {PUB_TOKEN}", "Content-Type": "application/json"}
+    opened = mw_env.client.post(
+        "/mcp",
+        content=json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 201,
+                "method": "tools/call",
+                "params": {
+                    "name": "open_workspace",
+                    "arguments": {"root": WORKSPACE_B_ROOT + r"\Nested"},
+                },
+            }
+        ),
+        headers=headers,
+    )
+    assert opened.status_code == 200, opened.text
+    assert routed_to[-1] == 18788
+
+    followed = mw_env.client.post(
+        "/mcp",
+        content=json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 202,
+                "method": "tools/call",
+                "params": {
+                    "name": "show_changes",
+                    "arguments": {"workspace_id": "ws-beta-child"},
+                },
+            }
+        ),
+        headers=headers,
+    )
+    assert followed.status_code == 200, followed.text
+    assert routed_to[-1] == 18788
 
 
 def test_v081_gateway_virtualizes_per_workspace_upstream_sessions(

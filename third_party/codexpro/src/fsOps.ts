@@ -19,6 +19,7 @@ export interface TreeResult {
   text: string;
   entries: number;
   truncated: boolean;
+  warnings: string[];
 }
 
 export interface ReadFileResult {
@@ -229,10 +230,27 @@ export async function repoTree(config: CodexProConfig, guard: PathGuard, workspa
   const lines: string[] = [target.relPath === "." ? "." : `${target.relPath}/`];
   let entries = 0;
   let truncated = false;
+  const warnings: string[] = [];
+
+  function recordUnreadable(absDir: string, error: unknown): void {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? String((error as NodeJS.ErrnoException).code ?? "")
+        : "";
+    const rel = displayPath(absDir, workspace.root);
+    const warning = `Skipped unreadable directory: ${rel}${code ? ` (${code})` : ""}`;
+    if (!warnings.includes(warning) && warnings.length < 100) warnings.push(warning);
+  }
 
   async function walk(absDir: string, relDir: string, depth: number, prefix: string): Promise<void> {
     if (depth >= options.maxDepth || truncated) return;
-    let dirents = await fsp.readdir(absDir, { withFileTypes: true });
+    let dirents: fs.Dirent[];
+    try {
+      dirents = await fsp.readdir(absDir, { withFileTypes: true });
+    } catch (error) {
+      recordUnreadable(absDir, error);
+      return;
+    }
     dirents = dirents
       .filter((entry) => options.includeHidden || !isHiddenName(entry.name))
       .filter((entry) => !guard.isBlockedRelativePath(normalizeRelPath(path.join(relDir, entry.name))))
@@ -265,13 +283,16 @@ export async function repoTree(config: CodexProConfig, guard: PathGuard, workspa
 
   await walk(target.absPath, target.relPath === "." ? "" : target.relPath, 0, "");
   if (truncated) lines.push(`...[tree truncated after ${entries} entries]`);
-  return { text: lines.join("\n"), entries, truncated };
+  if (warnings.length) {
+    lines.push("", "Warnings:", ...warnings.map((warning) => `- ${warning}`));
+  }
+  return { text: lines.join("\n"), entries, truncated, warnings };
 }
 
 export async function listFiles(
   guard: PathGuard,
   workspace: Workspace,
-  options: { root?: string; glob?: string; includeHidden?: boolean; maxFiles: number }
+  options: { root?: string; glob?: string; includeHidden?: boolean; maxFiles: number; warnings?: string[] }
 ): Promise<string[]> {
   const target = guard.resolve(workspace, options.root ?? ".");
   const stat = await fsp.stat(target.absPath);
@@ -290,7 +311,16 @@ export async function listFiles(
     let entries: fs.Dirent[];
     try {
       entries = await fsp.readdir(absDir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      if (options.warnings && options.warnings.length < 100) {
+        const code =
+          error && typeof error === "object" && "code" in error
+            ? String((error as NodeJS.ErrnoException).code ?? "")
+            : "";
+        const rel = displayPath(absDir, workspace.root);
+        const warning = `Skipped unreadable directory: ${rel}${code ? ` (${code})` : ""}`;
+        if (!options.warnings.includes(warning)) options.warnings.push(warning);
+      }
       return;
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));

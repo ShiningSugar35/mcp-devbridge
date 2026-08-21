@@ -145,6 +145,12 @@ Phase 9 多项目并行 + Shell 修复  (2026-08-09 完成：project_manager + �
 
 ### 九、变更记录（AGENTS 的维护者：每次有重大架构变化更新本节）
 
+- 2026-08-21 · **多根工作区自动路由 / Linux·SteamOS 恢复 / 安装目录可选**：
+  - 所有运行中的项目根组成并列 active root 集合；Gateway 按绝对路径最长前缀、唯一相对路径、CodexPro workspace 句柄或 bash task_id 自动路由。`devbridge_workspace_id` 仅作兼容显式覆盖，不再要求 switch/current workspace。
+  - 项目 Bearer 只承担认证/兼容回退，不再把会话钉死到单个项目；停止任一 READY 根不会关闭 Hub，只有最后一个运行根停止才关闭 Gateway/Tunnel。项目表删除“入口”列。
+  - CodexPro 根盘扫描遇到 EPERM/EACCES 子目录跳过并返回 warnings；Git scoped 工具会从目标路径发现最近的嵌套仓库。
+  - Windows 安装器显式展示安装目录页；从 v0.9.1 选择性恢复 Linux/SteamOS 跨平台层、XDG 配置、AES-GCM secrets、bash/进程、Linux 打包/安装/升级与 CI，不引入 0.9.x 多 Agent 运行时。
+
 - 2026-08-21 · **v0.8.2 桌面启停稳定性 / 批量配置 / 生产包瘦身**：
   - 项目表操作按钮改为原位复用，1 秒轮询不得销毁正在交互的按钮；`_busy_project_ids` 只由对应异步生命周期回调释放，避免 Stop/Start 点击被吞与重复启停竞态。
   - 新增“启动所有项目 / 停止所有项目”总控；删除重复“当前项目”卡片；“连接与权限”支持一次同步到全部项目，批量同步不覆盖 Git 参数和项目独立端口。

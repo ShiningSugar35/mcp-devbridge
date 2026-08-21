@@ -62,8 +62,8 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
 
         row_a = window._row_of_root(project_a.root_path)
         row_b = window._row_of_root(project_b.root_path)
-        button_a = window.project_table.cellWidget(row_a, 5)
-        button_b = window.project_table.cellWidget(row_b, 5)
+        button_a = window.project_table.cellWidget(row_a, 4)
+        button_b = window.project_table.cellWidget(row_b, 4)
         assert isinstance(button_a, QPushButton)
         assert isinstance(button_b, QPushButton)
         assert button_a.text() == "停止服务"
@@ -75,7 +75,7 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
         window._apply_selected_project()
         window._poll_status()
         assert not hasattr(window, "start_btn")
-        assert window.project_table.cellWidget(row_b, 5) is button_b
+        assert window.project_table.cellWidget(row_b, 4) is button_b
         assert button_b.text() == "启动服务"
         assert button_b.isEnabled()
         assert window.permission_combo.isEnabled()
@@ -86,7 +86,7 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
         window._select_root(project_a.root_path)
         window._apply_selected_project()
         window._poll_status()
-        assert window.project_table.cellWidget(row_a, 5) is button_a
+        assert window.project_table.cellWidget(row_a, 4) is button_a
         assert button_a.text() == "停止服务"
         assert button_a.isEnabled()
         assert not window.permission_combo.isEnabled()

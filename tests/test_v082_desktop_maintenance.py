@@ -54,15 +54,22 @@ def test_project_row_button_identity_survives_status_polls_and_duplicate_card_is
     app, window, project_a, _project_b = _window(tmp_path, monkeypatch)
     try:
         row = window._row_of_root(project_a.root_path)
-        button = window.project_table.cellWidget(row, 5)
+        button = window.project_table.cellWidget(row, 4)
         assert isinstance(button, QPushButton)
         for _ in range(5):
             window._poll_status()
-            assert window.project_table.cellWidget(row, 5) is button
+            assert window.project_table.cellWidget(row, 4) is button
 
         titles = [box.title() for box in window.findChildren(QGroupBox)]
         assert "当前项目" not in titles
         assert not hasattr(window, "start_btn")
+        assert window.project_table.columnCount() == 5
+        headers: list[str] = []
+        for i in range(window.project_table.columnCount()):
+            header = window.project_table.horizontalHeaderItem(i)
+            assert header is not None
+            headers.append(header.text())
+        assert headers == ["名称", "路径", "状态", "端口", "操作"]
         assert window.all_projects_btn.text() == "启动所有项目"
     finally:
         _close(app, window)
@@ -103,6 +110,48 @@ def test_save_connection_and_permission_card_to_all_projects(tmp_path: Path, mon
         saved_b = window.pm.get(project_b.id)
         assert saved_b is not None and saved_b.git_user_name == "keep-me"
         assert not cleared
+    finally:
+        _close(app, window)
+
+
+def test_stopping_one_running_root_keeps_hub_until_last_root_stops(tmp_path: Path, monkeypatch) -> None:
+    app, window, project_a, project_b = _window(tmp_path, monkeypatch)
+    stopped_hub: list[bool] = []
+    monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+
+    unit_a = window.pm.unit_for(project_a.id)
+    unit_b = window.pm.unit_for(project_b.id)
+    assert unit_a is not None
+    assert unit_b is not None
+    unit_a.codex._state = EngineState.READY
+    unit_b.codex._state = EngineState.READY
+    window.coord._state = EngineState.READY
+    window._service_root = project_a.root_path
+
+    def fake_pm_stop(project_id: str) -> None:
+        unit = window.pm.unit_for(project_id)
+        assert unit is not None
+        unit.codex._state = EngineState.IDLE
+        unit.windows._state = EngineState.IDLE
+
+    def fake_hub_stop() -> None:
+        stopped_hub.append(True)
+        window.coord._state = EngineState.IDLE
+
+    monkeypatch.setattr(window.pm, "stop", fake_pm_stop)
+    monkeypatch.setattr(window.coord, "stop", fake_hub_stop)
+
+    try:
+        window._stop_project_engine_for(project_a)
+        assert window._project_state(project_a) == EngineState.IDLE
+        assert window._project_state(project_b) == EngineState.READY
+        assert window.coord.state == EngineState.READY
+        assert not stopped_hub
+
+        window._stop_project_engine_for(project_b)
+        assert window._project_state(project_b) == EngineState.IDLE
+        assert window.coord.state == EngineState.IDLE
+        assert stopped_hub == [True]
     finally:
         _close(app, window)
 

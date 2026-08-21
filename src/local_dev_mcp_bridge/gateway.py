@@ -23,6 +23,9 @@ import hashlib
 import hmac
 import html
 import json
+import os
+import re
+import shlex
 import threading
 import time
 from collections.abc import Callable
@@ -50,6 +53,7 @@ from .audit import AuditLogger
 from .constants import LOG_DIR as _LOG_DIR
 from .device_hub import DeviceRegistry
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
+from .platform_support import run_platform_kwargs
 from .secrets import SecretsStore
 from .shell import detect_binaries, get_shell_info, run_command, run_program
 
@@ -77,8 +81,25 @@ _LOCAL_TOOL_NAMES = (
 _ROUTE_WORKSPACE_ARG = "devbridge_workspace_id"
 _ROUTE_DEVICE_ARG = "devbridge_device_id"
 _ROUTE_HINT_DESCRIPTION = (
-    "After a workspace or device switch, pass the returned routing value on later calls in this chat."
+    "Compatibility override only. Normally omit this field: MCP DevBridge automatically routes "
+    "each call by absolute path, cwd, existing relative path, or task affinity."
 )
+_ROUTE_PATH_KEYS = ("path", "root", "cwd", "target_path")
+_TASK_AFFINITY_TOOLS = frozenset({"get_task", "wait_task", "cancel_task"})
+_WRITE_ROUTE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+_CODEXPRO_ACTION_ALIASES = {
+    "actions": "list_actions",
+    "config": "server_config",
+    "self_test": "codexpro_self_test",
+    "inventory": "codexpro_inventory",
+    "open": "open_current_workspace",
+    "snapshot": "workspace_snapshot",
+    "changes": "show_changes",
+    "handoff_poll": "wait_for_handoff",
+    "pro_export": "export_pro_context",
+    "agent_handoff": "handoff_to_agent",
+    "codex_handoff": "handoff_to_codex",
+}
 
 _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     {
@@ -312,13 +333,13 @@ def _rewrite_server_identity(payload: bytes) -> bytes:
             target["serverInfo"]["name"] = "mcp-devbridge"
             target["serverInfo"]["title"] = "MCP DevBridge"
             routing_note = (
-                "\n\nMCP DevBridge routing: ChatGPT may recreate the MCP transport between "
-                "tool-call batches. After devbridge_switch_workspace or "
-                "devbridge_switch_device returns a routing value, include the returned "
-                "devbridge_workspace_id / devbridge_device_id in subsequent tool calls "
-                "in this conversation. Long-running local work must use the background "
-                "bash task tool, then poll with wait_task/get_task; do not hold a single "
-                "run_command/run_program call open for builds, tests, installs, or crawls."
+                "\n\nMCP DevBridge routing: every running local workspace root is active at the "
+                "same time. Do not switch/current-workspace just to reach another project. Prefer "
+                "absolute path/cwd arguments when several roots are running; DevBridge chooses the "
+                "longest matching active root automatically. Relative paths are auto-matched when "
+                "they identify one active root. devbridge_workspace_id remains a compatibility-only "
+                "explicit override. Background bash task follow-ups are routed by task_id, so "
+                "wait_task/get_task/cancel_task do not need a workspace switch."
             )
             current = str(target.get("instructions") or "")
             if "MCP DevBridge routing:" not in current:
@@ -621,6 +642,11 @@ class OAuthGateway:
         # servers, but every CodexPro server owns a different mcp-session-id.
         self._session_workspaces: dict[str, str] = {}
         self._session_devices: dict[str, str] = {}
+        self._task_workspaces: dict[str, str] = {}
+        # open_workspace returns an opaque workspace_id reused by later tools that
+        # may have no path/cwd argument. Keep affinity so those follow-up calls
+        # stay on the root that created the handle without any DevBridge switch.
+        self._workspace_handle_roots: dict[str, str] = {}
         self._upstream_sessions: dict[str, dict[str, str]] = {}
         self._initialize_requests: dict[str, bytes] = {}
         self._session_lock = threading.Lock()
@@ -804,15 +830,15 @@ class OAuthGateway:
 
         proxy_token: str | None = None
         workspace_id = ""
-        direct_workspace = ""
+        authenticated_workspace = ""
         upstream_target: str | None = None
         if bearer:
-            direct_workspace = self._workspace_for_credential(bearer)
-            if _constant_time_eq(bearer, engine_credential) or direct_workspace:
-                workspace_id = direct_workspace
-                proxy_token = self._credential_for_workspace(
-                    workspace_id, engine_credential or bearer
-                )
+            authenticated_workspace = self._workspace_for_credential(bearer)
+            if _constant_time_eq(bearer, engine_credential) or authenticated_workspace:
+                # A project bearer remains a backward-compatible fallback, but path/task routing
+                # may override it for tools/call so the credential never becomes a routing fence.
+                workspace_id = authenticated_workspace
+                proxy_token = engine_credential or bearer
             else:
                 record = await self._provider.load_access_token(bearer)
                 if record is None:
@@ -820,18 +846,13 @@ class OAuthGateway:
                 if record.resource and record.resource.rstrip("/") != self.resource_url:
                     return self._unauthorized()
                 workspace_id = _workspace_from_subject(record.subject or "")
-                proxy_token = self._credential_for_workspace(workspace_id, engine_credential)
-                if not proxy_token:
+                proxy_token = engine_credential
+                if not proxy_token and self._workspace_registry is None:
                     return self._unauthorized()
         elif self.allow_local_anonymous and _is_loopback(request):
             proxy_token = None
         else:
             return self._unauthorized()
-
-        if route_workspace_id and direct_workspace and route_workspace_id != direct_workspace:
-            return JSONResponse(
-                _jsonrpc_error(None, -32602, "当前 Bearer 已固定到另一个工作区，不能覆盖路由。")
-            )
 
         if route_device_id:
             views = (
@@ -845,7 +866,9 @@ class OAuthGateway:
             else:
                 target_view = next((view for view in views if view.id == route_device_id), None)
                 if target_view is None or not target_view.online:
-                    return JSONResponse(_jsonrpc_error(None, -32001, "指定电脑当前不可用。"), status_code=502)
+                    return JSONResponse(
+                        _jsonrpc_error(None, -32001, "指定电脑当前不可用。"), status_code=502
+                    )
             device_id = route_device_id
             if session_id:
                 with self._session_lock:
@@ -868,6 +891,7 @@ class OAuthGateway:
             upstream_key = f"remote:{device_id}"
             proxy_token = remote.bearer
         else:
+            inferred_workspace = ""
             if route_workspace_id:
                 if self._workspace_registry and not self._workspace_registry(route_workspace_id):
                     return JSONResponse(
@@ -875,11 +899,20 @@ class OAuthGateway:
                         status_code=502,
                     )
                 workspace_id = route_workspace_id
-                if session_id:
-                    with self._session_lock:
-                        self._session_workspaces[session_id] = workspace_id
+            elif rpc is not None and jsonrpc_method == "tools/call":
+                try:
+                    inferred_workspace = self._infer_workspace_for_call(tool_name, call_arguments)
+                except ValueError as exc:
+                    return JSONResponse(_jsonrpc_error(rpc.get("id"), -32602, str(exc)))
+                if inferred_workspace:
+                    workspace_id = inferred_workspace
+                elif authenticated_workspace:
+                    workspace_id = authenticated_workspace
+
             workspace_id = self._effective_workspace(
-                workspace_id, session_id, pinned=bool(direct_workspace)
+                workspace_id,
+                session_id,
+                pinned=bool(route_workspace_id or inferred_workspace),
             )
             if workspace_id:
                 upstream_target = self._resolve_upstream(workspace_id)
@@ -887,7 +920,7 @@ class OAuthGateway:
                 if not upstream_target:
                     return JSONResponse(
                         _jsonrpc_error(
-                            None, -32000, "当前项目尚未启动。请先在 MCP DevBridge 桌面启动它。"
+                            None, -32000, "目标工作区尚未运行。请先在 MCP DevBridge 桌面启动该根目录。"
                         ),
                         status_code=502,
                     )
@@ -1006,6 +1039,33 @@ class OAuthGateway:
             key: value for key, value in upstream.headers.items() if key.lower() not in _HOP_HEADERS
         }
         if request.method == "POST":
+            affinity_tool = tool_name
+            if jsonrpc_method == "tools/call" and rpc is not None:
+                affinity_tool, _ = self._unwrap_codexpro_call(
+                    tool_name, _tool_arguments(rpc.get("params") or {})
+                )
+            if (
+                jsonrpc_method == "tools/call"
+                and affinity_tool in {"open_workspace", "open_current_workspace"}
+                and workspace_id
+            ):
+                await upstream.aread()
+                handle = self._extract_structured_field(upstream.content, "workspace_id")
+                if handle:
+                    with self._session_lock:
+                        self._workspace_handle_roots[handle] = workspace_id
+                return Response(
+                    content=upstream.content, status_code=upstream.status_code, headers=filtered
+                )
+            if jsonrpc_method == "tools/call" and affinity_tool == "bash" and workspace_id:
+                await upstream.aread()
+                task_id = self._extract_task_id(upstream.content)
+                if task_id:
+                    with self._session_lock:
+                        self._task_workspaces[task_id] = workspace_id
+                return Response(
+                    content=upstream.content, status_code=upstream.status_code, headers=filtered
+                )
             if b'"tools/list"' in body:
                 await upstream.aread()
                 rewritten = _inject_tools(upstream.content)
@@ -1068,7 +1128,7 @@ class OAuthGateway:
                 if not command.strip():
                     raise ValueError("command 不能为空。")
                 cwd_rel = str(arguments.get("cwd", "")).strip()
-                cwd = (workspace / cwd_rel).resolve() if cwd_rel else workspace
+                cwd = self._local_tool_cwd(workspace, cwd_rel)
                 timeout = max(1, min(int(arguments.get("timeout_seconds") or 10), 20))
                 res = run_command(command, cwd=cwd, timeout_seconds=timeout)
                 text = (
@@ -1087,7 +1147,7 @@ class OAuthGateway:
                     raise ValueError("executable 不能为空。")
                 args = [str(a) for a in (arguments.get("args") or [])]
                 cwd_rel = str(arguments.get("cwd", "")).strip()
-                cwd = (workspace / cwd_rel).resolve() if cwd_rel else workspace
+                cwd = self._local_tool_cwd(workspace, cwd_rel)
                 timeout = max(1, min(int(arguments.get("timeout_seconds") or 10), 20))
                 res = run_program(executable, args, cwd=cwd, timeout_seconds=timeout)
                 text = (
@@ -1124,7 +1184,7 @@ class OAuthGateway:
                             ["python", "-m", tool, "--version"],
                             capture_output=True,
                             timeout=30,
-                            creationflags=0x08000000 if hasattr(_sp, "CREATE_NO_WINDOW") else 0,
+                            **run_platform_kwargs(),
                         )
                         out = r.stdout.decode("utf-8", errors="replace").strip().splitlines()
                         lines.append(f"[✓] {tool}: {out[0] if out else 'ok'} (python -m {tool})")
@@ -1445,6 +1505,273 @@ class OAuthGateway:
         return Path(root) if root else None
 
     @staticmethod
+    def _path_within(child: Path, parent: Path) -> bool:
+        try:
+            # realpath resolves junctions/symlinks in existing parents while still
+            # supporting a not-yet-created final path. This keeps textual children
+            # from escaping a configured root through ``..`` or a link/junction.
+            child_text = os.path.normcase(os.path.realpath(os.path.abspath(str(child.expanduser()))))
+            parent_text = os.path.normcase(os.path.realpath(os.path.abspath(str(parent.expanduser()))))
+            return os.path.commonpath([child_text, parent_text]) == parent_text
+        except (OSError, ValueError):
+            return False
+
+    def _local_tool_cwd(self, workspace: Path, raw_cwd: str) -> Path:
+        root = workspace.expanduser().resolve()
+        value = (raw_cwd or '').strip()
+        candidate = Path(value).expanduser() if value else root
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        if not self._path_within(candidate, root):
+            raise ValueError('cwd 超出目标工作区根目录。请使用该运行中根目录内的路径。')
+        return candidate
+
+    def _running_workspace_roots(self) -> list[tuple[str, Path]]:
+        if self._workspace_registry is None:
+            return []
+        rows: list[tuple[str, Path]] = []
+        try:
+            from .config_store import load_projects
+
+            for project in load_projects():
+                if not project.id:
+                    continue
+                info = self._workspace_registry(project.id)
+                if info is None:
+                    continue
+                _port, root = info
+                if root:
+                    rows.append((project.id, Path(root).expanduser()))
+        except Exception:
+            return []
+        rows.sort(
+            key=lambda item: (
+                -len(os.path.abspath(str(item[1]))),
+                os.path.normcase(os.path.abspath(str(item[1]))),
+            )
+        )
+        return rows
+
+    def _workspace_for_path(self, raw_path: str, *, allow_new: bool = False) -> str:
+        value = (raw_path or "").strip().strip('\"')
+        if not value or value == ".":
+            return ""
+        roots = self._running_workspace_roots()
+        if not roots:
+            return ""
+        path_value = Path(value).expanduser()
+        if path_value.is_absolute():
+            for project_id, root in roots:
+                if self._path_within(path_value, root):
+                    return project_id
+            return ""
+
+        ranked: list[tuple[int, str]] = []
+        for project_id, root in roots:
+            candidate = root / path_value
+            if not self._path_within(candidate, root):
+                continue
+            if candidate.exists():
+                # An existing relative path is strong evidence, but if the same
+                # relative path exists below multiple active roots it is still
+                # ambiguous. Root-string length is not a semantic tiebreaker.
+                ranked.append((10_000, project_id))
+                continue
+            if not allow_new:
+                continue
+            parent = candidate.parent
+            while self._path_within(parent, root) and parent != root and not parent.exists():
+                parent = parent.parent
+            if self._path_within(parent, root) and parent.exists():
+                try:
+                    existing_depth = len(parent.relative_to(root).parts)
+                except ValueError:
+                    existing_depth = 0
+                ranked.append((existing_depth, project_id))
+        if not ranked:
+            return ""
+        best_depth = max(item[0] for item in ranked)
+        best = [item for item in ranked if item[0] == best_depth]
+        if len({item[1] for item in best}) > 1:
+            raise ValueError(
+                f"相对路径 {value!r} 同时匹配多个运行中的工作区根目录；"
+                "请改用绝对路径或显式 workspace_id，避免读写到错误项目。"
+            )
+        return best[0][1]
+
+    @staticmethod
+    def _command_candidate_paths(command: str) -> list[str]:
+        """Extract explicit absolute paths from common shell argv forms.
+
+        This is routing-only, not command validation. It intentionally ignores
+        relative tokens and ambiguous shell expressions.
+        """
+        if not command.strip():
+            return []
+        try:
+            tokens = shlex.split(command, posix=os.name != "nt")
+        except ValueError:
+            tokens = command.split()
+        values: list[str] = []
+        for raw in tokens:
+            variants = [raw]
+            if "=" in raw:
+                variants.append(raw.split("=", 1)[1])
+            for variant in variants:
+                value = variant.strip().strip("\"'").rstrip(",;")
+                if not value or "$" in value or "`" in value:
+                    continue
+                candidate = Path(value).expanduser()
+                if candidate.is_absolute() and value not in values:
+                    values.append(value)
+        return values
+
+    @staticmethod
+    def _patch_candidate_paths(patch: str) -> list[str]:
+        values: list[str] = []
+        for line in (patch or "").splitlines():
+            match = re.match(r"^(?:---|\+\+\+)\s+(?:[ab]/)?(.+)$", line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if value and value != "/dev/null" and value not in values:
+                values.append(value)
+        return values
+
+    @staticmethod
+    def _unwrap_codexpro_call(
+        tool_name: str, arguments: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """Expose a supertool's wrapped action to the DevBridge router.
+
+        CodexPro offers a stable ``codexpro(action, args)`` wrapper for clients
+        that cache one schema. Routing only on the outer tool name would lose
+        path/task/workspace-handle evidence from ``args`` and can select the
+        wrong active root. Keep the wrapper transparent to routing while
+        preserving the original request on the wire to the chosen engine.
+        """
+        if tool_name != "codexpro":
+            return tool_name, arguments
+        raw_action = str(arguments.get("action") or "list_actions").strip().lower()
+        action = re.sub(r"[\s-]+", "_", raw_action)
+        action = _CODEXPRO_ACTION_ALIASES.get(action, action)
+        nested = arguments.get("args")
+        child_arguments = nested if isinstance(nested, dict) else {}
+        if action == "codexpro":
+            return tool_name, arguments
+        return action, child_arguments
+
+    def _infer_workspace_for_call(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        effective_tool, effective_arguments = self._unwrap_codexpro_call(tool_name, arguments)
+        if effective_tool != tool_name:
+            return self._infer_workspace_for_call(effective_tool, effective_arguments)
+
+        # Strong operation-specific evidence wins over a stale CodexPro workspace
+        # handle. A task_id identifies the engine that owns the task; path/cwd
+        # identifies the active root the user is actually addressing. The opaque
+        # workspace_id is only a fallback for follow-up tools with no such signal.
+        task_id = str(arguments.get("task_id") or "").strip()
+        if task_id and tool_name in _TASK_AFFINITY_TOOLS:
+            with self._session_lock:
+                task_workspace = self._task_workspaces.get(task_id, "")
+            if (
+                task_workspace
+                and self._workspace_registry
+                and self._workspace_registry(task_workspace)
+            ):
+                return task_workspace
+
+        values: list[str] = []
+        for key in _ROUTE_PATH_KEYS:
+            value = arguments.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value)
+        selected_paths = arguments.get("selected_paths")
+        if isinstance(selected_paths, list):
+            values.extend(
+                value for value in selected_paths if isinstance(value, str) and value.strip()
+            )
+        if tool_name == "apply_patch":
+            values.extend(self._patch_candidate_paths(str(arguments.get("patch") or "")))
+        if tool_name in {"bash", "run_command"}:
+            values.extend(self._command_candidate_paths(str(arguments.get("command") or "")))
+
+        allow_new = tool_name in _WRITE_ROUTE_TOOLS or tool_name in {"bash", "run_command"}
+        absolute_matches: list[str] = []
+        for value in values:
+            candidate = Path(value.strip().strip('\"')).expanduser()
+            if candidate.is_absolute():
+                matched = self._workspace_for_path(value, allow_new=allow_new)
+                if matched and matched not in absolute_matches:
+                    absolute_matches.append(matched)
+        if len(absolute_matches) > 1:
+            raise ValueError(
+                "一次工具调用同时引用了多个运行中的工作区根目录；"
+                "请拆成多次调用，或显式指定 workspace_id。"
+            )
+        if absolute_matches:
+            return absolute_matches[0]
+        for value in values:
+            matched = self._workspace_for_path(value, allow_new=allow_new)
+            if matched:
+                return matched
+
+        workspace_handle = str(arguments.get("workspace_id") or "").strip()
+        if workspace_handle:
+            with self._session_lock:
+                handle_workspace = self._workspace_handle_roots.get(workspace_handle, "")
+            if (
+                handle_workspace
+                and self._workspace_registry
+                and self._workspace_registry(handle_workspace)
+            ):
+                return handle_workspace
+        return ""
+
+    @staticmethod
+    def _extract_structured_field(payload: bytes, field: str) -> str:
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+        candidates: list[dict[str, Any]] = []
+        if text.lstrip().startswith("data:") or "\ndata:" in text:
+            for line in text.splitlines():
+                if not line.startswith("data:"):
+                    continue
+                body = line[5:].strip()
+                if not body or body == "[DONE]":
+                    continue
+                try:
+                    value = json.loads(body)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    candidates.append(value)
+        else:
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, dict):
+                candidates.append(value)
+        for value in candidates:
+            result = value.get("result")
+            if not isinstance(result, dict):
+                continue
+            structured = result.get("structuredContent")
+            if isinstance(structured, dict):
+                field_value = str(structured.get(field) or "").strip()
+                if field_value:
+                    return field_value
+        return ""
+
+    @staticmethod
+    def _extract_task_id(payload: bytes) -> str:
+        return OAuthGateway._extract_structured_field(payload, "task_id")
+
+    @staticmethod
     def _extract_session_id(request: Request) -> str:
         """Extract mcp-session-id header from request."""
         sid = request.headers.get("mcp-session-id", "")
@@ -1464,25 +1791,17 @@ class OAuthGateway:
         except Exception:
             return []
 
-    def _entry_workspace_id(self, running: list[str]) -> str:
-        if not self._workspace or not running:
+    def _stable_workspace_id(self, running: list[str]) -> str:
+        """Choose a deterministic bootstrap root without giving it entry privileges."""
+        if not running:
             return ""
-        try:
-            target = self._workspace.expanduser().resolve()
-            from .config_store import load_projects
-
-            for project in load_projects():
-                if project.id not in running:
-                    continue
-                try:
-                    if Path(project.root_path).expanduser().resolve() == target:
-                        return project.id
-                except OSError:
-                    if project.root_path.casefold() == str(self._workspace).casefold():
-                        return project.id
-        except Exception:
-            return ""
-        return ""
+        roots = {project_id: root for project_id, root in self._running_workspace_roots()}
+        return min(
+            running,
+            key=lambda project_id: os.path.normcase(
+                os.path.abspath(str(roots.get(project_id, Path(project_id))))
+            ),
+        )
 
     def _effective_workspace(self, token_workspace: str, session_id: str, *, pinned: bool = False) -> str:
         """Resolve a workspace without binding OAuth identity to one project.
@@ -1505,7 +1824,7 @@ class OAuthGateway:
         elif len(running) == 1:
             chosen = running[0]
         else:
-            chosen = self._entry_workspace_id(running) or (running[0] if running else "")
+            chosen = self._stable_workspace_id(running)
         if chosen and session_id:
             with self._session_lock:
                 self._session_workspaces[session_id] = chosen

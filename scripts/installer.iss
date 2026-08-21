@@ -19,6 +19,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\MCP DevBridge
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+DisableDirPage=no
 OutputDir=..\release
 OutputBaseFilename=MCPDevBridge-Setup-{#MyAppVersion}
 Compression=lzma2

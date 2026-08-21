@@ -1,4 +1,4 @@
-name: Release build (Windows installer)
+name: Release build (Windows + Linux/SteamOS)
 
 on:
   workflow_dispatch:
@@ -12,40 +12,34 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
-
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
           python-version: 3.12
-
       - name: Install pinned Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22.19.0
           cache: npm
           cache-dependency-path: third_party/codexpro/package-lock.json
-
       - name: Setup Python environment
         run: |
           uv venv --python 3.12
           uv pip install -p .venv -e ".[dev,package]"
-
       - name: Build CodexPro engine
         working-directory: third_party/codexpro
         run: npm ci && npm run build
-
       - name: Install Inno Setup
         shell: powershell
         run: choco install innosetup --no-progress -y
-
-      - name: Build and verify installer
+      - name: Build and verify Windows installer
         shell: powershell
         run: |
           $version = "${{ inputs.version }}"
@@ -55,8 +49,7 @@ jobs:
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Verify frozen payload
+      - name: Verify Windows frozen payload
         shell: powershell
         run: |
           $dist = Get-ChildItem -Directory dist -Filter "staging-*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -72,21 +65,81 @@ jobs:
           )) {
             if (-not (Test-Path -LiteralPath (Join-Path $app $relative))) { throw "missing frozen payload: $relative" }
           }
-
-      - name: Installer SHA-256
+      - name: Windows installer SHA-256
         shell: powershell
         run: Get-FileHash release\MCPDevBridge-Setup-*.exe -Algorithm SHA256
-
-      - name: Upload installer
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: MCPDevBridge-Windows-Installer
           path: release/MCPDevBridge-Setup-*.exe
           retention-days: 30
-
-      - name: Upload frozen onedir
+      - name: Upload Windows frozen onedir
         uses: actions/upload-artifact@v4
         with:
-          name: MCPDevBridge-onedir
+          name: MCPDevBridge-Windows-onedir
+          path: dist/staging-*/MCPDevBridge
+          retention-days: 14
+
+  linux-steamos:
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux desktop runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 xdg-utils
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: 3.12
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: third_party/codexpro/package-lock.json
+      - name: Setup Python environment
+        run: |
+          uv venv --python 3.12
+          uv pip install -p .venv -e ".[dev,package]"
+      - name: Install CodexPro dependencies
+        working-directory: third_party/codexpro
+        run: npm ci
+      - name: Build Linux / SteamOS package
+        run: |
+          version="${{ inputs.version }}"
+          if [[ -n "$version" ]]; then
+            bash scripts/build_linux.sh "$version"
+          else
+            bash scripts/build_linux.sh
+          fi
+      - name: Verify Linux package payload
+        run: |
+          package=$(ls release/MCPDevBridge-Linux-x86_64-*.tar.gz)
+          test -f "$package"
+          sha256sum "$package"
+          rm -rf /tmp/mcp-release-check
+          mkdir -p /tmp/mcp-release-check
+          tar -xzf "$package" -C /tmp/mcp-release-check
+          test -x /tmp/mcp-release-check/MCPDevBridge/MCPDevBridge
+          test -x /tmp/mcp-release-check/MCPDevBridge/cloudflared
+          test -x /tmp/mcp-release-check/MCPDevBridge/_internal/runtime/node
+          test -x /tmp/mcp-release-check/MCPDevBridge/install.sh
+          test -x /tmp/mcp-release-check/MCPDevBridge/_internal/scripts/live_upgrade.sh
+      - name: Upload Linux / SteamOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCPDevBridge-Linux-x86_64
+          path: release/MCPDevBridge-Linux-x86_64-*.tar.gz
+          retention-days: 30
+      - name: Upload Linux frozen onedir
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCPDevBridge-Linux-onedir
           path: dist/staging-*/MCPDevBridge
           retention-days: 14

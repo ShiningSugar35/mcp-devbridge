@@ -8,7 +8,13 @@ import type { InventoryFile, InventoryResult } from "./types.js";
 
 export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace): Promise<InventoryResult> {
   const maxFiles = config.analysisLimits.maxInventoryFiles;
-  const candidates = await listFiles(guard, workspace, { root: ".", includeHidden: true, maxFiles: maxFiles + 1 });
+  const scanWarnings: string[] = [];
+  const candidates = await listFiles(guard, workspace, {
+    root: ".",
+    includeHidden: true,
+    maxFiles: maxFiles + 1,
+    warnings: scanWarnings
+  });
   const truncated = candidates.length > maxFiles;
   const files: InventoryFile[] = [];
 
@@ -37,7 +43,10 @@ export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuar
   const fingerprint = createHash("sha256")
     .update(files.map((file) => `${file.path}:${file.bytes}:${file.modifiedMs}`).join("\n"))
     .digest("hex");
-  const warnings = truncated ? [`Inventory truncated at ${maxFiles} files.`] : [];
+  const warnings = [
+    ...(truncated ? [`Inventory truncated at ${maxFiles} files.`] : []),
+    ...scanWarnings
+  ];
   return {
     files,
     fingerprint,

@@ -81,6 +81,12 @@ const alternateWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smo
 await fs.writeFile(path.join(alternateWorkspace, 'selected.txt'), 'alternate workspace\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'other.txt'), 'keep\n', 'utf8');
+const unreadableTreeDir = path.join(tmp, 'unreadable-dir');
+if (process.platform !== 'win32') {
+  await fs.mkdir(unreadableTreeDir);
+  await fs.writeFile(path.join(unreadableTreeDir, 'hidden.txt'), 'cannot scan\n', 'utf8');
+  await fs.chmod(unreadableTreeDir, 0o000);
+}
 await fs.writeFile(path.join(tmp, 'patch-race.txt'), 'patch race initial\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=sk-realSecretValue123\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'AGENTS.md'), '# Smoke Agents\n\n- Preserve demo.txt.\n', 'utf8');
@@ -498,6 +504,12 @@ const inventory = await client.request('tools/call', { name: 'codexpro_inventory
 if (inventory.structuredContent.codexpro_tool !== 'codexpro_inventory') throw new Error('inventory result was not tagged for widget rendering');
 const opened = await client.request('tools/call', { name: 'open_workspace', arguments: { root: tmp, include_tree: true } });
 const ws = opened.structuredContent.workspace_id;
+if (process.platform !== 'win32') {
+  const treeWarnings = opened.structuredContent.tree || '';
+  if (!treeWarnings.includes('Skipped unreadable directory: unreadable-dir')) {
+    throw new Error(`open_workspace tree did not warn and skip unreadable directory: ${treeWarnings}`);
+  }
+}
 const asyncStart = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'pwd' } });
 const asyncTaskId = asyncStart.structuredContent?.task?.taskId;
 if (!asyncTaskId) throw new Error(`bash did not return task_id: ${JSON.stringify(asyncStart.structuredContent)}`);
@@ -514,6 +526,14 @@ await expectToolError('view_image', { workspace_id: ws, path: 'demo.txt' }, /Uns
 const workspaceAnalysis = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: ws } });
 if (!workspaceAnalysis.structuredContent.languages?.includes('typescript') || !workspaceAnalysis.structuredContent.coverage) {
   throw new Error(`inspect_workspace omitted analysis: ${JSON.stringify(workspaceAnalysis.structuredContent)}`);
+}
+if (process.platform !== 'win32' && !workspaceAnalysis.structuredContent.warnings?.some?.((warning) => warning.includes('Skipped unreadable directory: unreadable-dir'))) {
+  throw new Error(`inspect_workspace did not warn and skip unreadable directory: ${JSON.stringify(workspaceAnalysis.structuredContent.warnings)}`);
+}
+if (process.platform !== 'win32') {
+  // The unreadable fixture has served its purpose; restore it before the rest
+  // of the broad smoke run so later git/search checks are not polluted by it.
+  await fs.chmod(unreadableTreeDir, 0o700);
 }
 const legacySearch = await client.request('tools/call', { name: 'search', arguments: { workspace_id: ws, query: 'authenticate', path: 'src' } });
 for (const key of ['matches', 'truncated', 'used']) {

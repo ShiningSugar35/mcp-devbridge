@@ -9,10 +9,15 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-CREATE_NO_WINDOW = 0x08000000
-DETACHED_PROCESS = 0x00000008
-CREATE_NEW_PROCESS_GROUP = 0x00000200
+import psutil
+
+from .platform_support import IS_WINDOWS, popen_platform_kwargs, run_platform_kwargs
+
+CREATE_NO_WINDOW = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if IS_WINDOWS else 0
+DETACHED_PROCESS = int(getattr(subprocess, "DETACHED_PROCESS", 0)) if IS_WINDOWS else 0
+CREATE_NEW_PROCESS_GROUP = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if IS_WINDOWS else 0
 
 
 @dataclass
@@ -80,11 +85,27 @@ class ShellInfo:
 
 
 def detect_shells() -> list[ShellInfo]:
-    """Detect every shell available on this machine, in preference order.
+    """Detect shells available on this machine, in preference order."""
+    if not IS_WINDOWS:
+        shells: list[ShellInfo] = []
+        seen: set[str] = set()
+        preferred = os.environ.get("SHELL", "").strip()
+        candidates = [preferred, shutil.which("bash") or "", shutil.which("zsh") or "", shutil.which("fish") or "", shutil.which("sh") or ""]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = shutil.which(candidate) or candidate
+            if not os.path.isfile(path):
+                continue
+            resolved = str(Path(path).resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            base = Path(resolved).name.lower()
+            kind = "bash" if base == "bash" else base
+            shells.append(ShellInfo(name=base, path=resolved, kind=kind))
+        return shells
 
-    WSL environments stay out of the default list (see ``default_shell``) but
-    are still reported in ``get_shell_info`` so the user can switch.
-    """
     shells: list[ShellInfo] = []
     for name, kind, hint in (
         ("pwsh", "pwsh", "pwsh"),
@@ -98,7 +119,7 @@ def detect_shells() -> list[ShellInfo]:
         elif kind == "bash":
             path = shutil.which("bash") or ""
             if path and Path(path).resolve() == _WINDOWS_BASH.resolve():
-                path = ""  # 就是 WSL 启动器本身，单独列在 wsl 项里
+                path = ""
         elif kind == "wsl":
             path = hint if hint and os.path.isfile(hint) else (shutil.which("wsl") or "")
         elif kind == "windows_powershell":
@@ -116,14 +137,15 @@ def detect_shells() -> list[ShellInfo]:
 
 
 def default_shell() -> ShellInfo:
-    """The shell a new / auto-configured session will use.
-
-    Preference order: PowerShell 7 (pwsh) → Windows PowerShell → cmd →
-    non-WSL bash (Git Bash). WSL Bash is never auto-chosen because its native
-    Linux toolchain cannot run the Windows project scripts; it remains
-    selectable explicitly (prefer_user_shell stays green).
-    """
+    """The shell a new / auto-configured session will use."""
     shells = detect_shells()
+    if not IS_WINDOWS:
+        if shells:
+            bash = next((item for item in shells if item.kind == "bash"), None)
+            return bash or shells[0]
+        fallback = "/bin/sh" if Path("/bin/sh").is_file() else "sh"
+        return ShellInfo(name="sh", path=fallback, kind="sh")
+
     order = {"pwsh": 0, "windows_powershell": 1, "cmd": 2, "bash": 3}
     best: ShellInfo | None = None
     for shell in shells:
@@ -162,7 +184,7 @@ def powershell_version(shell_path: str | None = None) -> str:
             [shell, "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"],
             capture_output=True,
             timeout=30,
-            creationflags=CREATE_NO_WINDOW,
+            **run_platform_kwargs(),
         )
         version = result.stdout.decode("utf-8", errors="replace").strip().splitlines()
         return version[0] if version else "unknown"
@@ -196,6 +218,19 @@ def build_powershell_command(command: str, shell: str | None = None) -> list[str
     ]
 
 
+def build_shell_command(command: str, shell: str | None = None) -> tuple[list[str], str]:
+    """Build an argv for the platform default shell and return (argv, display_shell)."""
+    if IS_WINDOWS:
+        shell_path = shell or find_powershell()
+        return build_powershell_command(command, shell_path), shell_path
+    info = default_shell() if not shell else ShellInfo(Path(shell).name, shell, Path(shell).name.lower())
+    shell_path = info.path or "/bin/bash"
+    kind = info.kind.lower()
+    if kind in {"bash", "zsh", "fish"}:
+        return [shell_path, "-lc", command], shell_path
+    return [shell_path, "-c", command], shell_path
+
+
 def _run_with_tree_kill(
     argv: list[str],
     *,
@@ -205,13 +240,14 @@ def _run_with_tree_kill(
 ) -> tuple[int, bytes, bytes, bool]:
     """Popen + communicate with timeout; kills the whole process tree on timeout."""
     try:
-        proc = subprocess.Popen(
+        proc: subprocess.Popen[Any] = subprocess.Popen(
             argv,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
-            creationflags=CREATE_NO_WINDOW,
+            text=False,
+            **popen_platform_kwargs(new_session=True),
         )
     except OSError:
         raise
@@ -239,8 +275,7 @@ def run_command(
 ) -> CommandResult:
     """Run a shell command in the given working directory."""
     start = time.monotonic()
-    shell_path = shell or find_powershell()
-    args = build_powershell_command(command, shell_path)
+    args, shell_path = build_shell_command(command, shell)
     environment = dict(os.environ)
     if env:
         environment.update(env)
@@ -294,19 +329,36 @@ def run_command(
 
 
 def kill_process_tree(pid: int) -> bool:
-    """Kill a process and its descendants on Windows via taskkill /T /F."""
+    """Terminate a process and descendants on Windows or POSIX."""
     if pid <= 0:
         return False
+    if IS_WINDOWS:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=30,
+                **run_platform_kwargs(),
+            )
+            return True
+        except Exception:
+            return False
     try:
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True,
-            timeout=30,
-            creationflags=CREATE_NO_WINDOW,
-        )
+        parent = psutil.Process(pid)
+    except psutil.Error:
         return True
-    except Exception:
-        return False
+    children = parent.children(recursive=True)
+    for proc in children:
+        with contextlib.suppress(psutil.Error):
+            proc.terminate()
+    with contextlib.suppress(psutil.Error):
+        parent.terminate()
+    _gone, alive = psutil.wait_procs([*children, parent], timeout=3)
+    for proc in alive:
+        with contextlib.suppress(psutil.Error):
+            proc.kill()
+    psutil.wait_procs(alive, timeout=3)
+    return True
 
 
 def run_program(
@@ -381,7 +433,7 @@ def detect_binaries() -> dict[str, str]:
                 [name, "--version"],
                 capture_output=True,
                 timeout=20,
-                creationflags=CREATE_NO_WINDOW,
+                **run_platform_kwargs(),
             )
             versions[name] = result.stdout.decode("utf-8", errors="replace").strip().splitlines()[0]
         except Exception:
@@ -394,6 +446,7 @@ __all__ = [
     "find_powershell",
     "powershell_version",
     "build_powershell_command",
+    "build_shell_command",
     "run_command",
     "run_program",
     "kill_process_tree",
