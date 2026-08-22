@@ -2,7 +2,7 @@
 
 ## Supported environments
 
-| Item | Current v0.8.4 support |
+| Item | Current v0.8.5 support |
 |---|---|
 | Windows | Windows 10/11 x64 desktop release; PowerShell 5.1+ is supported. |
 | Linux | x86_64 desktop build and user-level installer; release CI/build baseline is Ubuntu 22.04. |
@@ -40,7 +40,7 @@ The Gateway port is global Hub configuration (`AppConfig.gateway_port`). Each pr
 
 ## Long-running workflows
 
-ChatGPT/Codex/Gemini/browser hosts can run multi-hour work without keeping one MCP request open. v0.8.4 exposes durable `long_run_*` tools over ordinary `tools/call`, persists plan/checkpoint/review state under `.ai-bridge/long-runs/`, and keeps long shell work in background `bash` tasks with bounded polling. Native `io.modelcontextprotocol/tasks` is not required for baseline compatibility; it can be negotiated later when both host and server support the extension. See `LONG_RUNNING_TASKS.md`.
+ChatGPT/Codex/Gemini/browser hosts can run multi-hour work without keeping one MCP request open. v0.8.5 exposes durable `long_run_*` tools over ordinary `tools/call`, persists plan/checkpoint/review state under `.ai-bridge/long-runs/`, and keeps long shell work in background `bash` tasks with bounded polling. Native `io.modelcontextprotocol/tasks` is not required for baseline compatibility; it can be negotiated later when both host and server support the extension. See `LONG_RUNNING_TASKS.md`.
 
 ## Windows desktop and installer
 

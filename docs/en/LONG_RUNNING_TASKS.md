@@ -1,6 +1,8 @@
-# Long-running task orchestration (v0.8.4)
+# Long-running task orchestration (v0.8.5)
 
 ## Problem
+
+The durable orchestration layer was introduced in v0.8.4 and is retained unchanged in v0.8.5; v0.8.5 hardens the surrounding ChatGPT transport lifecycle.
 
 Browser-hosted MCP clients are a poor place to keep a single tool request open for minutes or hours. A long-lived request can outlive a client tab, a proxy timeout, a transport session, model context, or the DevBridge process itself. v0.8.4 therefore separates **execution lifetime** from **MCP request lifetime**.
 

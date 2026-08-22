@@ -1,8 +1,8 @@
 # Security
 
-## v0.8.4 security model
+## v0.8.5 security model
 
-MCP DevBridge intentionally grants a remote MCP client powerful local-development capabilities. v0.8.4 expands routing across multiple simultaneously-running roots, but that routing layer does not expand the filesystem boundary beyond roots the user explicitly started.
+MCP DevBridge intentionally grants a remote MCP client powerful local-development capabilities. v0.8.5 expands routing across multiple simultaneously-running roots, but that routing layer does not expand the filesystem boundary beyond roots the user explicitly started.
 
 ## Network boundary
 
@@ -59,7 +59,7 @@ The 600-second orchestration watchdog is advisory. It marks a stale snapshot and
 
 ## Durable long-run state security
 
-The v0.8.4 long-run layer persists orchestration metadata, not arbitrary shell output. `.ai-bridge/long-runs/<run_id>.json` is guarded by the same canonical workspace PathGuard, rejects context-directory symlink/junction escape, uses bounded schemas and atomic replacement, and caps each run state file at 512 KiB. In-process writes to the same run are serialized to prevent concurrent checkpoints from silently overwriting each other.
+The v0.8.5 long-run layer persists orchestration metadata, not arbitrary shell output. `.ai-bridge/long-runs/<run_id>.json` is guarded by the same canonical workspace PathGuard, rejects context-directory symlink/junction escape, uses bounded schemas and atomic replacement, and caps each run state file at 512 KiB. In-process writes to the same run are serialized to prevent concurrent checkpoints from silently overwriting each other.
 
 Plan text, notes, evidence, rework items and completion summaries pass the same secret-looking-value detector before persistence. Raw Bearer/OAuth/tunnel credentials must never be used as long-run evidence; store a redacted description, exit code, artifact digest or external record reference instead.
 
@@ -91,7 +91,7 @@ Gateway comparisons for compatible Bearer authentication use timing-safe equalit
 
 ## OAuth Hub model
 
-v0.8.4 OAuth authorizes the Hub. The browser consent page does not require selecting an “entry project”. After authorization, the concrete active root is selected from the actual tool call’s routing evidence and the Gateway swaps to that project’s upstream credential for the proxied request.
+v0.8.5 OAuth authorizes the Hub. The browser consent page does not require selecting an “entry project”. After authorization, the concrete active root is selected from the actual tool call’s routing evidence and the Gateway swaps to that project’s upstream credential for the proxied request.
 
 Legacy per-project Bearer behavior may remain for compatibility. It must not become a hidden routing fence for a normal Hub OAuth session.
 
@@ -115,7 +115,7 @@ Linux/SteamOS installs are user-level. `install.sh` canonicalizes custom target 
 
 Relative `XDG_CONFIG_HOME` / `XDG_DATA_HOME` values are treated as invalid rather than being used as attacker-controlled relative filesystem roots.
 
-Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.4 maintenance release.
+Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.5 maintenance release.
 
 
 ## Hub credential isolation

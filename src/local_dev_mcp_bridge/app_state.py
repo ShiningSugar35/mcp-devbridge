@@ -19,11 +19,14 @@ Rules enforced here:
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from .device_hub import DeviceRegistry
 from .engines import EngineState, SpawnError, port_listening
@@ -31,6 +34,13 @@ from .gateway import OAuthGateway
 from .tunnel_manager import ConnectionMethod, TunnelManager
 
 StateCallback = Callable[[EngineState, str | None], None]
+
+TRANSPORT_HEALTH_INITIAL_DELAY_SECONDS = 5.0
+TRANSPORT_HEALTH_INTERVAL_SECONDS = 15.0
+TRANSPORT_HEALTH_TIMEOUT_SECONDS = 5.0
+TRANSPORT_HEALTH_TTFB_LIMIT_SECONDS = 5.0
+TRANSPORT_HEALTH_FAILURE_THRESHOLD = 3
+TRANSPORT_RESTART_COOLDOWN_SECONDS = 60.0
 
 
 @dataclass
@@ -73,11 +83,18 @@ class ServiceCoordinator:
         self._device_registry = device_registry
         self._local_device_id = local_device_id
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._state = EngineState.IDLE
         self._message: str | None = None
         self._public_url: str = ""
         self._url_mutable = False
         self._listeners: list[StateCallback] = []
+        self._active_options: StartOptions | None = None
+        self._transport_stop = threading.Event()
+        self._transport_thread: threading.Thread | None = None
+        self._transport_failures = 0
+        self._last_transport_restart = 0.0
+        self._transport_probe = self._probe_health_url
 
     def listen(self, callback: StateCallback) -> None:
         self._listeners.append(callback)
@@ -166,6 +183,19 @@ class ServiceCoordinator:
             raise SpawnError(f"共享 Gateway 端口 {port} 已被占用，无法启动。请先停止占用该端口的程序。")
 
     def start(self, options: StartOptions) -> None:
+        with self._lifecycle_lock:
+            if self.running:
+                if self._same_transport_options(self._active_options, options):
+                    return
+                raise SpawnError("Hub 已使用不同连接配置启动；请先停止后再切换连接配置。")
+            self._active_options = options
+            self._start_once(options)
+            if self.state == EngineState.READY:
+                self._start_transport_monitor(options)
+            else:
+                self._active_options = None
+
+    def _start_once(self, options: StartOptions) -> None:
         if self.running:
             raise SpawnError("Hub 已在启动或运行中。")
         self._check_gateway_port(options.gateway_port)
@@ -198,33 +228,179 @@ class ServiceCoordinator:
             self._set_state(EngineState.ERROR, message)
 
     def stop(self, message: str = "正在停止共享 Hub…") -> None:
-        if self.state == EngineState.IDLE:
-            return
-        self._set_state(EngineState.STOPPING, message)
-        self.stop_callable()
+        with self._lifecycle_lock:
+            if self.state == EngineState.IDLE:
+                return
+            self._set_state(EngineState.STOPPING, message)
+            self.stop_callable()
 
     def stop_callable(self) -> None:
         """Stop shared transport only; project engines are owned elsewhere."""
         self._set_state(EngineState.STOPPING, "正在停止共享 Hub…")
+        self._stop_transport_monitor()
         if self.gateway is not None:
             self.gateway.stop()
             self.gateway = None
         if self.tunnel.is_running:
             self.tunnel.stop()
+        self._active_options = None
+        self._transport_failures = 0
         self._set_url("", False)
         self._set_state(EngineState.IDLE, None)
 
     def restart(self, options: StartOptions) -> None:
-        self.stop()
-        self.start(options)
+        with self._lifecycle_lock:
+            self.stop()
+            self.start(options)
 
     def _cleanup_after_failure(self) -> None:
+        self._stop_transport_monitor()
         if self.gateway is not None:
             self.gateway.stop()
             self.gateway = None
         if self.tunnel.is_running:
             self.tunnel.stop()
+        self._active_options = None
         self._set_url("", False)
+
+    @staticmethod
+    def _same_transport_options(left: StartOptions | None, right: StartOptions) -> bool:
+        if left is None:
+            return False
+        return (
+            left.connection == right.connection
+            and left.public_hostname.strip().rstrip("/") == right.public_hostname.strip().rstrip("/")
+            and left.gateway_port == right.gateway_port
+            and left.cloudflare_config == right.cloudflare_config
+        )
+
+    @staticmethod
+    def _health_url_from_public_mcp(public_url: str) -> str:
+        value = public_url.strip().rstrip("/")
+        if value.endswith("/mcp"):
+            value = value[:-4]
+        return f"{value}/health"
+
+    @staticmethod
+    def _probe_health_url(url: str, timeout_seconds: float) -> tuple[bool, float, int]:
+        started = time.monotonic()
+        status = 0
+        try:
+            req = urllib_request.Request(url, headers={"User-Agent": "MCPDevBridge-transport-health"})
+            with urllib_request.urlopen(req, timeout=timeout_seconds) as response:
+                status = int(getattr(response, "status", 0) or response.getcode() or 0)
+                response.read(1)
+            elapsed = time.monotonic() - started
+            return 200 <= status < 300, elapsed, status
+        except (OSError, TimeoutError, urllib_error.URLError):
+            return False, time.monotonic() - started, status
+
+    def _write_transport_health(self, **fields: object) -> None:
+        from . import constants as _c
+
+        entry = {**fields, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        try:
+            _c.LOG_DIR.mkdir(parents=True, exist_ok=True)
+            path = _c.LOG_DIR / f"transport-health-{time.strftime('%Y-%m-%d')}.jsonl"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            pass
+
+    def _transport_health_tick(self) -> None:
+        options = self._active_options
+        if options is None or options.connection == ConnectionMethod.LOCAL or self.state != EngineState.READY:
+            return
+        local_url = f"http://127.0.0.1:{options.gateway_port}/health"
+        local_ok, local_ttfb, local_status = self._transport_probe(
+            local_url, TRANSPORT_HEALTH_TIMEOUT_SECONDS
+        )
+        if not local_ok:
+            self._write_transport_health(
+                event="gateway_unhealthy",
+                local_status=local_status,
+                local_ttfb_ms=round(local_ttfb * 1000),
+            )
+            self._transport_failures = 0
+            return
+        public_health = self._health_url_from_public_mcp(self.public_url)
+        public_ok, public_ttfb, public_status = self._transport_probe(
+            public_health, TRANSPORT_HEALTH_TIMEOUT_SECONDS
+        )
+        degraded = (not public_ok) or public_ttfb > TRANSPORT_HEALTH_TTFB_LIMIT_SECONDS
+        self._transport_failures = self._transport_failures + 1 if degraded else 0
+        self._write_transport_health(
+            event="transport_probe",
+            local_status=local_status,
+            local_ttfb_ms=round(local_ttfb * 1000),
+            public_status=public_status,
+            public_ttfb_ms=round(public_ttfb * 1000),
+            degraded=degraded,
+            consecutive_failures=self._transport_failures,
+        )
+        if self._transport_failures < TRANSPORT_HEALTH_FAILURE_THRESHOLD:
+            return
+        now = time.monotonic()
+        if now - self._last_transport_restart < TRANSPORT_RESTART_COOLDOWN_SECONDS:
+            return
+        self._restart_public_tunnel()
+
+    def _restart_public_tunnel(self) -> None:
+        with self._lifecycle_lock:
+            options = self._active_options
+            if options is None or options.connection == ConnectionMethod.LOCAL or self.state != EngineState.READY:
+                return
+            self._last_transport_restart = time.monotonic()
+            self._write_transport_health(event="tunnel_restart", reason="consecutive_public_probe_failures")
+            try:
+                if self.tunnel.is_running:
+                    self.tunnel.stop()
+                self.tunnel.port = options.gateway_port
+                kwargs = {
+                    "kind": options.connection,
+                    "hostname": options.public_hostname,
+                    "cloudflare_config": options.cloudflare_config,
+                    "tunnel_" + "token": getattr(options, "tunnel_" + "token"),
+                }
+                self.tunnel.start(**kwargs)
+                if not self.tunnel.wait_ready():
+                    raise SpawnError("隧道自愈重建失败。")
+                self._set_url(self.tunnel.public_url, options.url_mutable)
+                self._transport_failures = 0
+                self._write_transport_health(event="tunnel_restart_ok")
+            except Exception as exc:
+                self._write_transport_health(event="tunnel_restart_failed", error=type(exc).__name__)
+                self._set_state(EngineState.ERROR, f"公网隧道自愈重建失败：{exc}")
+
+    def _transport_monitor_loop(self) -> None:
+        if self._transport_stop.wait(TRANSPORT_HEALTH_INITIAL_DELAY_SECONDS):
+            return
+        while not self._transport_stop.is_set():
+            with contextlib.suppress(Exception):
+                self._transport_health_tick()
+            if self._transport_stop.wait(TRANSPORT_HEALTH_INTERVAL_SECONDS):
+                return
+
+    def _start_transport_monitor(self, options: StartOptions) -> None:
+        if options.connection == ConnectionMethod.LOCAL:
+            return
+        self._stop_transport_monitor()
+        self._transport_stop = threading.Event()
+        self._transport_thread = threading.Thread(
+            target=self._transport_monitor_loop,
+            name="MCPDevBridge-transport-health",
+            daemon=True,
+        )
+        self._transport_thread.start()
+
+    def _stop_transport_monitor(self) -> None:
+        thread = self._transport_thread
+        if thread is None:
+            return
+        self._transport_stop.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self._transport_thread = None
 
     def _set_state(self, state: EngineState, message: str | None = None) -> None:
         with self._lock:

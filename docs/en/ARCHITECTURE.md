@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current v0.8.4 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
+This document describes the current v0.8.5 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
 
 ## Runtime model
 
@@ -87,7 +87,7 @@ Output is kept in a bounded rolling buffer. Cancellation terminates the process 
 
 ## Durable long-run orchestration
 
-v0.8.4 layers a durable plan/evaluator state machine above the process-scoped shell task manager. Multi-phase or roughly >2-minute work should call `long_run_start`, persist objective/steps/acceptance criteria, checkpoint evidence with `long_run_update`, attach background `bash` work to the run, then pass a `long_run_review` before `long_run_complete`.
+v0.8.5 layers a durable plan/evaluator state machine above the process-scoped shell task manager. Multi-phase or roughly >2-minute work should call `long_run_start`, persist objective/steps/acceptance criteria, checkpoint evidence with `long_run_update`, attach background `bash` work to the run, then pass a `long_run_review` before `long_run_complete`.
 
 The state file `.ai-bridge/long-runs/<run_id>.json` is schema-bounded, atomically replaced, path-guarded, serialized per run inside the process, and rejects secret-looking persisted text. `workRevision` changes whenever meaningful work changes; a PASS review is only valid for the revision it inspected. A later mutation makes that PASS stale. FAIL reviews require explicit failed criteria/rework and reopen affected steps.
 

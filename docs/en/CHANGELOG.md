@@ -2,6 +2,13 @@
 
 All dates are local development dates.
 
+## 0.8.5 (2026-08-22) — ChatGPT transport timeout hardening
+
+- Serialize shared Hub/Tunnel lifecycle startup and make same-config starts idempotent, eliminating the concurrent restore race that could spawn duplicate `cloudflared` connectors.
+- Give every proxied upstream response exactly one owner: buffered branches read and close once; streaming branches forward the leased transport stream once and close it on completion/cancellation, preventing `httpx.StreamConsumed` failures.
+- Add public transport health monitoring that compares local Gateway `/health` with public `/health`, records TTFB/consecutive failures, and performs cooldown-protected tunnel-only recovery when the local Gateway is healthy but the public path repeatedly degrades.
+- Add regressions for concurrent shared-Hub startup, stream close/cancellation ownership, and tunnel-only recovery; preserve the v0.8.4 durable long-run architecture and v0.9.x history.
+
 ## 0.8.4 (2026-08-22) — durable long-run orchestration
 
 - Add durable `long_run_start/status/list/update/review/complete/cancel` MCP tools for multi-phase or multi-hour work. Plans, acceptance criteria, evidence, checkpoints, review rounds and task recovery state are persisted under `.ai-bridge/long-runs/` instead of relying on a live browser request or model context.

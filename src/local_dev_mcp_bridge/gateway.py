@@ -31,7 +31,7 @@ import time
 from collections.abc import Callable
 from email.utils import formatdate
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
@@ -303,6 +303,26 @@ def _write_diag_entry(**fields: Any) -> None:
             f.write(line)
     except OSError:
         pass
+
+
+async def _read_and_close_upstream(response: httpx.Response) -> bytes:
+    try:
+        return await response.aread()
+    finally:
+        await response.aclose()
+
+
+async def _stream_and_close_upstream(response: httpx.Response):
+    try:
+        # Iterate the leased transport stream directly instead of Response.aiter_raw().
+        # The latter raises StreamConsumed when a cancellation/reconnect marks the
+        # response consumed before Starlette begins forwarding it.  This stream has
+        # exactly one owner and is always closed when the downstream disconnects.
+        stream = cast(httpx.AsyncByteStream, response.stream)
+        async for chunk in stream:
+            yield chunk
+    finally:
+        await response.aclose()
 
 
 def _row(label: str, value: str) -> str:
@@ -1021,26 +1041,26 @@ class OAuthGateway:
                 and affinity_tool in {"open_workspace", "open_current_workspace"}
                 and workspace_id
             ):
-                await upstream.aread()
-                handle = self._extract_structured_field(upstream.content, "workspace_id")
+                payload = await _read_and_close_upstream(upstream)
+                handle = self._extract_structured_field(payload, "workspace_id")
                 if handle:
                     with self._session_lock:
                         self._workspace_handle_roots[handle] = workspace_id
                 return Response(
-                    content=upstream.content, status_code=upstream.status_code, headers=filtered
+                    content=payload, status_code=upstream.status_code, headers=filtered
                 )
             if jsonrpc_method == "tools/call" and affinity_tool == "bash" and workspace_id:
-                await upstream.aread()
-                task_id = self._extract_task_id(upstream.content)
+                payload = await _read_and_close_upstream(upstream)
+                task_id = self._extract_task_id(payload)
                 if task_id:
                     with self._session_lock:
                         self._task_workspaces[task_id] = workspace_id
                 return Response(
-                    content=upstream.content, status_code=upstream.status_code, headers=filtered
+                    content=payload, status_code=upstream.status_code, headers=filtered
                 )
             if b'"tools/list"' in body:
-                await upstream.aread()
-                rewritten = _inject_tools(upstream.content)
+                payload = await _read_and_close_upstream(upstream)
+                rewritten = _inject_tools(payload)
                 tool_count, dupes = _analyze_tools(rewritten)
                 _write_diag_entry(
                     path=request.url.path,
@@ -1057,7 +1077,7 @@ class OAuthGateway:
                     content=rewritten, status_code=upstream.status_code, headers=filtered
                 )
             if b"initialize" in body:
-                await upstream.aread()
+                payload = await _read_and_close_upstream(upstream)
                 returned_session_id = upstream.headers.get("mcp-session-id", "").strip()
                 if returned_session_id and upstream_key:
                     # The first upstream session id is also the client-facing id.
@@ -1065,7 +1085,7 @@ class OAuthGateway:
                     self._remember_upstream_session(
                         returned_session_id, upstream_key, returned_session_id, body
                     )
-                rewritten = _rewrite_server_identity(upstream.content)
+                rewritten = _rewrite_server_identity(payload)
                 _write_diag_entry(
                     path=request.url.path,
                     method=request.method,
@@ -1077,7 +1097,7 @@ class OAuthGateway:
                     content=rewritten, status_code=upstream.status_code, headers=filtered
                 )
         return StreamingResponse(
-            upstream.aiter_raw(),
+            _stream_and_close_upstream(upstream),
             status_code=upstream.status_code,
             headers=filtered,
         )
