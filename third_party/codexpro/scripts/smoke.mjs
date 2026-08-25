@@ -13,6 +13,7 @@ class McpStdioClient {
     this.buffer = '';
     this.nextId = 1;
     this.pending = new Map();
+    this.notifications = [];
     this.child.stdout.on('data', (chunk) => this.onData(String(chunk)));
     this.child.stderr.on('data', (chunk) => process.stderr.write(chunk));
     this.child.on('exit', (code) => {
@@ -35,6 +36,8 @@ class McpStdioClient {
         this.pending.delete(msg.id);
         if (msg.error) reject(new Error(msg.error.message));
         else resolve(msg.result);
+      } else if (msg.method) {
+        this.notifications.push(msg);
       }
     }
   }
@@ -173,6 +176,7 @@ await fs.writeFile(path.join(tmp, 'package.json'), JSON.stringify({
   scripts: {
     'test': "node --test",
     'build:clients': "node -e \"console.log('clients ok')\"",
+    'test:polloutput': "node -e \"process.stdout.write('X'.repeat(12000)); setTimeout(() => {}, 8000)\"",
     'test:longrun': "node -e \"setTimeout(() => console.log('LONG_RUN_OK'), 8000)\""
   }
 }, null, 2), 'utf8');
@@ -608,6 +612,27 @@ const asyncWait = await client.request('tools/call', { name: 'wait_task', argume
 if (asyncWait.structuredContent?.task?.status !== 'completed') {
   throw new Error(`wait_task did not complete pwd task: ${JSON.stringify(asyncWait.structuredContent)}`);
 }
+const runningStart = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'npm run test:polloutput' } });
+const runningTaskId = runningStart.structuredContent?.task?.taskId;
+if (!runningTaskId) throw new Error('bash did not return a task id for running poll smoke');
+const runningWait = await client.request('tools/call', {
+  name: 'wait_task',
+  arguments: { workspace_id: ws, task_id: runningTaskId, wait_seconds: 1 },
+  _meta: { progressToken: 7 }
+});
+if (runningWait.structuredContent?.task?.status !== 'running') throw new Error('wait_task running smoke unexpectedly finished');
+if (runningWait.structuredContent?.task?.transportOutputTail !== true) throw new Error('running wait_task did not mark compact transport output');
+if (Buffer.byteLength(runningWait.structuredContent?.task?.stdout ?? '', 'utf8') > 2048) throw new Error('running wait_task returned too much stdout');
+if ((runningWait.structuredContent?.task?.transportStdoutOmittedBytes ?? 0) <= 0) {
+  throw new Error('running wait_task did not report omitted stdout bytes');
+}
+if (!client.notifications.some((item) => item.method === 'notifications/progress' && item.params?.progressToken === 7)) {
+  throw new Error('wait_task did not emit request-tied MCP progress');
+}
+if (runningWait.structuredContent?.user_reply_required !== false || runningWait.structuredContent?.autonomous_continuation_recommended !== true) {
+  throw new Error('running wait_task did not advertise autonomous same-turn continuation');
+}
+await client.request('tools/call', { name: 'cancel_task', arguments: { workspace_id: ws, task_id: runningTaskId } });
 const viewedImage = await client.request('tools/call', { name: 'view_image', arguments: { workspace_id: ws, path: 'pixel.png' } });
 const imagePart = viewedImage.content?.find?.((part) => part.type === 'image');
 if (!imagePart?.data || imagePart.mimeType !== 'image/png' || viewedImage.structuredContent.width !== 1 || viewedImage.structuredContent.height !== 1) {

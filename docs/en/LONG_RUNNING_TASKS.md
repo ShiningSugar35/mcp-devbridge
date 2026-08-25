@@ -1,10 +1,10 @@
-# Long-running task orchestration (v0.8.5)
+# Long-running task orchestration (v0.8.6)
 
 ## Problem
 
-The durable orchestration layer was introduced in v0.8.4 and is retained unchanged in v0.8.5; v0.8.5 hardens the surrounding ChatGPT transport lifecycle.
+The durable orchestration layer was introduced in v0.8.4. v0.8.5 hardened the shared Hub/Tunnel and Gateway stream lifecycle; v0.8.6 adds Goal-like same-turn autonomy hints, application-layer SSE liveness, capability-sensitive MCP progress, bounded event replay, and compact running-poll payloads.
 
-Browser-hosted MCP clients are a poor place to keep a single tool request open for minutes or hours. A long-lived request can outlive a client tab, a proxy timeout, a transport session, model context, or the DevBridge process itself. v0.8.4 therefore separates **execution lifetime** from **MCP request lifetime**.
+Browser-hosted MCP clients are a poor place to keep a completely silent tool request open for minutes or hours, but returning to the user every few minutes is also a poor Goal-mode experience. v0.8.6 therefore separates **execution lifetime** from **MCP request lifetime** while keeping the active assistant turn busy and observable for as long as the host permits. If the ChatGPT host itself ends the turn or times out message delivery, the durable run remains the recovery source of truth.
 
 A long run is not considered complete merely because an executor command exits. The required lifecycle is:
 
@@ -104,17 +104,19 @@ A FAIL review must contain actionable `required_rework` and identify at least on
 
 ### Final-return gate
 
-CodexPro server instructions now tell capable model clients to create a durable long run for multi-phase or roughly >2-minute work and **not to send a final completion claim until `long_run_complete` succeeds**.
+CodexPro server instructions tell capable model clients to create a durable long run for multi-phase or roughly >2-minute work and **not to send a final completion claim until `long_run_complete` succeeds**. v0.8.6 additionally tells the model to keep advancing in the same assistant turn while the goal remains actionable and no genuine user input, approval, or safety boundary is required; a running background task is not by itself a reason to ask the user to type “continue”.
 
-This is an execution-discipline guardrail, not a way for the server to force a model to continue generating forever. The durable state exists specifically so a later tool call, reconnect, or new model turn can recover the exact run status without relying on chat memory.
+This is an execution-discipline guardrail, not a way for the server to override ChatGPT host limits. `Connection interrupted` and `Message delivery timed out` can still originate above the MCP server in the browser↔OpenAI delivery path. The durable state exists so a reconnect or later turn can recover the exact run status without relying on chat memory, while SSE/progress liveness reduces avoidable idle-path disconnects during a still-live turn.
 
 ## Timeout strategy
 
 - `bash`: background task; no fixed execution-time limit. It ends only when the child exits, fails, or is cancelled.
-- `wait_task`: bounded polling request; maximum 30 seconds. Reaching the poll deadline never stops the background process.
-- `get_task`: immediate snapshot.
-- task responses expose an adaptive `poll_after_seconds` hint (5 / 15 / 30 seconds based on elapsed time).
-- long-run status exposes `next_poll_after_seconds=30` while attached work is active.
+- `wait_task`: bounded polling request. Without a request progress token one call is capped at 30 seconds. When the client supplies an MCP `progressToken` and the SDK exposes notification delivery, the request may wait up to 120 seconds and emits `notifications/progress` about every 8 seconds. Reaching either deadline never stops the background process.
+- running `wait_task` responses carry only an approximately 2 KiB UTF-8-safe stdout/stderr tail plus omitted-byte counters; terminal task snapshots retain the normal bounded output.
+- `get_task`: immediate full current snapshot when the model explicitly needs it.
+- task responses expose adaptive `poll_after_seconds` hints (5 / 15 / 60 / 120 seconds based on elapsed time).
+- long-run status exposes `next_poll_after_seconds=30` while attached work is active and separately recommends same-turn autonomous continuation when no step is blocked.
+- Gateway `text/event-stream` forwarding emits a comment-only keepalive after 12 seconds of idle time, but only at complete SSE event boundaries. CodexPro HTTP sessions use a bounded EventStore for SSE event IDs and `Last-Event-ID` replay while the session is alive.
 - `run_command` / `run_program`: remain short compatibility calls with a 20-second hard cap; builds, installs, crawls and other long work belong in `bash`.
 - local `execute-handoff`: default executor timeout is 2 hours (max 24 hours).
 - local `loop-handoff`: reviewer/test defaults are 1 hour and the default evaluator/rework budget is 5 iterations.

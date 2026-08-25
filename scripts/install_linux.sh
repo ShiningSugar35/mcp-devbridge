@@ -49,7 +49,8 @@ escape_desktop_exec() {
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   value="${value//\$/\\$}"
-  value="${value//\`/\\`}"
+  local backtick='`'
+  value="${value//$backtick/\\$backtick}"
   value="${value//%/%%}"
   printf '"%s"' "$value"
 }

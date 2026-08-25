@@ -19,6 +19,7 @@ host. No second tunnel, no second URL, tokens never written to logs.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import html
@@ -29,6 +30,7 @@ import shlex
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from email.utils import formatdate
 from pathlib import Path
 from typing import Any, cast
@@ -241,6 +243,7 @@ button{{font-size:15px;padding:8px 22px;border-radius:6px;cursor:pointer}}
 _HOP_HEADERS = frozenset(
     {"host", "connection", "content-length", "transfer-encoding", "authorization"}
 )
+_SSE_KEEPALIVE_SECONDS = 12.0
 
 # --------------------------------------------------------- diagnostic logging
 _DIAG_SENSITIVE_KEYS = frozenset(
@@ -323,6 +326,76 @@ async def _stream_and_close_upstream(response: httpx.Response):
             yield chunk
     finally:
         await response.aclose()
+
+
+def _sse_event_boundary_at_end(suffix: bytes) -> bool:
+    return suffix.endswith(
+        (b"\n\n", b"\r\r", b"\r\n\r\n", b"\r\n\n", b"\n\r\n")
+    )
+
+
+async def _stream_sse_with_keepalive_and_close_upstream(
+    response: httpx.Response,
+    *,
+    keepalive_seconds: float = _SSE_KEEPALIVE_SECONDS,
+):
+    """Forward one SSE stream while keeping an otherwise-idle HTTP leg alive.
+
+    SSE comment frames are ignored by clients and never alter JSON-RPC payloads.
+    Reading the upstream stays single-owner: a producer task is the only iterator
+    over ``response.stream`` and this generator is the only downstream consumer.
+    Cancellation closes the producer and leased response exactly once.
+    """
+
+    stream = cast(httpx.AsyncByteStream, response.stream)
+    queue: asyncio.Queue[tuple[str, bytes | BaseException | None]] = asyncio.Queue(maxsize=1)
+
+    async def _pump() -> None:
+        try:
+            async for chunk in stream:
+                await queue.put(("data", chunk))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            await queue.put(("error", exc))
+        else:
+            await queue.put(("done", None))
+
+    producer = asyncio.create_task(_pump(), name="mcp-devbridge-sse-forwarder")
+    interval = max(0.05, float(keepalive_seconds))
+    at_event_boundary = True
+    suffix = b""
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=interval)
+            except TimeoutError:
+                # A colon-prefixed SSE line is a protocol comment. It is useful
+                # purely as transport liveness and is invisible to JSON-RPC. Never
+                # insert it into the middle of an upstream event split across chunks.
+                if at_event_boundary:
+                    yield b": devbridge-keepalive\n\n"
+                continue
+            if kind == "done":
+                return
+            if kind == "error":
+                assert isinstance(payload, BaseException)
+                raise payload
+            assert isinstance(payload, bytes)
+            suffix = (suffix + payload)[-4:]
+            at_event_boundary = _sse_event_boundary_at_end(suffix)
+            yield payload
+    finally:
+        if not producer.done():
+            producer.cancel()
+        with suppress(asyncio.CancelledError):
+            await producer
+        await response.aclose()
+
+
+def _upstream_is_sse(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "")
+    return content_type.lower().split(";", 1)[0].strip() == "text/event-stream"
 
 
 def _row(label: str, value: str) -> str:
@@ -1096,8 +1169,13 @@ class OAuthGateway:
                 return Response(
                     content=rewritten, status_code=upstream.status_code, headers=filtered
                 )
+        stream_body = (
+            _stream_sse_with_keepalive_and_close_upstream(upstream)
+            if _upstream_is_sse(upstream)
+            else _stream_and_close_upstream(upstream)
+        )
         return StreamingResponse(
-            _stream_and_close_upstream(upstream),
+            stream_body,
             status_code=upstream.status_code,
             headers=filtered,
         )

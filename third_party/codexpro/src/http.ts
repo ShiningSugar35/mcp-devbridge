@@ -20,6 +20,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
+import { BoundedInMemoryEventStore } from "./eventStore.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -1683,6 +1684,7 @@ async function main(): Promise<void> {
       } else if (!sessionId && isInitializeRequest(req.body)) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
+          eventStore: new BoundedInMemoryEventStore(),
           onsessioninitialized: (newSessionId: string) => {
             pruneTransports();
             transports.set(newSessionId, {

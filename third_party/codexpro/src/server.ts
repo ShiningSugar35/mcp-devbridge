@@ -22,6 +22,10 @@ import { registerWindowsBridgeTools } from "./windowsBridge.js";
 import { LongRunStore, summarizeLongRun, type LongRunState, type LongRunTaskObservation } from "./longRunOps.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
+const WAIT_TASK_OUTPUT_TAIL_BYTES = 2_048;
+const WAIT_TASK_PROGRESS_HEARTBEAT_MS = 8_000;
+const WAIT_TASK_MAX_SECONDS_WITHOUT_PROGRESS = 30;
+const WAIT_TASK_MAX_SECONDS_WITH_PROGRESS = 120;
 const bashTasks = new BashTaskManager();
 
 function errorText(error: unknown): string {
@@ -57,11 +61,87 @@ function bashTaskPollAfterSeconds(result: BashTaskSnapshot): number {
   if (result.status === "completed" || result.status === "failed" || result.status === "cancelled") return 0;
   if (result.durationMs < 30_000) return 5;
   if (result.durationMs < 5 * 60_000) return 15;
-  return 30;
+  if (result.durationMs < 20 * 60_000) return 60;
+  return 120;
+}
+
+function bashTaskTerminal(result: BashTaskSnapshot): boolean {
+  return result.status === "completed" || result.status === "failed" || result.status === "cancelled";
+}
+
+function tailTextUtf8(value: string, maxBytes = WAIT_TASK_OUTPUT_TAIL_BYTES): string {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.length <= maxBytes) return value;
+  let start = encoded.length - maxBytes;
+  while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString("utf8");
+}
+
+function waitTaskTransportSnapshot(result: BashTaskSnapshot): Record<string, unknown> {
+  if (bashTaskTerminal(result)) return result as unknown as Record<string, unknown>;
+  const stdout = tailTextUtf8(result.stdout);
+  const stderr = tailTextUtf8(result.stderr);
+  return {
+    ...result,
+    stdout,
+    stderr,
+    transportOutputTail: true,
+    transportStdoutOmittedBytes: Math.max(0, Buffer.byteLength(result.stdout, "utf8") - Buffer.byteLength(stdout, "utf8")),
+    transportStderrOmittedBytes: Math.max(0, Buffer.byteLength(result.stderr, "utf8") - Buffer.byteLength(stderr, "utf8"))
+  };
+}
+
+async function sendWaitTaskProgress(extra: any, result: BashTaskSnapshot, waitStartedAt: number, waitMs: number): Promise<void> {
+  const progressToken = extra?._meta?.progressToken;
+  if (progressToken === undefined || typeof extra?.sendNotification !== "function") return;
+  const progress = Math.min(waitMs, Math.max(0, Date.now() - waitStartedAt));
+  try {
+    await extra.sendNotification({
+      method: "notifications/progress",
+      params: {
+        progressToken,
+        progress,
+        total: waitMs,
+        message: `Background task ${result.status}; ${Math.round(result.durationMs / 1000)}s elapsed locally.`
+      }
+    });
+  } catch {
+    // Progress is advisory transport liveness. A client that rejects or loses
+    // the notification must not cancel the durable/background task itself.
+  }
+}
+
+async function waitForTaskWithProgress(
+  workspace: Workspace,
+  taskId: string,
+  waitMs: number,
+  extra: any
+): Promise<BashTaskSnapshot> {
+  const canSendProgress =
+    extra?._meta?.progressToken !== undefined && typeof extra?.sendNotification === "function";
+  if (!canSendProgress) return bashTasks.wait(workspace, taskId, waitMs);
+
+  const waitStartedAt = Date.now();
+  const deadline = waitStartedAt + waitMs;
+  let task = bashTasks.get(workspace, taskId);
+  if (bashTaskTerminal(task)) return task;
+  await sendWaitTaskProgress(extra, task, waitStartedAt, waitMs);
+  while (!bashTaskTerminal(task) && Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    task = await bashTasks.wait(
+      workspace,
+      taskId,
+      Math.min(WAIT_TASK_PROGRESS_HEARTBEAT_MS, remainingMs)
+    );
+    if (!bashTaskTerminal(task) && Date.now() < deadline) {
+      await sendWaitTaskProgress(extra, task, waitStartedAt, waitMs);
+    }
+  }
+  return task;
 }
 
 function bashTaskTextResult(result: BashTaskSnapshot): string {
-  const terminal = result.status === "completed" || result.status === "failed" || result.status === "cancelled";
+  const terminal = bashTaskTerminal(result);
   const pollAfterSeconds = bashTaskPollAfterSeconds(result);
   return [
     `# Task ${result.taskId}`,
@@ -77,7 +157,9 @@ function bashTaskTextResult(result: BashTaskSnapshot): string {
       : "Orchestration watchdog: active.",
     "",
     ...(result.resumeHint ? [result.resumeHint, ""] : []),
-    terminal ? "Task finished." : `Poll again in about ${pollAfterSeconds}s with wait_task/get_task, or cancel_task to stop it. For multi-hour work, persist a long_run and avoid holding one MCP request open.`
+    terminal
+      ? "Task finished."
+      : `Continue automatically in this same assistant turn; the user does not need to reply. Poll again in about ${pollAfterSeconds}s with wait_task/get_task, or cancel_task to stop it. For multi-hour work, persist a long_run, but a bounded MCP wait is not a reason to return control to the user.`
   ].join("\n");
 }
 
@@ -264,7 +346,7 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
   }
 }
 
-type CodexToolHandler = (args: any) => Promise<any> | any;
+type CodexToolHandler = (args: any, extra?: any) => Promise<any> | any;
 
 const SUPERTOOL_NAME = "codexpro";
 const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
@@ -330,12 +412,12 @@ function registerToolCompat(
   server: McpServer,
   name: string,
   options: Record<string, unknown>,
-  handler: (args: any) => Promise<any> | any
+  handler: CodexToolHandler
 ): void {
-  const wrapped = async (args: any) => {
+  const wrapped = async (args: any, extra?: any) => {
     const started = Date.now();
     try {
-      const result = tagToolResult(await handler(args ?? {}), name, options);
+      const result = tagToolResult(await handler(args ?? {}, extra), name, options);
       logToolCall(name, result?.isError ? "error" : "ok", started);
       return result;
     } catch (error) {
@@ -556,7 +638,8 @@ function registerCodexTool(
   handler: CodexToolHandler
 ): void {
   if (!shouldRegisterTool(config, name)) return;
-  const validatedHandler: CodexToolHandler = (args) => handler(validateToolArgs(name, options, args));
+  const validatedHandler: CodexToolHandler = (args, extra) =>
+    handler(validateToolArgs(name, options, args), extra);
   registerToolCompat(server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
   rememberRegisteredTool(server, name);
   rememberRegisteredToolHandler(server, name, validatedHandler);
@@ -588,15 +671,16 @@ function serverInstructions(config: CodexProConfig): string {
     config.writeMode !== "off"
       ? "6. For multi-phase work or anything expected to take more than about two minutes, create a durable long_run_start plan before side effects. Attach background bash tasks with long_run_id/long_run_step_id, checkpoint evidence after each phase, run long_run_review, rework on FAIL, and do not give the user a final completion answer until long_run_complete succeeds."
       : "6. Durable long-run writes are unavailable because write mode is off; do not claim a quality-gated long-run workflow is active.",
-    "7. Long-run state lives under .ai-bridge/long-runs and survives client disconnects/reconnects. Keep individual MCP calls short; resume with long_run_status instead of blocking one request for minutes or hours.",
-    "8. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
+    "7. Long-run state lives under .ai-bridge/long-runs and survives client disconnects/reconnects. Keep each MCP wait bounded and recover with long_run_status after an actual reconnect; a bounded tool request is not a reason to end the assistant turn.",
+    "8. While a clear user goal remains actionable and no real user input, approval, or safety boundary is required, continue autonomously in the same assistant turn. Never ask the user to say continue merely because a background task is still running. During tool-heavy waiting, send a concise user-visible progress update about every 45-60 seconds or at meaningful phase changes when the host supports commentary, then keep working.",
+    "9. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
-      ? `9. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
+      ? `10. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
     config.requireBashSession && config.bashSessionId
-      ? `10. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
+      ? `11. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
       : config.bashSessionId
-        ? `10. Bash session label for this server is "${config.bashSessionId}".`
+        ? `11. Bash session label for this server is "${config.bashSessionId}".`
         : "",
     "",
     `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
@@ -1051,7 +1135,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         "openai/toolInvocation/invoked": "CodexPro supertool action complete"
       }
     },
-    async (args) => {
+    async (args, extra) => {
       const action = normalizeSupertoolAction(args.action);
       const names = registeredToolNames(server).filter((name) => name !== SUPERTOOL_NAME);
       if (action === "list_actions" || action === "help") {
@@ -1098,7 +1182,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           : {};
       let result: any;
       try {
-        result = await handler(childArgs);
+        result = await handler(childArgs, extra);
       } catch (error) {
         result = errorResult(error);
       }
@@ -2159,11 +2243,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     "wait_task",
     {
       title: "Wait Task",
-      description: "Wait briefly for a command task to finish, then return its current status. The task itself keeps running with no execution-time limit even when this wait call returns.",
+      description: "Wait briefly for a command task to finish, then return its current status. The task itself keeps running with no execution-time limit. During a clear autonomous user goal, a running result means the assistant should keep working in the same turn without asking the user to say continue; repeated poll payloads are compacted to reduce context pressure.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
         task_id: z.string().describe("Task id returned by bash."),
-        wait_seconds: z.number().int().min(1).max(30).optional().describe("How long this status call may wait. Default: 15 seconds; maximum: 30 seconds. This is only a polling wait and never limits task execution.")
+        wait_seconds: z.number().int().min(1).max(120).optional().describe("How long this status call may wait. Default: 30 seconds; maximum: 120 seconds when the client supplied an MCP progress token. Without progress-notification support, DevBridge safely caps one wait at 30 seconds. This is only polling and never limits task execution.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
@@ -2172,11 +2256,35 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         "openai/toolInvocation/invoked": "Task status ready"
       }
     },
-    async (args) => {
+    async (args, extra) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const waitMs = Math.max(1, Number(args.wait_seconds ?? 15)) * 1_000;
-      const task = await bashTasks.wait(workspace, String(args.task_id ?? ""), waitMs);
-      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, poll_after_seconds: bashTaskPollAfterSeconds(task), task });
+      const requestedWaitSeconds = Math.max(
+        1,
+        Math.min(WAIT_TASK_MAX_SECONDS_WITH_PROGRESS, Number(args.wait_seconds ?? 30))
+      );
+      const progressLivenessActive =
+        extra?._meta?.progressToken !== undefined && typeof extra?.sendNotification === "function";
+      const effectiveWaitSeconds = progressLivenessActive
+        ? requestedWaitSeconds
+        : Math.min(requestedWaitSeconds, WAIT_TASK_MAX_SECONDS_WITHOUT_PROGRESS);
+      const waitMs = effectiveWaitSeconds * 1_000;
+      const task = await waitForTaskWithProgress(
+        workspace,
+        String(args.task_id ?? ""),
+        waitMs,
+        extra
+      );
+      return textResult(bashTaskTextResult(task), {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        task_id: task.taskId,
+        poll_after_seconds: bashTaskPollAfterSeconds(task),
+        effective_wait_seconds: effectiveWaitSeconds,
+        progress_liveness_active: progressLivenessActive,
+        user_reply_required: false,
+        autonomous_continuation_recommended: !bashTaskTerminal(task),
+        task: waitTaskTransportSnapshot(task)
+      });
     }
   );
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -137,3 +139,23 @@ def test_linux_distribution_scripts_and_workflow_exist() -> None:
     assert "CURRENT_INSTALL" in live_upgrade
     assert "EXPECTED_PORT" in live_upgrade
     assert "--no-autostart" in live_upgrade
+
+
+@pytest.mark.skipif(os.name == "nt", reason="validated with Git Bash on Windows; CI uses POSIX bash")
+def test_linux_distribution_scripts_parse_with_bash() -> None:
+    root = Path(__file__).resolve().parents[1]
+    bash = shutil.which("bash")
+    assert bash is not None
+    for name in (
+        "prepare_runtime_linux.sh",
+        "install_linux.sh",
+        "live_upgrade.sh",
+        "build_linux.sh",
+    ):
+        result = subprocess.run(
+            [bash, "-n", str(root / "scripts" / name)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, f"{name}: {result.stderr or result.stdout}"

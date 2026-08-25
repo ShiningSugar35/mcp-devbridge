@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current v0.8.5 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
+This document describes the current v0.8.6 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
 
 ## Runtime model
 
@@ -87,13 +87,13 @@ Output is kept in a bounded rolling buffer. Cancellation terminates the process 
 
 ## Durable long-run orchestration
 
-v0.8.5 layers a durable plan/evaluator state machine above the process-scoped shell task manager. Multi-phase or roughly >2-minute work should call `long_run_start`, persist objective/steps/acceptance criteria, checkpoint evidence with `long_run_update`, attach background `bash` work to the run, then pass a `long_run_review` before `long_run_complete`.
+v0.8.6 layers a durable plan/evaluator state machine above the process-scoped shell task manager. Multi-phase or roughly >2-minute work should call `long_run_start`, persist objective/steps/acceptance criteria, checkpoint evidence with `long_run_update`, attach background `bash` work to the run, then pass a `long_run_review` before `long_run_complete`.
 
 The state file `.ai-bridge/long-runs/<run_id>.json` is schema-bounded, atomically replaced, path-guarded, serialized per run inside the process, and rejects secret-looking persisted text. `workRevision` changes whenever meaningful work changes; a PASS review is only valid for the revision it inspected. A later mutation makes that PASS stale. FAIL reviews require explicit failed criteria/rework and reopen affected steps.
 
 Attached tasks gate review/completion. Running/cancelling work blocks PASS. After a CodexPro process restart an old task id may be unknown because command processes are intentionally not resumed; completion then fails closed until an explicit terminal resolution with evidence is persisted. This avoids interpreting lost process state as success.
 
-MCP polling remains short: `wait_task` is bounded to 30 seconds and task snapshots expose adaptive poll hints while execution remains unbounded. The baseline protocol surface uses ordinary tools for host compatibility. Native `io.modelcontextprotocol/tasks` is a future capability-negotiated mapping, not a requirement for clients that do not advertise that extension. See `LONG_RUNNING_TASKS.md`.
+MCP polling remains bounded but capability-sensitive: without progress-notification support one `wait_task` is capped at 30 seconds; with a request `progressToken` it may wait up to 120 seconds and emits standard progress about every 8 seconds. Running poll payloads carry only small output tails, while adaptive hints stretch from 5 to 120 seconds as task age grows. The Gateway also emits 12-second comment keepalives on otherwise-idle SSE streams only at complete event boundaries, and each live CodexPro HTTP session has a bounded EventStore for SSE event IDs / `Last-Event-ID` replay. The baseline protocol surface still uses ordinary tools for host compatibility; native `io.modelcontextprotocol/tasks` remains a future capability-negotiated mapping. See `LONG_RUNNING_TASKS.md` and `GOAL_LONG_RUNNING_TASKS.md`.
 
 ## Multi-device routing
 

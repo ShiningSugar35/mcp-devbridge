@@ -2,22 +2,27 @@
 
 > 让 ChatGPT、Gemini 等支持 MCP 的客户端安全连接本机开发目录，并在多个运行根之间按路径自动路由。
 
-MCP DevBridge 是一款 PySide6 桌面桥接工具。Windows 10/11 是主要发行平台；v0.8.5 同时提供 Linux / SteamOS Desktop Mode 的构建、用户目录安装和升级链。
+MCP DevBridge 是一款 PySide6 桌面桥接工具。Windows 10/11 是主要发行平台；v0.8.6 同时提供 Linux / SteamOS Desktop Mode 的构建、用户目录安装和升级链。
 
 它**不提供模型推理，也不调用 OpenAI / Gemini 模型 API**。客户端是否允许写入、是否需要额外确认，以及相关额度/套餐限制，仍由对应平台决定。
 
-## v0.8.5 的核心变化
+## v0.8.6 的核心变化
 
 ### ChatGPT 网页端 transport 超时加固
 
-- 共享 Hub/Tunnel 启动改为 single-flight；相同连接配置的并发启动幂等合并，避免多项目恢复时重复拉起 `cloudflared`。
-- Gateway 上游响应改为单一所有权：buffered 分支只读并关闭一次，streaming 分支独占一个上游流，并在正常结束或下游断开时主动关闭。
-- 公网模式周期性对比本机 `/health` 与公网 `/health` 的可达性和 TTFB；本机 Gateway 健康而公网连续降级时，按冷却策略只重建 Tunnel，并写入 transport 健康诊断日志。
+- 延续 v0.8.5 的共享 Hub/Tunnel single-flight、Gateway stream 单一所有权和公网 `/health`/TTFB 受控自愈，避免重复 `cloudflared`、`StreamConsumed` 与明显的 Tunnel 卡死。
+- v0.8.6 对 `text/event-stream` 增加 **12 秒空闲 SSE keepalive**；只在完整 event 边界插入注释帧，不会把一个被网络 chunk 拆开的 JSON-RPC/SSE event 从中间切断，非 SSE 响应完全不改写。
+- CodexPro Streamable HTTP session 增加**有界 EventStore**（默认 256 events / 4 MiB / 30 min TTL）：为 SSE event 分配 event id，客户端支持时可用 `Last-Event-ID` 重放断线期间仍在缓冲区内的消息；超大单事件只形成 replay gap，不会让正常响应失败或让内存无界增长。
+- `wait_task` 按能力分层：没有 MCP progress token 时单次最多 30 秒；支持标准 progress notification 时可请求最多 120 秒，并约每 8 秒发 `notifications/progress`，把长 wait 从“沉默 socket”变成持续有真实协议活动的 wait。
+- running 轮询只回传约 2 KiB 的 stdout/stderr 尾部和 omitted-byte 计数，减少长回合里反复把同一大日志塞进上下文；终态仍保留完整的有界结果。服务器同时明确指示：目标仍可执行且无需用户输入时，assistant 应继续**同一回合自动推进**，不能只因为后台任务尚未完成就要求用户回复“继续”。
+- 这些优化能显著降低 `Connection interrupted` 与空闲链路类故障并提高重连恢复能力，但 **MCP 端不能控制 ChatGPT 浏览器↔OpenAI 的宿主级 hard turn/message-delivery timeout**。因此 `Message delivery timed out` 仍被视为平台边界，而 durable `long_run_*` / background task 保证这种边界发生时本地工作和证据不丢失。
+
+
 
 
 ### 数小时长任务：持久化 plan → 执行 → 审查 → 返工 → PASS → return
 
-v0.8.5 延续 v0.8.4 引入的**耐久长任务编排**。对于多阶段或预计超过约 2 分钟的任务，不再依赖某一次 MCP `tools/call` 长时间保持连接，也不再只依赖模型当前聊天上下文记住“做到哪一步”。
+v0.8.6 延续 v0.8.4 引入的**耐久长任务编排**。对于多阶段或预计超过约 2 分钟的任务，不再依赖某一次 MCP `tools/call` 长时间保持连接，也不再只依赖模型当前聊天上下文记住“做到哪一步”。
 
 CodexPro 新增：
 
@@ -26,9 +31,9 @@ CodexPro 新增：
 - `long_run_review`：按当前 work revision 做 PASS/FAIL 审查；FAIL 必须给出可执行返工项并重新打开失败步骤。
 - `long_run_complete`：只有所有步骤完成、最新 PASS 审查覆盖当前 revision、且没有仍在运行/未知未解释的后台任务时才允许完成。
 - `long_run_status` / `long_run_list`：网页刷新、Connector 重连、上下文压缩或 CodexPro 进程重启后，可以依靠 durable `run_id` 恢复，不需要猜测之前聊天里做到哪里。
-- `bash` 新增 `long_run_id` / `long_run_step_id` 绑定；后台任务本身仍**没有固定执行时长上限**，而 `wait_task` 只做最多 30 秒的短轮询，不会因为轮询返回而终止任务。
+- `bash` 继续支持 `long_run_id` / `long_run_step_id` 绑定；后台任务本身仍**没有固定执行时长上限**。`wait_task` 无 progress token 时最多 30 秒；客户端提供标准 progress token 时可请求最多 120 秒并持续发 progress notification，running 状态只带 2 KiB 日志尾部以控制上下文压力。
 
-模型侧指令也同步收紧：长任务应先建 durable plan，分阶段 checkpoint，审查失败则返工；**在 `long_run_complete` 成功前不得向用户返回“已全部完成”**。完整设计、故障恢复和与 MCP Tasks / mcp-agent / LangGraph 的取舍见 `docs/en/LONG_RUNNING_TASKS.md`。
+模型侧指令也同步收紧：长任务应先建 durable plan，分阶段 checkpoint，审查失败则返工；**在 `long_run_complete` 成功前不得向用户返回“已全部完成”**。只要目标仍可执行且不需要真正的用户输入/授权，就应在同一 ChatGPT assistant turn 内自动继续，并用简短 commentary 告知阶段进展，而不是要求用户反复发送“继续”。完整设计、故障恢复及宿主 hard-timeout 边界见 `docs/en/LONG_RUNNING_TASKS.md` 与 `docs/en/GOAL_LONG_RUNNING_TASKS.md`。
 
 ### 所有运行根同时 active
 
@@ -103,10 +108,10 @@ CodexPro 提供文件、Git、Shell、异步任务、代码分析等开发工具
 从 GitHub Release 下载：
 
 ```text
-MCPDevBridge-Setup-0.8.5.exe
+MCPDevBridge-Setup-0.8.6.exe
 ```
 
-安装器为 per-user 安装，不要求管理员权限。v0.8.5 显式保留安装目录选择页，用户可以安装到默认目录，也可以选择其它目录。
+安装器为 per-user 安装，不要求管理员权限。v0.8.6 显式保留安装目录选择页，用户可以安装到默认目录，也可以选择其它目录。
 
 正式包自带固定版本的 Node.js、uv/uvx 和 cloudflared 私有运行时，不要求把这些工具安装到系统 PATH。可选 Windows-MCP 仍由内置 uvx 按锁定版本首次获取。
 
@@ -124,13 +129,13 @@ MCPDevBridge-Setup-0.8.5.exe
 GitHub Release 提供：
 
 ```text
-MCPDevBridge-Linux-x86_64-0.8.5.tar.gz
+MCPDevBridge-Linux-x86_64-0.8.6.tar.gz
 ```
 
 解压后执行：
 
 ```bash
-tar -xzf MCPDevBridge-Linux-x86_64-0.8.5.tar.gz
+tar -xzf MCPDevBridge-Linux-x86_64-0.8.6.tar.gz
 cd MCPDevBridge
 ./install.sh
 ```
@@ -215,13 +220,13 @@ npm run smoke
 完整 Windows 发布构建：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.5
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.6
 ```
 
 产物：
 
 ```text
-release/MCPDevBridge-Setup-0.8.5.exe
+release/MCPDevBridge-Setup-0.8.6.exe
 ```
 
 ### Linux build host
@@ -230,13 +235,13 @@ release/MCPDevBridge-Setup-0.8.5.exe
 uv venv --python 3.12
 uv pip install -p .venv -e '.[dev,package]'
 cd third_party/codexpro && npm ci && npm run build && cd ../..
-bash scripts/build_linux.sh 0.8.5
+bash scripts/build_linux.sh 0.8.6
 ```
 
 产物：
 
 ```text
-release/MCPDevBridge-Linux-x86_64-0.8.5.tar.gz
+release/MCPDevBridge-Linux-x86_64-0.8.6.tar.gz
 ```
 
 CI 的 Linux 构建基线为 Ubuntu 22.04，以避免在过新的 glibc 环境构建后失去对较旧发行环境的兼容性。
@@ -245,13 +250,13 @@ CI 的 Linux 构建基线为 Ubuntu 22.04，以避免在过新的 glibc 环境�
 
 桌面启动后检查 GitHub Release，之后按固定周期检查更新。Windows 使用内置 `live_upgrade.ps1` 做 detached 升级接力；Linux 使用随包提供的 `live_upgrade.sh`。升级接力文件只保存非敏感恢复元数据，真正凭据在新进程启动后从 SecretsStore 重新读取。
 
-当前维护版本：**0.8.5**。`v0.9.x` 远端 tag/历史仍保留，但不属于本维护线，也不会被 v0.8.5 发布覆盖或 force-push。
+当前维护版本：**0.8.6**。`v0.9.x` 远端 tag/历史仍保留，但不属于本维护线，也不会被 v0.8.6 发布覆盖或 force-push。
 
 ## 文档
 
 - `AGENTS.md`：开发/Agent 快速约束。
 - `项目架构.md`：当前架构与数据流。
-- `开发计划.md`：v0.8.5 维护目标和发布门。
+- `开发计划.md`：v0.8.6 维护目标和发布门。
 - `进度验收.md`：当前发布的真实测试/构建/Release 证据。
 - `docs/en/ARCHITECTURE.md`：English architecture.
 - `docs/en/COMPATIBILITY.md`：Windows / Linux / SteamOS compatibility.

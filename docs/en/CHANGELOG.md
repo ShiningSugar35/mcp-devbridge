@@ -2,6 +2,17 @@
 
 All dates are local development dates.
 
+## 0.8.6 (2026-08-25) — Goal-like ChatGPT long-turn resilience
+
+- Add protocol-safe Gateway SSE idle keepalives every 12 seconds for `text/event-stream`. Keepalives are inserted only at complete SSE event boundaries, so a network chunk split can never be spliced into one JSON-RPC/SSE event.
+- Add a bounded per-Streamable-HTTP-session MCP EventStore (256 events / 4 MiB / 30-minute TTL) so live sessions receive SSE event IDs and can replay retained events with `Last-Event-ID`. Oversize events remain deliverable and are represented as replay gaps rather than causing response failure or unbounded memory growth.
+- Make `wait_task` liveness capability-sensitive: clients without a request progress token remain capped at 30 seconds; clients that supply standard MCP progress support may wait up to 120 seconds while receiving `notifications/progress` roughly every 8 seconds.
+- Compact running `wait_task` stdout/stderr to 2 KiB UTF-8-safe tails with omitted-byte counters while retaining normal bounded terminal results; extend adaptive polling guidance to 5/15/60/120 seconds.
+- Tell model clients to keep advancing in the same assistant turn while a clear goal remains actionable and no genuine user input/approval is required. Durable long-run summaries expose the same autonomy hint and distinguish blocked steps from ordinary waiting.
+- Keep the host boundary explicit: these changes reduce idle-path `Connection interrupted` failures and improve reconnect recovery, but the MCP server cannot override a ChatGPT browser↔OpenAI hard turn/message-delivery timeout. Durable `long_run_*` state remains recoverable when `Message delivery timed out` ends a turn anyway.
+- Add regressions for SSE idle keepalive, partial-event chunk splitting, downstream cancellation, EventStore replay/eviction/oversize gaps, request-tied progress, running-poll context pressure, and Linux shell parser validity.
+- Fix a pre-existing `scripts/install_linux.sh` backtick-escaping syntax error discovered by the stronger release gate; all Linux distribution scripts now parse under Bash before release.
+
 ## 0.8.5 (2026-08-22) — ChatGPT transport timeout hardening
 
 - Serialize shared Hub/Tunnel lifecycle startup and make same-config starts idempotent, eliminating the concurrent restore race that could spawn duplicate `cloudflared` connectors.

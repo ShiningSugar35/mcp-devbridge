@@ -604,6 +604,7 @@ export class LongRunStore {
 export function summarizeLongRun(state: LongRunState, taskObservations: LongRunTaskObservation[] = []): Record<string, unknown> {
   const done = state.steps.filter((step) => step.status === "done").length;
   const latestReview = state.reviews.at(-1);
+  const hasBlockedStep = state.steps.some((step) => step.status === "blocked");
   return {
     run_id: state.runId,
     title: state.title,
@@ -635,6 +636,11 @@ export function summarizeLongRun(state: LongRunState, taskObservations: LongRunT
     updated_at: state.updatedAt,
     completion: state.completion ?? null,
     next_poll_after_seconds: taskObservations.some((task) => task.status === "running" || task.status === "cancelling") ? 30 : 0,
-    poll_guidance: "Use short get_task/wait_task polls only for currently attached background work. The long-run JSON is durable, so reconnect and call long_run_status instead of keeping one MCP request open for hours."
+    autonomous_continuation: {
+      recommended: state.status === "working" && !hasBlockedStep,
+      user_reply_required: hasBlockedStep ? null : false,
+      progress_update_after_seconds: 60
+    },
+    poll_guidance: "Keep each wait_task/get_task request bounded, but continue autonomously in the same assistant turn while the user goal is still actionable. The user does not need to say continue merely because attached background work is running. After a real reconnect, recover with long_run_status from the durable JSON."
   };
 }
