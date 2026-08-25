@@ -87,7 +87,7 @@ async def test_streaming_upstream_closes_on_downstream_cancel() -> None:
 
 @pytest.mark.asyncio
 async def test_sse_keepalive_emits_during_idle_and_preserves_payload() -> None:
-    stream = DelayedStream(0.04, [b'data: {"jsonrpc":"2.0"}\n\n'])
+    stream = DelayedStream(0.12, [b'data: {"jsonrpc":"2.0"}\n\n'])
     response = httpx.Response(
         200,
         headers={"content-type": "text/event-stream; charset=utf-8"},
@@ -97,7 +97,7 @@ async def test_sse_keepalive_emits_during_idle_and_preserves_payload() -> None:
     chunks = [
         chunk
         async for chunk in _stream_sse_with_keepalive_and_close_upstream(
-            response, keepalive_seconds=0.01
+            response, keepalive_seconds=0.05
         )
     ]
 
@@ -110,7 +110,7 @@ async def test_sse_keepalive_emits_during_idle_and_preserves_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_sse_keepalive_never_splits_partial_upstream_event() -> None:
-    stream = DelayedStream(0.03, [b"data: part", b"ial\n\n"])
+    stream = DelayedStream(0.12, [b"data: part", b"ial\n\n"])
     response = httpx.Response(
         200,
         headers={"content-type": "text/event-stream"},
@@ -120,7 +120,7 @@ async def test_sse_keepalive_never_splits_partial_upstream_event() -> None:
     chunks = [
         chunk
         async for chunk in _stream_sse_with_keepalive_and_close_upstream(
-            response, keepalive_seconds=0.01
+            response, keepalive_seconds=0.05
         )
     ]
     partial_index = chunks.index(b"data: part")
@@ -133,7 +133,7 @@ async def test_sse_keepalive_closes_on_downstream_cancel() -> None:
     stream = DelayedStream(0.2, [b"data: late\n\n"])
     response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
     iterator = _stream_sse_with_keepalive_and_close_upstream(
-        response, keepalive_seconds=0.01
+        response, keepalive_seconds=0.05
     )
 
     assert await anext(iterator) == b": devbridge-keepalive\n\n"
