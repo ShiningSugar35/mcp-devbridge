@@ -56,7 +56,9 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 const staleSnapshot = watchdogTasks.get(workspace, watchdogStarted.taskId);
 assert.equal(staleSnapshot.orchestrationStale, true);
 assert.equal(staleSnapshot.orchestrationStaleAfterMs, 50);
-assert.match(staleSnapshot.resumeHint ?? "", /idle|resume/i);
+assert.match(staleSnapshot.resumeHint ?? "", /no execution timeout/i);
+assert.match(staleSnapshot.resumeHint ?? "", /current assistant turn/i);
+assert.equal(staleSnapshot.status, "running", "stale orchestration metadata must never terminate the task");
 const resumedSnapshot = watchdogTasks.get(workspace, watchdogStarted.taskId);
 assert.equal(
   resumedSnapshot.orchestrationStale,

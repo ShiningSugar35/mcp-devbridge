@@ -18,6 +18,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
+import local_dev_mcp_bridge.gateway as gateway_module
 from local_dev_mcp_bridge.config_store import save_projects
 from local_dev_mcp_bridge.constants import OAUTH_SCOPE
 from local_dev_mcp_bridge.gateway import OAuthGateway
@@ -1298,29 +1299,29 @@ def test_v082_workspace_handle_affinity_survives_followup_without_path(
     assert routed_to[-1] == 18788
 
 
-def test_v081_gateway_virtualizes_per_workspace_upstream_sessions(
+def test_gateway_stateless_upstream_never_forwards_session_headers(
     mw_env: _MultiWorkspaceEnv,
 ) -> None:
-    """A client-facing session must map to a different MCP session on each CodexPro engine."""
+    """External session ids may drive Gateway affinity but never reach CodexPro."""
     token, _, _cid = mw_env.register_and_authorize()
-    session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-    events: list[tuple[int, str, str, dict]] = []
+    external_session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    events: list[tuple[int, str, str, str, dict]] = []
 
-    class _StrictRouter(httpx.AsyncBaseTransport):
+    class _StatelessRouter(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             port = request.url.port or 18787
-            expected = session_a if port == 18787 else session_b
-            raw = request.content.decode("utf-8") if request.content else "{}"
-            payload = json.loads(raw)
+            payload = json.loads(request.content.decode("utf-8") if request.content else "{}")
             method = str(payload.get("method", ""))
             sid = request.headers.get("mcp-session-id", "")
-            events.append((port, method, sid, payload))
+            affinity = request.headers.get("x-mcp-devbridge-client-affinity", "")
+            events.append((port, method, sid, affinity, payload))
+            assert sid == ""
+            assert len(affinity) == 64
+            assert affinity != external_session
             if method == "initialize":
-                assert not sid
                 return httpx.Response(
                     200,
-                    headers={"mcp-session-id": expected},
+                    headers={"mcp-session-id": "private-upstream-session-must-not-leak"},
                     json={
                         "jsonrpc": "2.0",
                         "id": payload.get("id"),
@@ -1332,18 +1333,7 @@ def test_v081_gateway_virtualizes_per_workspace_upstream_sessions(
                     },
                 )
             if method == "notifications/initialized":
-                if sid != expected:
-                    return httpx.Response(404, json={"error": "Session not found"})
                 return httpx.Response(202)
-            if sid != expected:
-                return httpx.Response(
-                    404,
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": payload.get("id"),
-                        "error": {"code": -32001, "message": "Session not found"},
-                    },
-                )
             return httpx.Response(
                 200,
                 json={
@@ -1353,34 +1343,33 @@ def test_v081_gateway_virtualizes_per_workspace_upstream_sessions(
                 },
             )
 
-    mw_env.gateway._http = httpx.AsyncClient(transport=_StrictRouter())
-    initialize = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "strict-session-test", "version": "1"},
-        },
-    }
-    r = mw_env.client.post(
+    mw_env.gateway._http = httpx.AsyncClient(transport=_StatelessRouter())
+    headers = {"Authorization": f"Bearer {token}"}
+    initialized = mw_env.client.post(
         "/mcp",
-        json=initialize,
-        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "stateless-test", "version": "1"},
+            },
+        },
+        headers=headers,
     )
-    assert r.status_code == 200, r.text
-    client_session = r.headers.get("mcp-session-id", "")
-    assert client_session == session_a
+    assert initialized.status_code == 200, initialized.text
+    assert "mcp-session-id" not in initialized.headers
 
-    r = mw_env.client.post(
+    ready = mw_env.client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-        headers={"Authorization": f"Bearer {token}", "mcp-session-id": client_session},
+        headers={**headers, "mcp-session-id": external_session},
     )
-    assert r.status_code == 202, r.text
+    assert ready.status_code == 202, ready.text
 
-    r = mw_env.client.post(
+    routed = mw_env.client.post(
         "/mcp",
         json={
             "jsonrpc": "2.0",
@@ -1394,15 +1383,70 @@ def test_v081_gateway_virtualizes_per_workspace_upstream_sessions(
                 },
             },
         },
-        headers={"Authorization": f"Bearer {token}", "mcp-session-id": client_session},
+        headers={**headers, "mcp-session-id": external_session},
     )
-    assert r.status_code == 200, r.text
+    assert routed.status_code == 200, routed.text
     b_tool_calls = [event for event in events if event[0] == 18788 and event[1] == "tools/call"]
     assert len(b_tool_calls) == 1
-    _port, _method, forwarded_sid, forwarded_payload = b_tool_calls[0]
-    assert forwarded_sid == session_b
+    _port, _method, forwarded_sid, forwarded_affinity, forwarded_payload = b_tool_calls[0]
+    assert forwarded_sid == ""
+    assert len(forwarded_affinity) == 64
+    assert forwarded_affinity != external_session
     assert "devbridge_workspace_id" not in forwarded_payload["params"]["arguments"]
-    assert (18788, "initialize", "") in [(p, m, s) for p, m, s, _ in events]
-    assert (18788, "notifications/initialized", session_b) in [
-        (p, m, s) for p, m, s, _ in events
-    ]
+
+
+def test_gateway_stateless_upstream_never_replays_session_not_found_404(
+    mw_env: _MultiWorkspaceEnv,
+) -> None:
+    """A business/tool request is never replayed merely because upstream returned a session-like 404."""
+    token, _, _cid = mw_env.register_and_authorize()
+    events: list[tuple[str, str]] = []
+
+    class _NotFoundRouter(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content.decode("utf-8") if request.content else "{}")
+            method = str(payload.get("method", ""))
+            sid = request.headers.get("mcp-session-id", "")
+            events.append((method, sid))
+            assert sid == ""
+            return httpx.Response(
+                404,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload.get("id"),
+                    "error": {"code": -32001, "message": "Session not found"},
+                },
+            )
+
+    mw_env.gateway._http = httpx.AsyncClient(transport=_NotFoundRouter())
+    response = mw_env.client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "read",
+                "arguments": {
+                    "path": "README.md",
+                    "devbridge_workspace_id": WORKSPACE_A_ID,
+                },
+            },
+        },
+        headers={
+            "Authorization": f"Bearer {token}",
+            "mcp-session-id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+    )
+    assert response.status_code == 404, response.text
+    assert events == [("tools/call", "")]
+
+
+def test_gateway_affinity_cache_is_bounded_and_refreshes_recent_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gateway_module, "_MAX_AFFINITY_ENTRIES", 2)
+    mapping: dict[str, str] = {}
+    gateway_module._remember_bounded_affinity(mapping, "a", "A")
+    gateway_module._remember_bounded_affinity(mapping, "b", "B")
+    gateway_module._remember_bounded_affinity(mapping, "a", "A2")
+    gateway_module._remember_bounded_affinity(mapping, "c", "C")
+    assert mapping == {"a": "A2", "c": "C"}

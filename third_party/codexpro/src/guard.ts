@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -6,6 +7,18 @@ import path from "node:path";
 import { minimatch } from "minimatch";
 import type { CodexProConfig } from "./config.js";
 import { expandHome } from "./config.js";
+
+const workspaceClientAffinity = new AsyncLocalStorage<string>();
+const MAX_CLIENT_SELECTIONS = 2048;
+const MAX_OPEN_WORKSPACES = 4096;
+
+export function withWorkspaceClientAffinity<T>(affinity: string, fn: () => T): T {
+  return workspaceClientAffinity.run(affinity.trim() || "default", fn);
+}
+
+function currentWorkspaceClientAffinity(): string {
+  return workspaceClientAffinity.getStore() ?? "default";
+}
 
 export interface Workspace {
   id: string;
@@ -60,9 +73,20 @@ function closestExistingParent(absPath: string): string {
 
 export class WorkspaceManager {
   private readonly workspaces = new Map<string, Workspace>();
-  private selectedWorkspaceId?: string;
+  private readonly selectedWorkspaceIds = new Map<string, string>();
 
   constructor(private readonly config: CodexProConfig) {}
+
+  private rememberSelection(workspaceId: string): void {
+    const key = currentWorkspaceClientAffinity();
+    if (this.selectedWorkspaceIds.has(key)) this.selectedWorkspaceIds.delete(key);
+    this.selectedWorkspaceIds.set(key, workspaceId);
+    while (this.selectedWorkspaceIds.size > MAX_CLIENT_SELECTIONS) {
+      const oldest = this.selectedWorkspaceIds.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.selectedWorkspaceIds.delete(oldest);
+    }
+  }
 
   defaultWorkspace(): Workspace {
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);
@@ -71,7 +95,7 @@ export class WorkspaceManager {
 
   selectDefaultWorkspace(): Workspace {
     const workspace = this.defaultWorkspace();
-    this.selectedWorkspaceId = workspace.id;
+    this.rememberSelection(workspace.id);
     return workspace;
   }
 
@@ -95,21 +119,27 @@ export class WorkspaceManager {
 
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === realRoot);
     if (existing) {
-      if (options.select !== false) this.selectedWorkspaceId = existing.id;
+      if (options.select !== false) this.rememberSelection(existing.id);
       return existing;
     }
 
+    if (this.workspaces.size >= MAX_OPEN_WORKSPACES) {
+      throw new CodexProError(
+        `Workspace registry limit reached (${MAX_OPEN_WORKSPACES}). Restart CodexPro to clear inactive handles before opening another workspace.`
+      );
+    }
     const id = workspaceIdForRoot(realRoot);
     const workspace = { id, root: realRoot, openedAt: new Date().toISOString() };
     this.workspaces.set(id, workspace);
-    if (options.select !== false) this.selectedWorkspaceId = id;
+    if (options.select !== false) this.rememberSelection(id);
     return workspace;
   }
 
   getWorkspace(id?: string): Workspace {
     if (!id) {
-      if (this.selectedWorkspaceId) {
-        const selected = this.workspaces.get(this.selectedWorkspaceId);
+      const selectedWorkspaceId = this.selectedWorkspaceIds.get(currentWorkspaceClientAffinity());
+      if (selectedWorkspaceId) {
+        const selected = this.workspaces.get(selectedWorkspaceId);
         if (selected) return selected;
       }
       return this.selectDefaultWorkspace();

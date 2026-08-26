@@ -1,8 +1,8 @@
 # Security
 
-## v0.8.6 security model
+## v0.8.7 security model
 
-MCP DevBridge intentionally grants a remote MCP client powerful local-development capabilities. v0.8.6 expands routing across multiple simultaneously-running roots, but that routing layer does not expand the filesystem boundary beyond roots the user explicitly started.
+MCP DevBridge intentionally grants a remote MCP client powerful local-development capabilities. v0.8.7 expands routing across multiple simultaneously-running roots, but that routing layer does not expand the filesystem boundary beyond roots the user explicitly started.
 
 ## Network boundary
 
@@ -57,11 +57,11 @@ Every public CodexPro `bash` invocation uses the same PathGuard, workspace selec
 
 The 600-second orchestration watchdog is advisory. It marks a stale snapshot and supplies a resume hint; it never changes task status or sends a termination signal. Running tasks are intentionally not persisted across DevBridge/CodexPro restarts.
 
-v0.8.6 transport liveness is also bounded. Gateway keepalives are comment-only SSE frames emitted only at complete event boundaries. The per-session MCP EventStore is memory-only and capped by event count, byte budget and TTL; a single response larger than the replay budget is delivered normally but recorded as an unreplayable gap rather than copied into unbounded memory. Request-tied progress notifications are emitted only when the client supplied the MCP progress token; DevBridge never invents one. Running `wait_task` transport snapshots use small redacted output tails, while full bounded output remains available through explicit task inspection.
+v0.8.7 transport liveness is also bounded. Gateway keepalives are comment-only SSE frames emitted only at complete event boundaries. CodexPro HTTP uses MCP TypeScript SDK v2 per-request stateless serving, so there is no protocol-session TTL or unbounded session transport registry. Cross-request application state is deliberately separated from transport state: workspace/task/long-run state is process scoped, while client-specific selected-workspace and last-shown checkpoints are keyed by a bounded client-affinity map. Gateway derives that affinity from a SHA-256 digest of existing session/auth context when necessary; the raw credential is never forwarded as the affinity and the affinity is not an authorization input. Request-tied progress notifications are emitted only when the client supplied the MCP progress token; DevBridge never invents one. Running `wait_task` transport snapshots use small redacted output tails, while full bounded output remains available through explicit task inspection.
 
 ## Durable long-run state security
 
-The v0.8.6 long-run layer persists orchestration metadata, not arbitrary shell output. `.ai-bridge/long-runs/<run_id>.json` is guarded by the same canonical workspace PathGuard, rejects context-directory symlink/junction escape, uses bounded schemas and atomic replacement, and caps each run state file at 512 KiB. In-process writes to the same run are serialized to prevent concurrent checkpoints from silently overwriting each other.
+The v0.8.7 long-run layer persists orchestration metadata, not arbitrary shell output. `.ai-bridge/long-runs/<run_id>.json` is guarded by the same canonical workspace PathGuard, rejects context-directory symlink/junction escape, uses bounded schemas and atomic replacement, and caps each run state file at 512 KiB. In-process writes to the same run are serialized to prevent concurrent checkpoints from silently overwriting each other.
 
 Plan text, notes, evidence, rework items and completion summaries pass the same secret-looking-value detector before persistence. Raw Bearer/OAuth/tunnel credentials must never be used as long-run evidence; store a redacted description, exit code, artifact digest or external record reference instead.
 
@@ -93,7 +93,7 @@ Gateway comparisons for compatible Bearer authentication use timing-safe equalit
 
 ## OAuth Hub model
 
-v0.8.6 OAuth authorizes the Hub. The browser consent page does not require selecting an “entry project”. After authorization, the concrete active root is selected from the actual tool call’s routing evidence and the Gateway swaps to that project’s upstream credential for the proxied request.
+v0.8.7 OAuth authorizes the Hub. The browser consent page does not require selecting an “entry project”. After authorization, the concrete active root is selected from the actual tool call’s routing evidence and the Gateway swaps to that project’s upstream credential for the proxied request.
 
 Legacy per-project Bearer behavior may remain for compatibility. It must not become a hidden routing fence for a normal Hub OAuth session.
 
@@ -117,7 +117,7 @@ Linux/SteamOS installs are user-level. `install.sh` canonicalizes custom target 
 
 Relative `XDG_CONFIG_HOME` / `XDG_DATA_HOME` values are treated as invalid rather than being used as attacker-controlled relative filesystem roots.
 
-Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.6 maintenance release.
+Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.7 maintenance release.
 
 
 ## Hub credential isolation

@@ -31,6 +31,7 @@ from urllib import request as urllib_request
 from .device_hub import DeviceRegistry
 from .engines import EngineState, SpawnError, port_listening
 from .gateway import OAuthGateway
+from .power_guard import SystemAwakeGuard
 from .tunnel_manager import ConnectionMethod, TunnelManager
 
 StateCallback = Callable[[EngineState, str | None], None]
@@ -41,6 +42,8 @@ TRANSPORT_HEALTH_TIMEOUT_SECONDS = 5.0
 TRANSPORT_HEALTH_TTFB_LIMIT_SECONDS = 5.0
 TRANSPORT_HEALTH_FAILURE_THRESHOLD = 3
 TRANSPORT_RESTART_COOLDOWN_SECONDS = 60.0
+GATEWAY_HEALTH_FAILURE_THRESHOLD = 2
+GATEWAY_RESTART_COOLDOWN_SECONDS = 30.0
 
 
 @dataclass
@@ -71,12 +74,14 @@ class ServiceCoordinator:
         self,
         *,
         tunnel: TunnelManager | None = None,
+        awake_guard: SystemAwakeGuard | None = None,
         workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
         workspace_credential_registry: Callable[[str], str | None] | None = None,
         device_registry: DeviceRegistry | None = None,
         local_device_id: str = "",
     ) -> None:
         self.tunnel = tunnel or TunnelManager()
+        self.awake_guard = awake_guard or SystemAwakeGuard()
         self.gateway: OAuthGateway | None = None
         self._workspace_registry = workspace_registry
         self._workspace_credential_registry = workspace_credential_registry
@@ -94,6 +99,8 @@ class ServiceCoordinator:
         self._transport_thread: threading.Thread | None = None
         self._transport_failures = 0
         self._last_transport_restart = 0.0
+        self._gateway_failures = 0
+        self._last_gateway_restart = 0.0
         self._transport_probe = self._probe_health_url
 
     def listen(self, callback: StateCallback) -> None:
@@ -221,6 +228,12 @@ class ServiceCoordinator:
                 )
 
             self._start_gateway(options)
+            if options.connection != ConnectionMethod.LOCAL:
+                awake_ok = self.awake_guard.start()
+                self._write_transport_health(
+                    event="awake_guard_started" if awake_ok else "awake_guard_failed",
+                    error=self.awake_guard.last_error if not awake_ok else "",
+                )
             self._set_state(EngineState.READY, "共享 Hub 已启动。")
         except Exception as exc:
             message = str(exc)
@@ -238,6 +251,7 @@ class ServiceCoordinator:
         """Stop shared transport only; project engines are owned elsewhere."""
         self._set_state(EngineState.STOPPING, "正在停止共享 Hub…")
         self._stop_transport_monitor()
+        self.awake_guard.stop()
         if self.gateway is not None:
             self.gateway.stop()
             self.gateway = None
@@ -245,6 +259,7 @@ class ServiceCoordinator:
             self.tunnel.stop()
         self._active_options = None
         self._transport_failures = 0
+        self._gateway_failures = 0
         self._set_url("", False)
         self._set_state(EngineState.IDLE, None)
 
@@ -255,6 +270,7 @@ class ServiceCoordinator:
 
     def _cleanup_after_failure(self) -> None:
         self._stop_transport_monitor()
+        self.awake_guard.stop()
         if self.gateway is not None:
             self.gateway.stop()
             self.gateway = None
@@ -316,13 +332,22 @@ class ServiceCoordinator:
             local_url, TRANSPORT_HEALTH_TIMEOUT_SECONDS
         )
         if not local_ok:
+            self._gateway_failures += 1
             self._write_transport_health(
                 event="gateway_unhealthy",
                 local_status=local_status,
                 local_ttfb_ms=round(local_ttfb * 1000),
+                consecutive_gateway_failures=self._gateway_failures,
             )
             self._transport_failures = 0
+            if self._gateway_failures < GATEWAY_HEALTH_FAILURE_THRESHOLD:
+                return
+            now = time.monotonic()
+            if now - self._last_gateway_restart < GATEWAY_RESTART_COOLDOWN_SECONDS:
+                return
+            self._restart_gateway()
             return
+        self._gateway_failures = 0
         public_health = self._health_url_from_public_mcp(self.public_url)
         public_ok, public_ttfb, public_status = self._transport_probe(
             public_health, TRANSPORT_HEALTH_TIMEOUT_SECONDS
@@ -344,6 +369,33 @@ class ServiceCoordinator:
         if now - self._last_transport_restart < TRANSPORT_RESTART_COOLDOWN_SECONDS:
             return
         self._restart_public_tunnel()
+
+    def _restart_gateway(self) -> None:
+        """Recover only the shared loopback Gateway; project engines/tunnel stay up."""
+        with self._lifecycle_lock:
+            options = self._active_options
+            if options is None or self.state != EngineState.READY:
+                return
+            self._last_gateway_restart = time.monotonic()
+            self._write_transport_health(event="gateway_restart", reason="consecutive_local_probe_failures")
+            old_gateway = self.gateway
+            try:
+                if old_gateway is not None:
+                    old_gateway.stop()
+                self.gateway = None
+                self._start_gateway(options)
+                self._gateway_failures = 0
+                self._write_transport_health(event="gateway_restart_ok")
+            except Exception as exc:
+                if self.gateway is not None:
+                    with contextlib.suppress(Exception):
+                        self.gateway.stop()
+                self.gateway = None
+                self._write_transport_health(
+                    event="gateway_restart_failed",
+                    error=type(exc).__name__,
+                    detail=str(exc)[:500],
+                )
 
     def _restart_public_tunnel(self) -> None:
         with self._lifecycle_lock:

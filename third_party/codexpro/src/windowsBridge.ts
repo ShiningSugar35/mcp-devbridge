@@ -1,7 +1,6 @@
 import { z } from "zod";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { CodexProConfig } from "./config.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 
@@ -259,7 +258,7 @@ function tagBridgeResult(result: any, name: string, title: string): any {
 const WindowsCallArgumentsSchema = z
   .object({
     tool: z.string().min(1).max(160).describe("Windows-MCP tool name to invoke, for example Click, App, PowerShell, FileSystem."),
-    arguments: z.record(z.any()).optional().describe("Tool arguments accepted by the Windows-MCP tool.")
+    arguments: z.record(z.string(), z.any()).optional().describe("Tool arguments accepted by the Windows-MCP tool.")
   })
   .strict();
 
@@ -296,15 +295,13 @@ export function registerWindowsBridgeTools(server: McpServer, _config: CodexProC
         {
           title: descriptor.title,
           description: descriptor.description,
-          inputSchema: descriptor.inputSchema,
+          inputSchema: z.object(descriptor.inputSchema),
           annotations: descriptor.annotations
         },
         wrapped
       );
-    } else if (typeof s.tool === "function") {
-      s.tool(descriptor.name, descriptor.description, descriptor.inputSchema, wrapped);
     } else {
-      throw new Error("Unsupported MCP SDK: McpServer has neither registerTool nor tool.");
+      throw new Error("Unsupported MCP SDK: McpServer.registerTool is unavailable.");
     }
   };
 
@@ -379,7 +376,7 @@ export function registerWindowsBridgeTools(server: McpServer, _config: CodexProC
       "Invoke one tool on the local Windows bridge, for example Click, App, Snapshot, or SearchWindow. Only tools allowed by the active permission profile (desktop_ui allowlist, or all inventory tools under system_full) can be called; anything else is refused before reaching the bridge. Use with explicit user instruction.",
     inputSchema: {
       tool: z.string().min(1).max(160).describe("Windows-MCP tool name to invoke, for example Click, App, Snapshot, SearchWindow."),
-      arguments: z.record(z.any()).optional().describe("Tool arguments accepted by the Windows-MCP tool.")
+      arguments: z.record(z.string(), z.any()).optional().describe("Tool arguments accepted by the Windows-MCP tool.")
     },
     annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false },
     handler: async (args: WindowsCallArguments) => {

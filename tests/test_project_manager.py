@@ -77,6 +77,10 @@ class _FakeUnit:
     def wait_ready(self, timeout_seconds: float | None = None) -> bool:
         return self._state == EngineState.READY
 
+    def data_plane_health(self, token: str, timeout_seconds: float = 2.0) -> tuple[bool, str]:
+        _ = token, timeout_seconds
+        return self._state == EngineState.READY, "ok" if self._state == EngineState.READY else "not ready"
+
     def stop(self, timeout_seconds: float = 8.0) -> None:
         self._state = EngineState.IDLE
         self.codex.started = False

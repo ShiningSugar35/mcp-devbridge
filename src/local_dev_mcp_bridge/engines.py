@@ -178,6 +178,24 @@ class BaseEngineProcess:
     def pid(self) -> int:
         return self._proc.pid
 
+    @property
+    def returncode(self) -> int | None:
+        """Return the child exit code after termination, else ``None``."""
+        return self._proc.poll()
+
+    def record_event(self, message: str) -> None:
+        """Append one timestamped lifecycle event to memory and the process log."""
+        safe = redact_line(message.rstrip(), self.secrets)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        line = f"[{stamp}] [MCPDevBridge] {safe}\n"
+        self.log.append(line)
+        if self._file is not None:
+            try:
+                with self._file.open("a", encoding="utf-8") as fh:
+                    fh.write(line)
+            except OSError:
+                pass
+
     def stop(self, timeout_seconds: float = 8.0) -> None:
         if self._proc.poll() is not None:
             return
@@ -338,6 +356,18 @@ class EngineManager:
     @property
     def state(self) -> EngineState:
         with self._lock:
+            proc = self._proc
+            if (
+                self._state in (EngineState.STARTING, EngineState.READY)
+                and proc is not None
+                and not proc.is_running
+            ):
+                exit_code = proc.returncode
+                self._state = EngineState.ERROR
+                self._error = f"{self.label} 进程已退出（exit={exit_code}）。"
+                proc.record_event(
+                    f"engine_exit label={self.label} pid={proc.pid} exit={exit_code}"
+                )
             return self._state
 
     @property

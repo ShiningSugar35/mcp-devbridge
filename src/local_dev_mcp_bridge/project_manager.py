@@ -16,10 +16,14 @@ Architecture (多项目并行开发):
 
 from __future__ import annotations
 
+import json
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from . import constants
 from .config_store import (
@@ -41,6 +45,19 @@ from .models import ProjectConfig
 from .platform_support import IS_WINDOWS
 
 WINDOWS_START_TIMEOUT_SECONDS = 240
+PROJECT_HEALTH_INTERVAL_SECONDS = 10.0
+PROJECT_HEALTH_TIMEOUT_SECONDS = 2.0
+PROJECT_HEALTH_FAILURE_THRESHOLD = 2
+PROJECT_RESTART_COOLDOWN_SECONDS = 30.0
+
+
+@dataclass
+class _RuntimeStartSpec:
+    codex_token: str = field(repr=False)
+    permission_mode: str = "workspace"
+    execution_profile: str = "developer"
+    windows_token: str | None = field(default=None, repr=False)
+    timeout_seconds: float | None = None
 
 
 @dataclass
@@ -153,13 +170,43 @@ class ProjectUnit:
         )
 
     def stop(self, timeout_seconds: float = 8.0) -> None:
-        if self.codex.is_running:
+        if self.codex.state != EngineState.IDLE or self.codex.is_running:
             self.codex.stop(timeout_seconds=timeout_seconds)
-        if self.windows.is_running:
+        if self.windows.state != EngineState.IDLE or self.windows.is_running:
             self.windows.stop(timeout_seconds=timeout_seconds)
 
     def log_tail(self, count: int = 200) -> str:
         return self.codex.log_tail(count)
+
+    def data_plane_health(
+        self,
+        token: str,
+        timeout_seconds: float = PROJECT_HEALTH_TIMEOUT_SECONDS,
+    ) -> tuple[bool, str]:
+        """Verify that the CodexPro process and its authenticated HTTP data plane are alive."""
+        if self.codex.state != EngineState.READY or not self.codex.is_running:
+            return False, self.codex.error or "CodexPro process is not ready"
+        url = f"http://127.0.0.1:{self.project.codexpro_port or self.codex.port}/healthz"
+        try:
+            req = urllib_request.Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": "MCPDevBridge-project-health",
+                },
+            )
+            with urllib_request.urlopen(req, timeout=timeout_seconds) as response:
+                status = int(getattr(response, "status", 0) or response.getcode() or 0)
+                payload = json.loads(response.read(64_000).decode("utf-8", errors="replace"))
+        except (OSError, TimeoutError, urllib_error.URLError, ValueError, json.JSONDecodeError) as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        if not 200 <= status < 300 or payload.get("ok") is not True:
+            return False, f"healthz status={status} ok={payload.get('ok')!r}"
+        expected_root = str(Path(self.project.root_path).expanduser().resolve())
+        actual_root = str(Path(str(payload.get("defaultRoot") or "")).expanduser().resolve())
+        if actual_root.casefold() != expected_root.casefold():
+            return False, f"healthz root mismatch: {actual_root!r} != {expected_root!r}"
+        return True, "ok"
 
 
 class ProjectManager:
@@ -168,9 +215,22 @@ class ProjectManager:
     One instance per desktop app. Pure Python; the Qt window consumes this.
     """
 
-    def __init__(self, *, unit_factory: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        unit_factory: Any | None = None,
+        supervisor_enabled: bool | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._units: dict[str, ProjectUnit] = {}
+        self._operation_locks: dict[str, threading.RLock] = {}
+        self._runtime_specs: dict[str, _RuntimeStartSpec] = {}
+        self._health_failures: dict[str, int] = {}
+        self._last_restart: dict[str, float] = {}
+        self._supervisor_stop = threading.Event()
+        self._supervisor_thread: threading.Thread | None = None
+        # Fake-unit tests are deterministic by default; production uses the supervisor.
+        self._supervisor_enabled = unit_factory is None if supervisor_enabled is None else supervisor_enabled
         # test hook: callable(project) -> ProjectUnit (usually None)
         self._unit_factory = unit_factory
 
@@ -233,10 +293,12 @@ class ProjectManager:
 
     def remove(self, project_id: str) -> None:
         """Stop the project's engines (if any) and drop it from the catalog."""
+        self.stop(project_id)
         with self._lock:
-            unit = self._units.pop(project_id, None)
-        if unit is not None:
-            unit.stop()
+            self._units.pop(project_id, None)
+            self._operation_locks.pop(project_id, None)
+            self._health_failures.pop(project_id, None)
+            self._last_restart.pop(project_id, None)
         project = self.get(project_id)
         if project is not None:
             delete_project(project.root_path)
@@ -275,6 +337,157 @@ class ProjectManager:
             project.codexpro_port = migrated.codexpro_port
             project.windows_bridge_port = migrated.windows_bridge_port
 
+    # ---------------------------------------------------------- supervision
+    def _operation_lock(self, project_id: str) -> threading.RLock:
+        with self._lock:
+            return self._operation_locks.setdefault(project_id, threading.RLock())
+
+    def _write_supervisor_event(self, event: str, **fields: object) -> None:
+        entry = {
+            "event": event,
+            **fields,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        try:
+            constants.LOG_DIR.mkdir(parents=True, exist_ok=True)
+            path = constants.LOG_DIR / f"service-supervisor-{time.strftime('%Y-%m-%d')}.jsonl"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            pass
+
+    def _start_supervisor(self) -> None:
+        if not self._supervisor_enabled:
+            return
+        with self._lock:
+            thread = self._supervisor_thread
+            if thread is not None and thread.is_alive():
+                return
+            self._supervisor_stop = threading.Event()
+            thread = threading.Thread(
+                target=self._supervisor_loop,
+                name="MCPDevBridge-project-supervisor",
+                daemon=True,
+            )
+            self._supervisor_thread = thread
+        thread.start()
+
+    def _stop_supervisor_if_idle(self) -> None:
+        with self._lock:
+            idle = not self._runtime_specs
+            thread = self._supervisor_thread
+        if not idle or thread is None:
+            return
+        self._supervisor_stop.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        with self._lock:
+            if self._supervisor_thread is thread:
+                self._supervisor_thread = None
+
+    def _supervisor_loop(self) -> None:
+        while not self._supervisor_stop.wait(PROJECT_HEALTH_INTERVAL_SECONDS):
+            try:
+                self._supervisor_tick()
+            except Exception as exc:  # noqa: BLE001 - supervisor must stay alive
+                self._write_supervisor_event("supervisor_tick_failed", error=type(exc).__name__)
+
+    def _supervisor_tick(self) -> None:
+        with self._lock:
+            runtime_specs = list(self._runtime_specs.items())
+        for project_id, spec in runtime_specs:
+            unit = self.unit(project_id)
+            if unit is None:
+                ok, detail = False, "project unit missing"
+            elif unit.state != EngineState.READY:
+                ok, detail = False, unit.message or f"state={unit.state.value}"
+            else:
+                ok, detail = unit.data_plane_health(spec.codex_token)
+            if ok:
+                with self._lock:
+                    self._health_failures[project_id] = 0
+                continue
+            with self._lock:
+                failures = self._health_failures.get(project_id, 0) + 1
+                self._health_failures[project_id] = failures
+                last_restart = self._last_restart.get(project_id, 0.0)
+            self._write_supervisor_event(
+                "project_probe_failed",
+                project_id=project_id,
+                failures=failures,
+                detail=detail[:500],
+            )
+            if failures < PROJECT_HEALTH_FAILURE_THRESHOLD:
+                continue
+            now = time.monotonic()
+            if now - last_restart < PROJECT_RESTART_COOLDOWN_SECONDS:
+                continue
+            self._recover_project(project_id, detail)
+
+    def _start_unit_from_spec(self, project: ProjectConfig, spec: _RuntimeStartSpec) -> ProjectView:
+        root = Path(project.root_path).expanduser().resolve()
+        if not root.is_dir():
+            raise SpawnError(f"项目目录不存在：{root}")
+        if not spec.codex_token or len(spec.codex_token) < 24:
+            raise SpawnError("访问令牌未生成或长度不足（至少 24 字节）。")
+        unit = self._ensure_unit(project)
+        unit.start(
+            spec.codex_token,
+            permission_mode=spec.permission_mode or project.permission_mode,
+            execution_profile=spec.execution_profile or "developer",
+            windows_token=spec.windows_token,
+            windows_enabled=project.windows_enabled and bool(spec.windows_token),
+        )
+        if not unit.wait_ready(timeout_seconds=spec.timeout_seconds):
+            unit.stop()
+            raise SpawnError(unit.message or "项目引擎启动失败。")
+        healthy, detail = unit.data_plane_health(spec.codex_token)
+        if not healthy:
+            unit.stop()
+            raise SpawnError(f"项目数据面启动自检失败：{detail}")
+        return self.view(project.id)
+
+    def _recover_project(self, project_id: str, reason: str) -> None:
+        lock = self._operation_lock(project_id)
+        with lock:
+            with self._lock:
+                spec = self._runtime_specs.get(project_id)
+                unit = self._units.get(project_id)
+                if spec is None:
+                    return
+                self._last_restart[project_id] = time.monotonic()
+            old_pid = unit.engine_pid if unit is not None else None
+            self._write_supervisor_event(
+                "project_restart",
+                project_id=project_id,
+                old_pid=old_pid,
+                reason=reason[:500],
+            )
+            try:
+                if unit is not None:
+                    unit.stop()
+                project = self.get(project_id)
+                if project is None:
+                    raise SpawnError(f"项目不存在：{project_id}")
+                self.ensure_ports(project)
+                view = self._start_unit_from_spec(project, spec)
+                with self._lock:
+                    self._health_failures[project_id] = 0
+                self._write_supervisor_event(
+                    "project_restart_ok",
+                    project_id=project_id,
+                    old_pid=old_pid,
+                    new_pid=view.engine_pid,
+                )
+            except Exception as exc:  # noqa: BLE001 - durable recovery path
+                self._write_supervisor_event(
+                    "project_restart_failed",
+                    project_id=project_id,
+                    old_pid=old_pid,
+                    error=type(exc).__name__,
+                    detail=str(exc)[:500],
+                )
+
     # --------------------------------------------------------------- units
     def unit(self, project_id: str) -> ProjectUnit | None:
         with self._lock:
@@ -310,37 +523,42 @@ class ProjectManager:
         windows_token: str | None = None,
         timeout_seconds: float | None = None,
     ) -> ProjectView:
-        """Start one project's engines (loopback only; tunnel/gateway not touched)."""
-        project = self.get(project_id)
-        if project is None:
-            raise SpawnError(f"项目不存在：{project_id}")
-        self.ensure_ports(project)
-        root = Path(project.root_path).expanduser().resolve()
-        if not root.is_dir():
-            raise SpawnError(f"项目目录不存在：{root}")
-        if not codex_token or len(codex_token) < 24:
-            raise SpawnError("访问令牌未生成或长度不足（至少 24 字节）。")
-        unit = self._ensure_unit(project)
-        unit.start(
-            codex_token,
-            permission_mode=permission_mode or project.permission_mode,
-            execution_profile=execution_profile or "developer",
-            windows_token=windows_token,
-            windows_enabled=project.windows_enabled and bool(windows_token),
-        )
-        if not unit.wait_ready(timeout_seconds=timeout_seconds):
-            unit.stop()
-            raise SpawnError(unit.message or "项目引擎启动失败。")
-        return self.view(project_id)
+        """Start one project's engines and arm in-memory crash recovery."""
+        lock = self._operation_lock(project_id)
+        with lock:
+            project = self.get(project_id)
+            if project is None:
+                raise SpawnError(f"项目不存在：{project_id}")
+            self.ensure_ports(project)
+            spec = _RuntimeStartSpec(
+                codex_token=codex_token,
+                permission_mode=permission_mode or project.permission_mode,
+                execution_profile=execution_profile or "developer",
+                windows_token=windows_token,
+                timeout_seconds=timeout_seconds,
+            )
+            view = self._start_unit_from_spec(project, spec)
+            with self._lock:
+                self._runtime_specs[project_id] = spec
+                self._health_failures[project_id] = 0
+            self._start_supervisor()
+            return view
 
     def stop(self, project_id: str) -> None:
-        with self._lock:
-            unit = self._units.get(project_id)
-        if unit is not None:
-            unit.stop()
+        lock = self._operation_lock(project_id)
+        with lock:
+            with self._lock:
+                self._runtime_specs.pop(project_id, None)
+                self._health_failures.pop(project_id, None)
+                unit = self._units.get(project_id)
+            if unit is not None:
+                unit.stop()
+        self._stop_supervisor_if_idle()
 
     def stop_all(self) -> None:
-        for project_id in list(self._units):
+        with self._lock:
+            project_ids = list(self._units)
+        for project_id in project_ids:
             self.stop(project_id)
 
     def start_enabled(self, *, codex_token: str, windows_token: str | None = None) -> list[ProjectView]:

@@ -244,6 +244,21 @@ _HOP_HEADERS = frozenset(
     {"host", "connection", "content-length", "transfer-encoding", "authorization"}
 )
 _SSE_KEEPALIVE_SECONDS = 12.0
+_MAX_AFFINITY_ENTRIES = 16_384
+
+
+def _remember_bounded_affinity(mapping: dict[str, str], key: str, value: str) -> None:
+    if not key:
+        return
+    if key in mapping:
+        mapping.pop(key, None)
+    mapping[key] = value
+    while len(mapping) > _MAX_AFFINITY_ENTRIES:
+        oldest = next(iter(mapping), None)
+        if oldest is None:
+            break
+        mapping.pop(oldest, None)
+
 
 # --------------------------------------------------------- diagnostic logging
 _DIAG_SENSITIVE_KEYS = frozenset(
@@ -740,8 +755,6 @@ class OAuthGateway:
         # may have no path/cwd argument. Keep affinity so those follow-up calls
         # stay on the root that created the handle without any DevBridge switch.
         self._workspace_handle_roots: dict[str, str] = {}
-        self._upstream_sessions: dict[str, dict[str, str]] = {}
-        self._initialize_requests: dict[str, bytes] = {}
         self._session_lock = threading.Lock()
 
     # ------------------------------------------------------------ build
@@ -937,12 +950,11 @@ class OAuthGateway:
             device_id = route_device_id
             if session_id:
                 with self._session_lock:
-                    self._session_devices[session_id] = device_id
+                    _remember_bounded_affinity(self._session_devices, session_id, device_id)
         else:
             device_id = self._effective_device(session_id)
 
         remote = None
-        upstream_key = ""
         if self._device_registry is not None and device_id and device_id != self._local_device_id:
             remote = self._device_registry.resolve_remote(device_id)
             if remote is None:
@@ -953,7 +965,6 @@ class OAuthGateway:
                     status_code=502,
                 )
             upstream_target = remote.base_url
-            upstream_key = f"remote:{device_id}"
             proxy_token = remote.bearer
         else:
             inferred_workspace = ""
@@ -981,7 +992,6 @@ class OAuthGateway:
             )
             if workspace_id:
                 upstream_target = self._resolve_upstream(workspace_id)
-                upstream_key = f"local:{workspace_id}"
                 if not upstream_target:
                     return JSONResponse(
                         _jsonrpc_error(
@@ -1009,28 +1019,11 @@ class OAuthGateway:
                 return result
 
         body = _strip_route_arguments(body, rpc, keep_workspace=remote is not None)
-        upstream_session_id = session_id
-        if session_id and jsonrpc_method != "initialize" and upstream_target and upstream_key:
-            ensured = await self._ensure_upstream_session(
-                client_session_id=session_id,
-                upstream_key=upstream_key,
-                upstream_target=upstream_target,
-                authorization=proxy_token,
-            )
-            if not ensured:
-                return JSONResponse(
-                    _jsonrpc_error(None, -32001, "无法为目标工作区建立 MCP 上游会话。"),
-                    status_code=502,
-                )
-            upstream_session_id = ensured
         return await self._proxy(
             request,
             body,
             proxy_token,
             upstream_target=upstream_target,
-            upstream_key=upstream_key,
-            client_session_id=session_id,
-            upstream_session_id=upstream_session_id,
             jsonrpc_method=jsonrpc_method,
             tool_name=tool_name,
             workspace_id=workspace_id,
@@ -1046,9 +1039,6 @@ class OAuthGateway:
         authorization: str | None,
         *,
         upstream_target: str | None = None,
-        upstream_key: str = "",
-        client_session_id: str = "",
-        upstream_session_id: str = "",
         jsonrpc_method: str = "",
         tool_name: str = "",
         workspace_id: str = "",
@@ -1064,12 +1054,19 @@ class OAuthGateway:
             key: value for key, value in request.headers.items() if key.lower() not in _HOP_HEADERS
         }
         headers["accept-encoding"] = "identity"
+        affinity_parts = [
+            request.headers.get("x-mcp-devbridge-client-affinity", "").strip(),
+            session_id,
+            request.headers.get("authorization", "").strip(),
+        ]
+        affinity_source = "\0".join(part for part in affinity_parts if part)
+        if affinity_source:
+            headers["x-mcp-devbridge-client-affinity"] = hashlib.sha256(
+                affinity_source.encode("utf-8", errors="ignore")
+            ).hexdigest()
         if authorization:
             headers["authorization"] = f"Bearer {authorization}"
-        if upstream_session_id:
-            headers["mcp-session-id"] = upstream_session_id
-        else:
-            headers.pop("mcp-session-id", None)
+        headers.pop("mcp-session-id", None)
         started = time.monotonic()
         try:
             upstream = await self._http.send(
@@ -1101,7 +1098,9 @@ class OAuthGateway:
                 error_type="" if upstream.status_code < 400 else f"http_{upstream.status_code}",
             )
         filtered = {
-            key: value for key, value in upstream.headers.items() if key.lower() not in _HOP_HEADERS
+            key: value
+            for key, value in upstream.headers.items()
+            if key.lower() not in _HOP_HEADERS and key.lower() != "mcp-session-id"
         }
         if request.method == "POST":
             affinity_tool = tool_name
@@ -1118,7 +1117,7 @@ class OAuthGateway:
                 handle = self._extract_structured_field(payload, "workspace_id")
                 if handle:
                     with self._session_lock:
-                        self._workspace_handle_roots[handle] = workspace_id
+                        _remember_bounded_affinity(self._workspace_handle_roots, handle, workspace_id)
                 return Response(
                     content=payload, status_code=upstream.status_code, headers=filtered
                 )
@@ -1127,7 +1126,7 @@ class OAuthGateway:
                 task_id = self._extract_task_id(payload)
                 if task_id:
                     with self._session_lock:
-                        self._task_workspaces[task_id] = workspace_id
+                        _remember_bounded_affinity(self._task_workspaces, task_id, workspace_id)
                 return Response(
                     content=payload, status_code=upstream.status_code, headers=filtered
                 )
@@ -1151,13 +1150,6 @@ class OAuthGateway:
                 )
             if b"initialize" in body:
                 payload = await _read_and_close_upstream(upstream)
-                returned_session_id = upstream.headers.get("mcp-session-id", "").strip()
-                if returned_session_id and upstream_key:
-                    # The first upstream session id is also the client-facing id.
-                    # Later workspace/device targets receive their own mapped ids.
-                    self._remember_upstream_session(
-                        returned_session_id, upstream_key, returned_session_id, body
-                    )
                 rewritten = _rewrite_server_identity(payload)
                 _write_diag_entry(
                     path=request.url.path,
@@ -1353,7 +1345,7 @@ class OAuthGateway:
                 return selected
             if len(online) == 1:
                 if session_id:
-                    self._session_devices[session_id] = online[0]
+                    _remember_bounded_affinity(self._session_devices, session_id, online[0])
                 return online[0]
         if self._local_device_id in online:
             return self._local_device_id
@@ -1404,7 +1396,7 @@ class OAuthGateway:
             raise ValueError(f"电脑“{target.name}”当前离线。")
         if session_id:
             with self._session_lock:
-                self._session_devices[session_id] = device_id
+                _remember_bounded_affinity(self._session_devices, session_id, device_id)
                 self._session_workspaces.pop(session_id, None)
         return (
             f"已切换到电脑：{target.name}\n"
@@ -1444,89 +1436,6 @@ class OAuthGateway:
             error_type=error_type or None,
             extra={"device_id": device_id},
         )
-
-    # ------------------------------------------------------ upstream sessions
-    def _remember_upstream_session(
-        self, client_session_id: str, upstream_key: str, upstream_session_id: str, initialize_body: bytes
-    ) -> None:
-        if not client_session_id or not upstream_key or not upstream_session_id:
-            return
-        with self._session_lock:
-            self._upstream_sessions.setdefault(client_session_id, {})[upstream_key] = upstream_session_id
-            if initialize_body:
-                self._initialize_requests[client_session_id] = bytes(initialize_body)
-
-    def _mapped_upstream_session(self, client_session_id: str, upstream_key: str) -> str:
-        if not client_session_id or not upstream_key:
-            return ""
-        with self._session_lock:
-            return self._upstream_sessions.get(client_session_id, {}).get(upstream_key, "")
-
-    def _forget_upstream_session(self, client_session_id: str, upstream_key: str) -> None:
-        if not client_session_id or not upstream_key:
-            return
-        with self._session_lock:
-            mappings = self._upstream_sessions.get(client_session_id)
-            if mappings is not None:
-                mappings.pop(upstream_key, None)
-                if not mappings:
-                    self._upstream_sessions.pop(client_session_id, None)
-
-    async def _ensure_upstream_session(
-        self,
-        *,
-        client_session_id: str,
-        upstream_key: str,
-        upstream_target: str,
-        authorization: str | None,
-    ) -> str:
-        existing = self._mapped_upstream_session(client_session_id, upstream_key)
-        if existing:
-            return existing
-        with self._session_lock:
-            initialize_body = self._initialize_requests.get(client_session_id, b"")
-        if not initialize_body:
-            # Compatibility fallback for clients/tests that do not expose a stable
-            # initialize exchange to the Gateway. The target may still accept the
-            # caller-provided session id.
-            return client_session_id
-
-        headers = {
-            "content-type": "application/json",
-            "accept": "application/json, text/event-stream",
-        }
-        if authorization:
-            headers["authorization"] = f"Bearer {authorization}"
-        try:
-            response = await self._http.post(
-                f"{upstream_target}/mcp", content=initialize_body, headers=headers
-            )
-            if response.status_code >= 400:
-                return ""
-            upstream_session_id = response.headers.get("mcp-session-id", "").strip()
-            if not upstream_session_id:
-                return ""
-            initialized_headers = dict(headers)
-            initialized_headers["mcp-session-id"] = upstream_session_id
-            initialized = await self._http.post(
-                f"{upstream_target}/mcp",
-                content=json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "notifications/initialized",
-                        "params": {},
-                    }
-                ).encode("utf-8"),
-                headers=initialized_headers,
-            )
-            if initialized.status_code >= 400:
-                return ""
-        except httpx.HTTPError:
-            return ""
-        self._remember_upstream_session(
-            client_session_id, upstream_key, upstream_session_id, initialize_body
-        )
-        return upstream_session_id
 
     # -------------------------------------------------------- workspace helpers
     def _credential_for_workspace(self, workspace_id: str, fallback: str | None) -> str | None:
@@ -1956,7 +1865,7 @@ class OAuthGateway:
             )
         if session_id:
             with self._session_lock:
-                self._session_workspaces[session_id] = project_id
+                _remember_bounded_affinity(self._session_workspaces, session_id, project_id)
         try:
             from .config_store import load_projects
 

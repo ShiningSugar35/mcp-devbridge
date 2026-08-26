@@ -4,8 +4,7 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -160,9 +159,16 @@ await expectHttpTokenRequired('non-loopback-allow-no-token', { CODEXPRO_HOST: '0
 await expectHttpTokenRequired('tunnel-mode', { CODEXPRO_TUNNEL_MODE: '1' });
 await expectWeakHttpTokenRejected();
 
+let smokeClientSequence = 0;
+
 async function withClient(url, fn) {
   const client = new Client({ name: 'codexpro-http-smoke', version: '0.0.0' });
-  const transport = new StreamableHTTPClientTransport(new URL(url));
+  smokeClientSequence += 1;
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: {
+      headers: { 'x-mcp-devbridge-client-affinity': `http-smoke-${smokeClientSequence}` }
+    }
+  });
   try {
     await client.connect(transport);
     return await fn(client, transport);
@@ -178,18 +184,6 @@ async function callTool(client, name, args = {}) {
     throw new Error(`${name} failed: ${text}`);
   }
   return result;
-}
-
-async function expectSessionNotFound(response, label) {
-  const body = await response.json();
-  if (
-    response.status !== 404 ||
-    !response.headers.get('content-type')?.includes('application/json') ||
-    body.error?.code !== -32001 ||
-    body.error?.message !== 'Session not found'
-  ) {
-    throw new Error(`expected ${label} to return JSON-RPC session-not-found 404, got ${response.status} ${JSON.stringify(body)}`);
-  }
 }
 
 function postToolsListWithSession(baseUrl, token, sessionId) {
@@ -545,20 +539,20 @@ try {
       throw new Error(`show_changes checkpoint leaked across HTTP sessions: ${JSON.stringify(changes.structuredContent)}`);
     }
   });
-  const unknownSession = '00000000-0000-4000-8000-000000000000';
-  await expectSessionNotFound(await postToolsListWithSession(baseUrl, token, unknownSession), 'unknown POST session');
-  await expectSessionNotFound(await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
-    headers: {
-      accept: 'text/event-stream',
-      'mcp-session-id': unknownSession
-    }
-  }), 'unknown GET session');
+  const arbitrarySession = '00000000-0000-4000-8000-000000000000';
+  const statelessPost = await postToolsListWithSession(baseUrl, token, arbitrarySession);
+  if (statelessPost.status !== 200) {
+    throw new Error(`stateless POST with an arbitrary legacy session header failed: ${statelessPost.status}`);
+  }
+  if (statelessPost.headers.has('mcp-session-id')) {
+    throw new Error('stateless MCP unexpectedly issued an Mcp-Session-Id');
+  }
+  await statelessPost.text();
   await withClient(mcpUrl, async (client, transport) => {
     await client.listTools();
-    const staleSession = transport.sessionId;
-    if (!staleSession) throw new Error('HTTP MCP client did not receive a session id');
-    await transport.terminateSession();
-    await expectSessionNotFound(await postToolsListWithSession(baseUrl, token, staleSession), 'stale POST session');
+    if (transport.sessionId) {
+      throw new Error(`stateless HTTP client unexpectedly received session id ${transport.sessionId}`);
+    }
   });
 
   await withClient(mcpUrl, async (client) => {
@@ -699,11 +693,11 @@ try {
 
     await withClient(mcpUrl, async (secondClient) => {
       const secondList = await callTool(secondClient, 'list_workspaces');
-      if (
-        secondList.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id
-        || secondList.structuredContent.workspaces.some((workspace) => workspace.root === alternateRoot)
-      ) {
-        throw new Error(`HTTP workspace selection leaked between MCP sessions: ${JSON.stringify(secondList.structuredContent)}`);
+      if (secondList.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id) {
+        throw new Error(`HTTP workspace selection leaked between client affinities: ${JSON.stringify(secondList.structuredContent)}`);
+      }
+      if (!secondList.structuredContent.workspaces.some((workspace) => workspace.root === alternateRoot)) {
+        throw new Error(`shared stateless workspace registry lost alternate root: ${JSON.stringify(secondList.structuredContent)}`);
       }
     });
 

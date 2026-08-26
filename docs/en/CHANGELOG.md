@@ -2,6 +2,16 @@
 
 All dates are local development dates.
 
+## 0.8.7 (2026-08-26) — stateless MCP and idle-502 self-healing
+
+- Upgrade the bundled CodexPro fork from monolithic MCP SDK v1 to the stable v2 packages (`@modelcontextprotocol/client`, `@modelcontextprotocol/server`, `@modelcontextprotocol/node`) plus Zod 4, using the official codemod followed by manual API migration.
+- Replace sessionful Streamable HTTP with SDK v2 `createMcpHandler(..., { legacy: "stateless" })`: 2026-07-28 traffic is served per request and 2025-era traffic uses the official stateless fallback. Remove the 30-minute protocol-session TTL, transport map, prune timer and Gateway upstream-session virtualization/replay.
+- Separate protocol state from application state: workspace handles, background tasks and durable long-run coordination are process-scoped; selected-workspace and last-shown review checkpoints are isolated by bounded client-affinity state without becoming an authorization or routing authority.
+- Detect exited CodexPro children instead of leaving cached READY state, add authenticated per-project `/healthz` supervision with targeted restart and no resurrection after explicit user stop, and add cooldown-protected Gateway-only recovery for local Gateway failure.
+- Hold Windows `ES_SYSTEM_REQUIRED | ES_CONTINUOUS` while a public Hub is intentionally running so Modern Standby idle timeout does not suspend the local origin; never request display keep-awake.
+- Change application update discovery to scan stable GitHub Releases and select the highest installable platform version, allowing direct multi-version jumps such as `0.8.4 → 0.8.7` while rejecting drafts, prereleases, malformed stable tags and releases missing the platform asset.
+- Add fault-injection/stateless/update regressions and retain v0.8.6 SSE keepalive, progress-aware polling and durable long-run behavior.
+
 ## 0.8.6 (2026-08-25) — Goal-like ChatGPT long-turn resilience
 
 - Add protocol-safe Gateway SSE idle keepalives every 12 seconds for `text/event-stream`. Keepalives are inserted only at complete SSE event boundaries, so a network chunk split can never be spliced into one JSON-RPC/SSE event.

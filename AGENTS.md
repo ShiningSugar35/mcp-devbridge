@@ -1,11 +1,11 @@
-# AGENTS.md — MCP DevBridge v0.8.6 维护指南
+# AGENTS.md — MCP DevBridge v0.8.7 维护指南
 
-本文件是仓库内 AI/Agent 与工程师的快速入口。当前维护线是 `release/v0.8.6`；v0.9+ 历史保留在远端，不得为了“补功能”把多 Agent runtime 重新混回本维护线。
+本文件是仓库内 AI/Agent 与工程师的快速入口。当前维护线是 `release/v0.8.7`；v0.9+ 历史保留在远端，不得为了“补功能”把多 Agent runtime 重新混回本维护线。
 
 ## 1. 开工阅读顺序
 
 1. `AGENTS.md`：当前硬约束与开发入口。
-2. `项目架构.md`：v0.8.6 真实运行架构、路由、安全和平台边界。
+2. `项目架构.md`：v0.8.7 真实运行架构、路由、安全和平台边界。
 3. `开发计划.md`：当前维护目标与发布门。
 4. `进度验收.md`：本轮实际验证结果与发布状态。
 5. `docs/en/LONG_RUNNING_TASKS.md`：数小时任务的 durable plan/checkpoint/review/rework 契约。
@@ -15,7 +15,7 @@
 
 ## 2. 当前产品语义
 
-MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP 与 Hub Gateway，把本地开发目录提供给 ChatGPT / Gemini 等 MCP 客户端。Windows 是主要桌面平台；v0.8.6 同时恢复 Linux / SteamOS Desktop Mode 的用户目录安装、运行、升级与构建链。
+MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP 与 Hub Gateway，把本地开发目录提供给 ChatGPT / Gemini 等 MCP 客户端。Windows 是主要桌面平台；v0.8.7 同时恢复 Linux / SteamOS Desktop Mode 的用户目录安装、运行、升级与构建链。
 
 ### 多根路由是硬约束
 
@@ -47,7 +47,7 @@ MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP �
 - MCP/CodexPro 重启后若旧 `task_id` 变成 unknown，必须提供明确终态证据后再 resolve；不得把“找不到任务”当成成功。
 - 原生 MCP `io.modelcontextprotocol/tasks` 未来按 capability negotiation 接入；当前普通 tool-level durable fallback 不能因为宿主暂不支持 extension 而失效。
 - 目标仍可执行且无需真实用户输入/授权时，`wait_task` 返回 running 不能成为结束 assistant turn 的理由；应继续自动轮询/推进，并在工具密集阶段约每 45–60 秒给用户一条简短进展说明。
-- v0.8.6 的 `wait_task` 无 progress token 时单次最多 30 秒；有标准 MCP progress token 时可到 120 秒并约每 8 秒发 progress notification。SSE keepalive、EventStore replay 与 durable long-run 只能降低/恢复链路中断，不能声称能绕过 ChatGPT 宿主自身的 hard turn/message-delivery timeout。
+- v0.8.7 的 `wait_task` 无 progress token 时单次最多 30 秒；有标准 MCP progress token 时可到 120 秒并约每 8 秒发 progress notification。当前 CodexPro HTTP 使用 SDK v2 stateless/hybrid，不维护 protocol-session TTL；SSE keepalive、进程级业务状态与 durable long-run 只能降低/恢复链路中断，不能声称能绕过 ChatGPT 宿主自身的 hard turn/message-delivery timeout。
 
 ## 3. Hub、设备与连接方式
 
@@ -121,7 +121,7 @@ npm run smoke
 发布构建：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.6
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.7
 ```
 
 ### Linux / SteamOS build host
@@ -130,22 +130,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Versi
 uv venv --python 3.12
 uv pip install -p .venv -e '.[dev,package]'
 cd third_party/codexpro && npm ci && npm run build && cd ../..
-bash scripts/build_linux.sh 0.8.6
+bash scripts/build_linux.sh 0.8.7
 ```
 
 Linux release 以 Ubuntu 22.04 构建以保持较旧 glibc 基线；SteamOS Desktop Mode 真机验证是额外兼容证据，不得用“未真机”掩盖 CI/构建失败。
 
 ## 7. 发布门
 
-发布 v0.8.6 前至少必须满足：
+发布 v0.8.7 前至少必须满足：
 
 - `git diff --check` 通过，工作树只包含有意变更；生成物、缓存、安装运行文件不得 track。
 - Python Ruff、Pyright、全量 pytest 通过。
 - CodexPro TypeScript build、完整 smoke 通过；必须包含 durable long-run persistence/restart/evidence/stale-review/rework/running-task gates，以及根盘不可读目录与 nested Git 回归。
 - `uv lock --check` 通过；PowerShell 与 Bash 发布脚本语法检查通过。
-- Windows `build.ps1 -Version 0.8.6` 成功，安装器可选安装目录且 frozen payload 完整。
-- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-0.8.6.tar.gz`。
-- commit、branch push、`v0.8.6` tag、GitHub Release 资产必须指向同一源提交。
+- Windows `build.ps1 -Version 0.8.7` 成功，安装器可选安装目录且 frozen payload 完整。
+- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-0.8.7.tar.gz`。
+- commit、branch push、`v0.8.7` tag、GitHub Release 资产必须指向同一源提交。
 - v0.9.x tags/branches 是历史，不删除、不改写、不 force-push。
 
 最终实测结果只写入 `进度验收.md`；禁止复制旧版本的测试数量、SHA-256 或“已发布”状态冒充本轮证据。

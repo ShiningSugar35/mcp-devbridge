@@ -17,7 +17,7 @@ import httpx
 
 from .platform_support import IS_LINUX, IS_WINDOWS, platform_key, popen_platform_kwargs
 
-RELEASE_API = "https://api.github.com/repos/ShiningSugar35/mcp-devbridge/releases/latest"
+RELEASES_API = "https://api.github.com/repos/ShiningSugar35/mcp-devbridge/releases?per_page=100"
 WINDOWS_INSTALLER_PREFIX = "MCPDevBridge-Setup-"
 LINUX_PACKAGE_PREFIX = "MCPDevBridge-Linux-x86_64-"
 # Backward-compatible public name used by older callers/tests.
@@ -63,30 +63,36 @@ def _release_asset_prefix() -> str:
     raise RuntimeError(f"当前平台 {platform_key()} 暂不支持应用内升级。")
 
 
-def fetch_latest_release(*, timeout: float = 10.0) -> ReleaseInfo:
-    response = httpx.get(
-        RELEASE_API,
-        timeout=timeout,
-        follow_redirects=True,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "MCP-DevBridge"},
-    )
-    response.raise_for_status()
-    payload = response.json()
+def _release_info_from_payload(payload: dict[str, object]) -> ReleaseInfo | None:
+    if bool(payload.get("draft")) or bool(payload.get("prerelease")):
+        return None
+    tag = str(payload.get("tag_name") or "").strip()
+    if not re.fullmatch(r"v?\d+\.\d+\.\d+", tag):
+        return None
+    version = tag.lstrip("v")
     assets = payload.get("assets") or []
+    if not isinstance(assets, list):
+        return None
     prefix = _release_asset_prefix()
+    expected_asset_name = (
+        f"{prefix}{version}.exe" if IS_WINDOWS else f"{prefix}{version}.tar.gz"
+    )
     asset = next(
-        (item for item in assets if str(item.get("name") or "").startswith(prefix)),
+        (
+            item
+            for item in assets
+            if isinstance(item, dict) and str(item.get("name") or "") == expected_asset_name
+        ),
         None,
     )
     if not asset:
-        platform_name = "Windows" if IS_WINDOWS else "Linux/SteamOS"
-        raise RuntimeError(f"最新 Release 没有 {platform_name} 安装包。")
+        return None
     digest = str(asset.get("digest") or "")
     sha256 = digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else ""
     return ReleaseInfo(
-        version=str(payload.get("tag_name") or "").lstrip("v"),
-        tag=str(payload.get("tag_name") or ""),
-        name=str(payload.get("name") or payload.get("tag_name") or "新版"),
+        version=version,
+        tag=tag,
+        name=str(payload.get("name") or tag or "新版"),
         notes=str(payload.get("body") or "").strip(),
         download_url=str(asset.get("browser_download_url") or ""),
         size=int(asset.get("size") or 0),
@@ -94,6 +100,30 @@ def fetch_latest_release(*, timeout: float = 10.0) -> ReleaseInfo:
         asset_name=str(asset.get("name") or ""),
         platform=platform_key(),
     )
+
+
+def fetch_latest_release(*, timeout: float = 10.0) -> ReleaseInfo:
+    """Return the highest stable release with an installer for this platform."""
+    response = httpx.get(
+        RELEASES_API,
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "MCP-DevBridge"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise RuntimeError("GitHub Release 响应格式无效。")
+    candidates = [
+        info
+        for item in payload
+        if isinstance(item, dict)
+        if (info := _release_info_from_payload(item)) is not None
+    ]
+    if not candidates:
+        platform_name = "Windows" if IS_WINDOWS else "Linux/SteamOS"
+        raise RuntimeError(f"没有可用于当前 {platform_name} 的正式 Release 安装包。")
+    return max(candidates, key=lambda item: version_tuple(item.version))
 
 
 def download_installer(info: ReleaseInfo, *, target_dir: Path | None = None) -> Path:

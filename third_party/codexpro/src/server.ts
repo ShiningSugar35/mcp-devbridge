@@ -2,10 +2,10 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { CodexProConfig } from "./config.js";
-import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./guard.js";
+import { WorkspaceManager, PathGuard, CodexProError, withWorkspaceClientAffinity, type Workspace } from "./guard.js";
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
 import { viewWorkspaceImage } from "./imageOps.js";
 import { searchWorkspace } from "./searchOps.js";
@@ -92,11 +92,11 @@ function waitTaskTransportSnapshot(result: BashTaskSnapshot): Record<string, unk
 }
 
 async function sendWaitTaskProgress(extra: any, result: BashTaskSnapshot, waitStartedAt: number, waitMs: number): Promise<void> {
-  const progressToken = extra?._meta?.progressToken;
-  if (progressToken === undefined || typeof extra?.sendNotification !== "function") return;
+  const progressToken = extra?.mcpReq?._meta?.progressToken;
+  if (progressToken === undefined || typeof extra?.mcpReq?.notify !== "function") return;
   const progress = Math.min(waitMs, Math.max(0, Date.now() - waitStartedAt));
   try {
-    await extra.sendNotification({
+    await extra.mcpReq.notify({
       method: "notifications/progress",
       params: {
         progressToken,
@@ -118,7 +118,7 @@ async function waitForTaskWithProgress(
   extra: any
 ): Promise<BashTaskSnapshot> {
   const canSendProgress =
-    extra?._meta?.progressToken !== undefined && typeof extra?.sendNotification === "function";
+    extra?.mcpReq?._meta?.progressToken !== undefined && typeof extra?.mcpReq?.notify === "function";
   if (!canSendProgress) return bashTasks.wait(workspace, taskId, waitMs);
 
   const waitStartedAt = Date.now();
@@ -438,17 +438,10 @@ function registerToolCompat(
   };
 
   const s = server as any;
-  if (typeof s.registerTool === "function") {
-    s.registerTool(name, fullOptions, wrapped);
-    return;
+  if (typeof s.registerTool !== "function") {
+    throw new Error("Unsupported MCP SDK: McpServer.registerTool is unavailable.");
   }
-
-  if (typeof s.tool === "function") {
-    s.tool(name, (fullOptions.description as string | undefined) ?? name, fullOptions.inputSchema ?? {}, wrapped);
-    return;
-  }
-
-  throw new Error("Unsupported MCP SDK: McpServer has neither registerTool nor tool.");
+  s.registerTool(name, fullOptions, wrapped);
 }
 
 const MINIMAL_TOOL_NAMES = [
@@ -639,7 +632,9 @@ function registerCodexTool(
 ): void {
   if (!shouldRegisterTool(config, name)) return;
   const validatedHandler: CodexToolHandler = (args, extra) =>
-    handler(validateToolArgs(name, options, args), extra);
+    withWorkspaceClientAffinity(reviewClientAffinity(extra), () =>
+      handler(validateToolArgs(name, options, args), extra)
+    );
   registerToolCompat(server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
   rememberRegisteredTool(server, name);
   rememberRegisteredToolHandler(server, name, validatedHandler);
@@ -713,8 +708,29 @@ function diffStats(diff: string): { additions: number; deletions: number; change
   return { additions, deletions, changed: Boolean(diff.trim()) };
 }
 
-function reviewCheckpointKey(workspace: Workspace, options: { path?: string; staged: boolean }): string {
-  return `${workspace.id}\0${options.path ?? ""}\0${options.staged ? "staged" : "unstaged"}`;
+const MAX_REVIEW_CHECKPOINTS = 2048;
+
+function reviewClientAffinity(extra: any): string {
+  const header = extra?.http?.req?.headers?.get?.("x-mcp-devbridge-client-affinity");
+  return typeof header === "string" && header.trim() ? header.trim().slice(0, 160) : "default";
+}
+
+function reviewCheckpointKey(
+  workspace: Workspace,
+  options: { path?: string; staged: boolean },
+  clientAffinity: string
+): string {
+  return `${clientAffinity}\0${workspace.id}\0${options.path ?? ""}\0${options.staged ? "staged" : "unstaged"}`;
+}
+
+function rememberReviewCheckpoint(checkpoints: Map<string, string>, key: string, fingerprint: string): void {
+  if (checkpoints.has(key)) checkpoints.delete(key);
+  checkpoints.set(key, fingerprint);
+  while (checkpoints.size > MAX_REVIEW_CHECKPOINTS) {
+    const oldest = checkpoints.keys().next().value;
+    if (typeof oldest !== "string") break;
+    checkpoints.delete(oldest);
+  }
 }
 
 function reviewFingerprint(status: string, diff: string): string {
@@ -1107,11 +1123,28 @@ const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructive
 const BASH_TASK_TOOL_NAMES = new Set<string>(["get_task", "wait_task", "list_tasks", "cancel_task"]);
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
-export function createCodexProServer(config: CodexProConfig): McpServer {
-  const workspaces = new WorkspaceManager(config);
-  const reviewCheckpoints = new Map<string, string>();
+export interface CodexProRuntimeState {
+  workspaces: WorkspaceManager;
+  reviewCheckpoints: Map<string, string>;
+  guard: PathGuard;
+  longRuns: LongRunStore;
+}
+
+export function createCodexProRuntimeState(config: CodexProConfig): CodexProRuntimeState {
   const guard = new PathGuard(config);
-  const longRuns = new LongRunStore(config.contextDir, guard);
+  return {
+    workspaces: new WorkspaceManager(config),
+    reviewCheckpoints: new Map<string, string>(),
+    guard,
+    longRuns: new LongRunStore(config.contextDir, guard)
+  };
+}
+
+export function createCodexProServer(
+  config: CodexProConfig,
+  runtime: CodexProRuntimeState = createCodexProRuntimeState(config)
+): McpServer {
+  const { workspaces, reviewCheckpoints, guard, longRuns } = runtime;
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
@@ -1126,7 +1159,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         "Stable wrapper for advanced ChatGPT connector setups. Pass action plus args to call an already-registered CodexPro tool without changing the visible schema; it cannot call tools disabled by the current mode.",
       inputSchema: {
         action: z.string().optional().describe("Action or registered tool name. Use list_actions to see what this server mode allows."),
-        args: z.record(z.any()).optional().describe("Arguments for the selected action. Same shape as the wrapped CodexPro tool.")
+        args: z.record(z.string(), z.any()).optional().describe("Arguments for the selected action. Same shape as the wrapped CodexPro tool.")
       },
       annotations: BASH_ANNOTATIONS,
       _meta: {
@@ -2263,7 +2296,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         Math.min(WAIT_TASK_MAX_SECONDS_WITH_PROGRESS, Number(args.wait_seconds ?? 30))
       );
       const progressLivenessActive =
-        extra?._meta?.progressToken !== undefined && typeof extra?.sendNotification === "function";
+        extra?.mcpReq?._meta?.progressToken !== undefined && typeof extra?.mcpReq?.notify === "function";
       const effectiveWaitSeconds = progressLivenessActive
         ? requestedWaitSeconds
         : Math.min(requestedWaitSeconds, WAIT_TASK_MAX_SECONDS_WITHOUT_PROGRESS);
@@ -2685,7 +2718,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         "openai/toolInvocation/invoked": "Workspace changes summarized"
       }
     },
-    async (args) => {
+    async (args, extra) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
       const staged = parseBool(args.staged, false);
@@ -2701,11 +2734,15 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const untrackedFingerprint = statusError ? "" : await untrackedReviewFingerprint(config, guard, workspace, changedFiles);
       const since = args.since === "workspace" ? "workspace" : "last_shown";
       const markReviewed = parseBool(args.mark_reviewed, true);
-      const checkpointKey = reviewCheckpointKey(workspace, { path: normalizedScopedPath, staged });
+      const checkpointKey = reviewCheckpointKey(
+        workspace,
+        { path: normalizedScopedPath, staged },
+        reviewClientAffinity(extra)
+      );
       const fingerprint = reviewFingerprint(status, `${diff}\0${untrackedFingerprint}`);
       const checkpointHit = includeDiff && since === "last_shown" && reviewCheckpoints.get(checkpointKey) === fingerprint;
       const checkpointWritten = markReviewed && includeDiff;
-      if (checkpointWritten) reviewCheckpoints.set(checkpointKey, fingerprint);
+      if (checkpointWritten) rememberReviewCheckpoint(reviewCheckpoints, checkpointKey, fingerprint);
       const responseDiff = checkpointHit ? "" : includeDiff ? diff : "";
       const responseStats = checkpointHit ? { additions: 0, deletions: 0, changed: false } : stats;
       const changedPaths = statusError ? [] : changedPathsFromStatus(changedFiles);

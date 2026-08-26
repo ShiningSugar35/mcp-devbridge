@@ -403,7 +403,7 @@ export class BashTaskManager {
         ? {
             resumeHint: taskTerminal(task.status)
               ? "The orchestration was idle for at least 600 seconds. Read this terminal result and resume the workflow now; do not keep waiting."
-              : "The orchestration was idle for at least 600 seconds. The task is still running; resume from this snapshot instead of entering an unbounded wait."
+              : "The orchestration was idle for at least 600 seconds. This is advisory only: the task is still running with no execution timeout. Continue the workflow autonomously in the current assistant turn using bounded wait_task/get_task polls; do not ask the user to say continue and do not treat this stale marker as task completion or a reason to return early."
           }
         : {})
     };
@@ -507,6 +507,10 @@ export class BashTaskManager {
     if (!taskTerminal(task.status) && task.status !== "cancelling") {
       task.status = "cancelling";
       terminateProcessTree(task.child, "SIGTERM");
+      const retry = setTimeout(() => {
+        if (task.status === "cancelling") terminateProcessTree(task.child, "SIGKILL");
+      }, 750);
+      retry.unref();
     }
     return this.snapshot(task, true);
   }

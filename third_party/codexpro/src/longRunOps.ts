@@ -160,7 +160,7 @@ const longRunSchema = z.object({
   steps: z.array(stepSchema),
   checkpoints: z.array(checkpointSchema),
   taskIds: z.array(z.string()),
-  taskResolutions: z.record(taskResolutionSchema),
+  taskResolutions: z.record(z.string(), taskResolutionSchema),
   reviews: z.array(reviewSchema),
   completion: z.object({ completedAt: z.string(), summary: z.string() }).optional()
 });

@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import { z } from "zod";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { createMcpHandler } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { expandHome, loadConfig, type CodexProConfig } from "./config.js";
 import {
   profilePathForRoot,
@@ -19,8 +18,7 @@ import {
   type WorkspaceProfile
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
-import { createCodexProServer } from "./server.js";
-import { BoundedInMemoryEventStore } from "./eventStore.js";
+import { createCodexProRuntimeState, createCodexProServer } from "./server.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -1506,7 +1504,7 @@ async function main(): Promise<void> {
     });
     next();
   });
-  app.use(cors({ exposedHeaders: ["Mcp-Session-Id"] }));
+  app.use(cors());
   app.get("/favicon.ico", (_req, res) => {
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.type("image/svg+xml").send(LOCAL_FAVICON);
@@ -1556,65 +1554,23 @@ async function main(): Promise<void> {
     res.status(401).send("Unauthorized");
   });
 
-  type TransportRecord = {
-    transport: StreamableHTTPServerTransport;
-    createdAt: number;
-    lastSeenAt: number;
-  };
-
-  const transports = new Map<string, TransportRecord>();
-  const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-  function requestSessionId(req: Request): string | undefined {
-    const value = req.headers["mcp-session-id"];
-    return Array.isArray(value) ? value[0] : value;
-  }
-
-  function sendSessionError(res: Response, sessionId: string | undefined): void {
-    const missing = !sessionId;
-    const malformed = Boolean(sessionId && !sessionIdPattern.test(sessionId));
-    res.status(missing || malformed ? 400 : 404).json({
-      jsonrpc: "2.0",
-      error: missing
-        ? { code: -32000, message: "Bad Request: Mcp-Session-Id header is required" }
-        : malformed
-          ? { code: -32000, message: "Bad Request: invalid MCP session id" }
-          : { code: -32001, message: "Session not found" },
-      id: null
-    });
-  }
-
-  function closeTransport(record: TransportRecord): void {
-    void record.transport.close?.();
-  }
-
-  function pruneTransports(): void {
-    const now = Date.now();
-    for (const [sessionId, record] of transports) {
-      if (now - record.lastSeenAt > config.httpSessionTtlMs) {
-        transports.delete(sessionId);
-        closeTransport(record);
+  const runtimeState = createCodexProRuntimeState(config);
+  const mcpHandler = createMcpHandler(
+    () => createCodexProServer(config, runtimeState),
+    {
+      legacy: "stateless",
+      responseMode: "auto",
+      keepAliveMs: 12_000,
+      onerror: (error: Error) => {
+        console.error(`[CodexPro] MCP handler error: ${error.stack ?? error.message}`);
       }
     }
-    while (transports.size > config.maxHttpSessions) {
-      const oldest = [...transports.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)[0];
-      if (!oldest) break;
-      transports.delete(oldest[0]);
-      closeTransport(oldest[1]);
+  );
+  const nodeMcpHandler = toNodeHandler(mcpHandler, {
+    onerror: (error: Error) => {
+      console.error(`[CodexPro] MCP node adapter error: ${error.stack ?? error.message}`);
     }
-  }
-
-  function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
-    if (!sessionId || !sessionIdPattern.test(sessionId)) return undefined;
-    pruneTransports();
-    const record = transports.get(sessionId);
-    if (!record) return undefined;
-    record.lastSeenAt = Date.now();
-    return record.transport;
-  }
-
-  const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
-  pruneTimer.unref();
+  });
 
   app.get("/", (_req, res) => {
     res.type("html").send(onboardingPage(config));
@@ -1673,66 +1629,13 @@ async function main(): Promise<void> {
     jsonError(res, 405, "method_not_allowed", "Use GET or POST for /admin/profile.");
   });
 
-  app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
+  app.all("/mcp", express.json({ limit: "20mb" }), async (req, res, next) => {
     try {
-      const sessionId = requestSessionId(req);
-      let transport: StreamableHTTPServerTransport;
-
-      const existingTransport = getTransport(sessionId);
-      if (existingTransport) {
-        transport = existingTransport;
-      } else if (!sessionId && isInitializeRequest(req.body)) {
-        transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          eventStore: new BoundedInMemoryEventStore(),
-          onsessioninitialized: (newSessionId: string) => {
-            pruneTransports();
-            transports.set(newSessionId, {
-              transport,
-              createdAt: Date.now(),
-              lastSeenAt: Date.now()
-            });
-            pruneTransports();
-          }
-        } as any);
-
-        (transport as any).onclose = () => {
-          const closedSessionId = (transport as any).sessionId;
-          if (closedSessionId) transports.delete(closedSessionId);
-        };
-
-        const server = createCodexProServer(config);
-        await server.connect(transport);
-      } else {
-        sendSessionError(res, sessionId);
-        return;
-      }
-
-      await transport.handleRequest(req, res, req.body);
+      await nodeMcpHandler(req, res, req.body);
     } catch (error) {
-      console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-      if (!res.headersSent) {
-        res.status(500).json({
-          jsonrpc: "2.0",
-          error: { code: -32603, message: "Internal CodexPro MCP error. Check the local terminal for details." },
-          id: null
-        });
-      }
+      next(error);
     }
   });
-
-  const handleSessionRequest = async (req: express.Request, res: express.Response) => {
-    const sessionId = requestSessionId(req);
-    const transport = getTransport(sessionId);
-    if (!transport) {
-      sendSessionError(res, sessionId);
-      return;
-    }
-    await transport.handleRequest(req, res);
-  };
-
-  app.get("/mcp", handleSessionRequest);
-  app.delete("/mcp", handleSessionRequest);
 
   app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
     if (!error || typeof error !== "object" || !("type" in error)) {
