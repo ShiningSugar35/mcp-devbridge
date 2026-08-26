@@ -91,6 +91,10 @@ if (-not $SkipLint) {
     Step "3b/6 typecheck (pyright)"
     & $script:py -m pyright --pythonpath $script:py src tests
     if ($LASTEXITCODE -ne 0) { throw "pyright failed" }
+
+    Step "3c/6 cross-platform typecheck (Linux)"
+    & $script:py -m pyright --pythonpath $script:py --pythonplatform Linux src tests
+    if ($LASTEXITCODE -ne 0) { throw "Linux pyright failed" }
 }
 
 # --- 4. PyInstaller onedir --------------------------------------------------

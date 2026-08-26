@@ -24,7 +24,10 @@ ExecutionStateSetter = Callable[[int], int]
 
 
 def _windows_execution_state_setter(flags: int) -> int:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    win_dll = getattr(ctypes, "WinDLL", None)
+    if win_dll is None:
+        raise OSError("Windows execution-state API is unavailable on this platform.")
+    kernel32 = win_dll("kernel32", use_last_error=True)
     func = kernel32.SetThreadExecutionState
     func.argtypes = [ctypes.c_uint]
     func.restype = ctypes.c_uint
@@ -111,7 +114,12 @@ class SystemAwakeGuard:
                 try:
                     previous = self._setter(flags)
                     if previous == 0:
-                        err = ctypes.get_last_error() if IS_WINDOWS else 0
+                        get_last_error = getattr(ctypes, "get_last_error", None)
+                        if callable(get_last_error):
+                            raw_error = get_last_error()
+                            err = raw_error if isinstance(raw_error, int) else 0
+                        else:
+                            err = 0
                         self._set_result(
                             active=False,
                             error=f"SetThreadExecutionState failed (winerror={err})",

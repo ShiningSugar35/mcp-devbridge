@@ -36,6 +36,7 @@ Run the Python gates from the repository root:
 ```powershell
 .venv\Scripts\python.exe -m ruff check src tests
 .venv\Scripts\python.exe -m pyright --pythonpath .venv\Scripts\python.exe src tests
+.venv\Scripts\python.exe -m pyright --pythonpath .venv\Scripts\python.exe --pythonplatform Linux src tests
 .venv\Scripts\python.exe -m pytest tests -q --disable-warnings
 uv lock --check
 ```

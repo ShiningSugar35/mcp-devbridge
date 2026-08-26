@@ -113,6 +113,7 @@ npm run build
 cd ../..
 .venv\Scripts\python.exe -m ruff check src tests
 .venv\Scripts\python.exe -m pyright --pythonpath .venv\Scripts\python.exe src tests
+.venv\Scripts\python.exe -m pyright --pythonpath .venv\Scripts\python.exe --pythonplatform Linux src tests
 .venv\Scripts\python.exe -m pytest tests -q --disable-warnings
 cd third_party/codexpro
 npm run smoke
