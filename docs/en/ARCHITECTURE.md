@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current v0.8.7 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
+This document describes the current v0.8.8 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
 
 ## Runtime model
 
@@ -21,7 +21,7 @@ OAuth/Bearer Gateway (loopback)
                                       └── its own active roots
 ```
 
-Every READY project root is active and equal for routing. The shared Gateway/Tunnel lifecycle is independent from all project roots: ServiceCoordinator owns only shared transport, while ProjectManager owns every project engine. v0.8.7 adds separate recovery loops: ProjectManager probes each desired-running CodexPro through authenticated `/healthz` and restarts only the failing ProjectUnit; ServiceCoordinator restarts a locally unhealthy Gateway without recycling projects or Tunnel; public-only degradation still triggers tunnel-only recovery. On Windows, a public Hub also holds `ES_SYSTEM_REQUIRED | ES_CONTINUOUS` without keeping the display on.
+Every READY project root is active and equal for routing. The shared Gateway/Tunnel lifecycle is independent from all project roots: ServiceCoordinator owns only shared transport, while ProjectManager owns every project engine. v0.8.8 adds separate recovery loops: ProjectManager probes each desired-running CodexPro through authenticated `/healthz` and restarts only the failing ProjectUnit; ServiceCoordinator restarts a locally unhealthy Gateway without recycling projects or Tunnel; public-only degradation still triggers tunnel-only recovery. On Windows, a public Hub also holds `ES_SYSTEM_REQUIRED | ES_CONTINUOUS` without keeping the display on.
 
 `Local` mode uses the same shared loopback Gateway and multi-root routing layer, but does not start a public Tunnel. There is no selected-project CodexPro client endpoint in the normal workflow.
 
@@ -87,7 +87,7 @@ Output is kept in a bounded rolling buffer. Cancellation terminates the process 
 
 ## Durable long-run orchestration
 
-v0.8.7 layers a durable plan/evaluator state machine above the process-scoped shell task manager. Multi-phase or roughly >2-minute work should call `long_run_start`, persist objective/steps/acceptance criteria, checkpoint evidence with `long_run_update`, attach background `bash` work to the run, then pass a `long_run_review` before `long_run_complete`.
+v0.8.8 layers a durable plan/evaluator state machine above the process-scoped shell task manager. Multi-phase or roughly >2-minute work should call `long_run_start`, persist objective/steps/acceptance criteria, checkpoint evidence with `long_run_update`, attach background `bash` work to the run, then pass a `long_run_review` before `long_run_complete`.
 
 The state file `.ai-bridge/long-runs/<run_id>.json` is schema-bounded, atomically replaced, path-guarded, serialized per run inside the process, and rejects secret-looking persisted text. `workRevision` changes whenever meaningful work changes; a PASS review is only valid for the revision it inspected. A later mutation makes that PASS stale. FAIL reviews require explicit failed criteria/rework and reopen affected steps.
 

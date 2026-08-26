@@ -73,6 +73,7 @@ function closestExistingParent(absPath: string): string {
 
 export class WorkspaceManager {
   private readonly workspaces = new Map<string, Workspace>();
+  private readonly workspaceIdsByRoot = new Map<string, string>();
   private readonly selectedWorkspaceIds = new Map<string, string>();
 
   constructor(private readonly config: CodexProConfig) {}
@@ -89,7 +90,8 @@ export class WorkspaceManager {
   }
 
   defaultWorkspace(): Workspace {
-    const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);
+    const existingId = this.workspaceIdsByRoot.get(this.config.defaultRoot);
+    const existing = existingId ? this.workspaces.get(existingId) : undefined;
     return existing ?? this.openWorkspace(this.config.defaultRoot, { select: false });
   }
 
@@ -110,14 +112,15 @@ export class WorkspaceManager {
       throw new CodexProError(`Workspace root is not a directory: ${resolved}`);
     }
     const realRoot = fs.realpathSync.native(resolved);
-    const allowed = this.config.allowedRoots.some((allowedRoot) => isSubpath(realRoot, allowedRoot));
+    const allowed = this.config.systemAccess || this.config.allowedRoots.some((allowedRoot) => isSubpath(realRoot, allowedRoot));
     if (!allowed) {
       throw new CodexProError(
         `Workspace root is outside allowed roots: ${realRoot}\nAllowed roots:\n${this.config.allowedRoots.map((r) => `- ${r}`).join("\n")}`
       );
     }
 
-    const existing = [...this.workspaces.values()].find((workspace) => workspace.root === realRoot);
+    const existingId = this.workspaceIdsByRoot.get(realRoot);
+    const existing = existingId ? this.workspaces.get(existingId) : undefined;
     if (existing) {
       if (options.select !== false) this.rememberSelection(existing.id);
       return existing;
@@ -131,6 +134,7 @@ export class WorkspaceManager {
     const id = workspaceIdForRoot(realRoot);
     const workspace = { id, root: realRoot, openedAt: new Date().toISOString() };
     this.workspaces.set(id, workspace);
+    this.workspaceIdsByRoot.set(realRoot, id);
     if (options.select !== false) this.rememberSelection(id);
     return workspace;
   }
@@ -189,7 +193,7 @@ export class PathGuard {
     const realTarget = maybeRealpath(absPath);
     let relPath = displayPath(absPath, workspace.root);
 
-    if (!isSubpath(absPath, workspace.root)) {
+    if (!this.config.systemAccess && !isSubpath(absPath, workspace.root)) {
       if (realTarget && isSubpath(realTarget, workspace.root)) {
         absPath = realTarget;
         relPath = displayPath(realTarget, workspace.root);
@@ -204,12 +208,28 @@ export class PathGuard {
       } else {
         throw new CodexProError(`Path escapes workspace root: ${inputPath}`);
       }
+    } else if (this.config.systemAccess) {
+      // Full-system mode treats the workspace as a default cwd/context, not a
+      // filesystem security boundary.  Still canonicalize existing targets and
+      // the nearest existing parent so blocked-glob and symlink checks see the
+      // real destination rather than a textual alias.
+      if (realTarget) {
+        absPath = realTarget;
+        relPath = displayPath(realTarget, workspace.root);
+      } else if (options.forWrite) {
+        const parent = closestExistingParent(path.dirname(absPath));
+        const realParent = maybeRealpath(parent);
+        if (realParent) {
+          absPath = path.resolve(realParent, path.relative(parent, absPath));
+          relPath = displayPath(absPath, workspace.root);
+        }
+      }
     }
 
     this.assertNotBlocked(relPath);
 
     if (realTarget) {
-      if (!isSubpath(realTarget, workspace.root)) {
+      if (!this.config.systemAccess && !isSubpath(realTarget, workspace.root)) {
         throw new CodexProError(`Path resolves outside workspace root through a symlink: ${inputPath}`);
       }
       const realRel = displayPath(realTarget, workspace.root);
@@ -226,7 +246,7 @@ export class PathGuard {
       }
       const parent = closestExistingParent(path.dirname(absPath));
       const realParent = maybeRealpath(parent);
-      if (realParent && !isSubpath(realParent, workspace.root)) {
+      if (realParent && !this.config.systemAccess && !isSubpath(realParent, workspace.root)) {
         throw new CodexProError(`Write path resolves through a parent outside the workspace: ${inputPath}`);
       }
       if (realParent) {

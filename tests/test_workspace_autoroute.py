@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -14,9 +15,19 @@ from local_dev_mcp_bridge.gateway import OAuthGateway
 from local_dev_mcp_bridge.models import ProjectConfig
 
 
-def _gateway_for_roots(tmp_path: Path, roots: dict[str, Path]) -> OAuthGateway:
+def _gateway_for_roots(
+    tmp_path: Path,
+    roots: dict[str, Path],
+    *,
+    permission_mode: Literal["read_only", "workspace", "system"] = "system",
+) -> OAuthGateway:
     projects = [
-        ProjectConfig(id=project_id, display_name=project_id, root_path=str(root))
+        ProjectConfig(
+            id=project_id,
+            display_name=project_id,
+            root_path=str(root),
+            permission_mode=permission_mode,
+        )
         for project_id, root in roots.items()
     ]
     save_projects(projects)
@@ -36,7 +47,9 @@ def _gateway_for_roots(tmp_path: Path, roots: dict[str, Path]) -> OAuthGateway:
     )
 
 
-def test_longest_prefix_prefers_nested_running_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_longest_prefix_prefers_nested_running_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
     parent = tmp_path / "disk"
     nested = parent / "Environment" / "mcp"
@@ -61,16 +74,62 @@ def test_relative_existing_path_auto_matches_unique_running_root(
     assert gateway._infer_workspace_for_call("read", {"path": "unique.txt"}) == "b"
 
 
+def test_workspace_handle_scopes_ambiguous_relative_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An explicit CodexPro handle is stronger than cross-root relative ambiguity."""
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "same.md").write_text("a", encoding="utf-8")
+    (root_b / "same.md").write_text("b", encoding="utf-8")
+    gateway = _gateway_for_roots(tmp_path, {"a": root_a, "b": root_b})
+    gateway._workspace_handle_roots["ws-b-child"] = "b"
+
+    assert (
+        gateway._infer_workspace_for_call("read", {"workspace_id": "ws-b-child", "path": "same.md"})
+        == "b"
+    )
+
+
+def test_soft_anchor_scopes_ambiguous_relative_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Legacy client affinity is a relative-path context, never an absolute-path fence."""
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "same.md").write_text("a", encoding="utf-8")
+    (root_b / "same.md").write_text("b", encoding="utf-8")
+    gateway = _gateway_for_roots(tmp_path, {"a": root_a, "b": root_b})
+
+    assert (
+        gateway._infer_workspace_for_call("read", {"path": "same.md"}, preferred_workspace="b")
+        == "b"
+    )
+    assert (
+        gateway._infer_workspace_for_call(
+            "read", {"path": str(root_a / "same.md")}, preferred_workspace="b"
+        )
+        == "a"
+    )
+
+
 def test_outside_path_is_not_misrouted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
     root = tmp_path / "allowed"
     outside = tmp_path / "outside"
     root.mkdir()
     outside.mkdir()
-    gateway = _gateway_for_roots(tmp_path, {"allowed": root})
+    gateway = _gateway_for_roots(tmp_path, {"allowed": root}, permission_mode="workspace")
 
     assert gateway._workspace_for_path(str(outside / "blocked.txt")) == ""
-    assert gateway._infer_workspace_for_call("read", {"path": str(outside / "blocked.txt")}) == ""
+    with pytest.raises(ValueError, match="没有运行中的「完全访问」项目"):
+        gateway._infer_workspace_for_call("read", {"path": str(outside / "blocked.txt")})
 
 
 def test_relative_parent_escape_is_not_routed_or_used_as_local_cwd(
@@ -83,12 +142,15 @@ def test_relative_parent_escape_is_not_routed_or_used_as_local_cwd(
     outside = tmp_path / "outside"
     root.mkdir()
     outside.mkdir()
-    gateway = _gateway_for_roots(tmp_path, {"allowed": root})
+    gateway = _gateway_for_roots(tmp_path, {"allowed": root}, permission_mode="workspace")
 
     assert gateway._workspace_for_path("../outside") == ""
-    assert gateway._infer_workspace_for_call(
-        "run_command", {"cwd": "../outside", "command": "echo nope"}
-    ) == ""
+    assert (
+        gateway._infer_workspace_for_call(
+            "run_command", {"cwd": "../outside", "command": "echo nope"}
+        )
+        == ""
+    )
 
     rpc = {
         "jsonrpc": "2.0",
@@ -109,6 +171,108 @@ def test_relative_parent_escape_is_not_routed_or_used_as_local_cwd(
     assert "cwd 超出目标工作区根目录" in payload["error"]["message"]
 
 
+def test_system_access_routes_outside_active_roots_and_allows_local_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    gateway = _gateway_for_roots(tmp_path, {"system-root": root}, permission_mode="system")
+
+    assert (
+        gateway._infer_workspace_for_call("read", {"path": str(outside / "free.txt")})
+        == "system-root"
+    )
+    assert gateway._local_tool_cwd(root, str(outside), system_access=True) == outside.resolve()
+    with pytest.raises(ValueError, match="cwd 超出目标工作区根目录"):
+        gateway._local_tool_cwd(root, str(outside), system_access=False)
+
+    if os.name == "nt":
+        from types import SimpleNamespace
+
+        class FakeElevation:
+            def is_registered(self) -> bool:
+                return True
+
+            def execute_command(self, command: str, cwd: Path, timeout: int):
+                assert command == "echo system-ok"
+                assert cwd == outside.resolve()
+                assert timeout == 10
+                return SimpleNamespace(
+                    shell="powershell",
+                    exit_code=0,
+                    duration_seconds=0.01,
+                    timed_out=False,
+                    stdout="system-ok",
+                    stderr="",
+                )
+
+        monkeypatch.setattr(
+            "local_dev_mcp_bridge.elevation.get_elevation_controller",
+            lambda: FakeElevation(),
+        )
+
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": {"cwd": str(outside), "command": "echo system-ok"},
+        },
+    }
+    response = asyncio.run(
+        gateway._exec_local_tool(
+            "run_command", rpc, rpc["params"], workspace_id="system-root", session_id=""
+        )
+    )
+    payload = json.loads(bytes(response.body))
+    assert "error" not in payload
+    assert "system-ok" in payload["result"]["content"][0]["text"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows broker semantics only")
+def test_system_local_command_does_not_silently_downgrade_without_broker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root = tmp_path / "allowed"
+    root.mkdir()
+    gateway = _gateway_for_roots(tmp_path, {"system-root": root}, permission_mode="system")
+
+    class MissingElevation:
+        def is_registered(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "local_dev_mcp_bridge.elevation.get_elevation_controller",
+        lambda: MissingElevation(),
+    )
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": {"command": "echo should-not-run"},
+        },
+    }
+    response = asyncio.run(
+        gateway._exec_local_tool(
+            "run_command", rpc, rpc["params"], workspace_id="system-root", session_id=""
+        )
+    )
+    payload = json.loads(bytes(response.body))
+    assert "error" in payload
+    assert "administrator capability is not authorized" in payload["error"]["message"]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation semantics differ on Windows")
 def test_symlink_escape_is_not_considered_inside_running_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -120,7 +284,7 @@ def test_symlink_escape_is_not_considered_inside_running_root(
     outside.mkdir()
     (outside / "secret.txt").write_text("secret", encoding="utf-8")
     (root / "link").symlink_to(outside, target_is_directory=True)
-    gateway = _gateway_for_roots(tmp_path, {"allowed": root})
+    gateway = _gateway_for_roots(tmp_path, {"allowed": root}, permission_mode="workspace")
 
     assert gateway._workspace_for_path(str(root / "link" / "secret.txt")) == ""
     assert gateway._workspace_for_path("link/secret.txt") == ""
@@ -155,15 +319,17 @@ def test_task_and_path_affinity_override_stale_workspace_handle(
     gateway._workspace_handle_roots["ws-a"] = "a"
     gateway._task_workspaces["task-b"] = "b"
 
-    assert gateway._infer_workspace_for_call(
-        "read", {"workspace_id": "ws-a", "path": str(target_b)}
-    ) == "b"
-    assert gateway._infer_workspace_for_call(
-        "wait_task", {"workspace_id": "ws-a", "task_id": "task-b"}
-    ) == "b"
-    assert gateway._infer_workspace_for_call(
-        "show_changes", {"workspace_id": "ws-a"}
-    ) == "a"
+    assert (
+        gateway._infer_workspace_for_call("read", {"workspace_id": "ws-a", "path": str(target_b)})
+        == "b"
+    )
+    assert (
+        gateway._infer_workspace_for_call(
+            "wait_task", {"workspace_id": "ws-a", "task_id": "task-b"}
+        )
+        == "b"
+    )
+    assert gateway._infer_workspace_for_call("show_changes", {"workspace_id": "ws-a"}) == "a"
 
 
 def test_path_bearing_tools_cover_read_write_edit_search_shell_git_and_patch(
@@ -321,15 +487,24 @@ def test_codexpro_supertool_preserves_nested_autorouting_affinity(
     gateway._workspace_handle_roots["ws-a"] = "a"
     gateway._task_workspaces["task-b"] = "b"
 
-    assert gateway._infer_workspace_for_call(
-        "codexpro", {"action": "read", "args": {"path": str(target_b)}}
-    ) == "b"
-    assert gateway._infer_workspace_for_call(
-        "codexpro", {"action": "wait_task", "args": {"task_id": "task-b"}}
-    ) == "b"
-    assert gateway._infer_workspace_for_call(
-        "codexpro", {"action": "changes", "args": {"workspace_id": "ws-a"}}
-    ) == "a"
+    assert (
+        gateway._infer_workspace_for_call(
+            "codexpro", {"action": "read", "args": {"path": str(target_b)}}
+        )
+        == "b"
+    )
+    assert (
+        gateway._infer_workspace_for_call(
+            "codexpro", {"action": "wait_task", "args": {"task_id": "task-b"}}
+        )
+        == "b"
+    )
+    assert (
+        gateway._infer_workspace_for_call(
+            "codexpro", {"action": "changes", "args": {"workspace_id": "ws-a"}}
+        )
+        == "a"
+    )
 
 
 def test_gateway_routes_codexpro_supertool_by_nested_absolute_path(

@@ -35,6 +35,7 @@ Thumbs.db
 
 # 本地临时
 tmp/
+/.ai-bridge/
 
 # 当仓库与本机安装目录重合时产生的正式安装文件
 /MCPDevBridge.exe

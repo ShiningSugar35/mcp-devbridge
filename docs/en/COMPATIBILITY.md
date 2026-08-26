@@ -2,7 +2,7 @@
 
 ## Supported environments
 
-| Item | Current v0.8.7 support |
+| Item | Current v0.8.8 support |
 |---|---|
 | Windows | Windows 10/11 x64 desktop release; PowerShell 5.1+ is supported. |
 | Linux | x86_64 desktop build and user-level installer; release CI/build baseline is Ubuntu 22.04. |
@@ -40,7 +40,7 @@ The Gateway port is global Hub configuration (`AppConfig.gateway_port`). Each pr
 
 ## Long-running workflows
 
-ChatGPT/Codex/Gemini/browser hosts can run multi-hour local work without keeping one silent MCP request open. v0.8.7 exposes durable `long_run_*` tools over ordinary `tools/call`, persists plan/checkpoint/review state under `.ai-bridge/long-runs/`, and keeps long shell work in background `bash` tasks. `wait_task` remains 30-second-bounded for clients without MCP progress notification support, but can wait up to 120 seconds with request-tied progress. Gateway SSE keepalives improve live-turn liveness, while CodexPro's SDK v2 stateless HTTP removes the old protocol-session TTL/replay dependency; workspace/task/long-run application state remains available across stateless requests. These mechanisms cannot override a ChatGPT host-level turn or message-delivery hard timeout; durable state is the recovery guarantee when that boundary is hit. Native `io.modelcontextprotocol/tasks` is not required for baseline compatibility. See `LONG_RUNNING_TASKS.md` and `GOAL_LONG_RUNNING_TASKS.md`.
+ChatGPT/Codex/Gemini/browser hosts can run multi-hour local work without keeping one silent MCP request open. v0.8.8 exposes durable `long_run_*` tools over ordinary `tools/call`, persists plan/checkpoint/review state under `.ai-bridge/long-runs/`, and keeps long shell work in background `bash` tasks. `wait_task` remains 30-second-bounded for clients without MCP progress notification support, but can wait up to 120 seconds with request-tied progress. Gateway SSE keepalives improve live-turn liveness, while CodexPro's SDK v2 stateless HTTP removes the old protocol-session TTL/replay dependency; workspace/task/long-run application state remains available across stateless requests. These mechanisms cannot override a ChatGPT host-level turn or message-delivery hard timeout; durable state is the recovery guarantee when that boundary is hit. Native `io.modelcontextprotocol/tasks` is not required for baseline compatibility. See `LONG_RUNNING_TASKS.md` and `GOAL_LONG_RUNNING_TASKS.md`.
 
 ## Windows desktop and installer
 

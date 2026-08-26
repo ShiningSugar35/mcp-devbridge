@@ -344,9 +344,7 @@ async def _stream_and_close_upstream(response: httpx.Response):
 
 
 def _sse_event_boundary_at_end(suffix: bytes) -> bool:
-    return suffix.endswith(
-        (b"\n\n", b"\r\r", b"\r\n\r\n", b"\r\n\n", b"\n\r\n")
-    )
+    return suffix.endswith((b"\n\n", b"\r\r", b"\r\n\r\n", b"\r\n\n", b"\n\r\n"))
 
 
 async def _stream_sse_with_keepalive_and_close_upstream(
@@ -573,7 +571,11 @@ def _inject_tools(payload: bytes) -> bytes:
 
     try:
         obj = json.loads(decoded)
-        if isinstance(obj, dict) and isinstance(obj.get("result"), dict) and "tools" in obj["result"]:
+        if (
+            isinstance(obj, dict)
+            and isinstance(obj.get("result"), dict)
+            and "tools" in obj["result"]
+        ):
             return json.dumps(patch_obj(obj), ensure_ascii=False).encode("utf-8")
     except json.JSONDecodeError:
         pass
@@ -595,7 +597,9 @@ def _tool_arguments(params: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _strip_route_arguments(body: bytes, rpc: dict[str, Any] | None, *, keep_workspace: bool) -> bytes:
+def _strip_route_arguments(
+    body: bytes, rpc: dict[str, Any] | None, *, keep_workspace: bool
+) -> bytes:
     if rpc is None or str(rpc.get("method", "")) != "tools/call":
         return body
     params = rpc.get("params")
@@ -604,7 +608,9 @@ def _strip_route_arguments(body: bytes, rpc: dict[str, Any] | None, *, keep_work
     arguments = params.get("arguments")
     if not isinstance(arguments, dict):
         return body
-    if _ROUTE_DEVICE_ARG not in arguments and (keep_workspace or _ROUTE_WORKSPACE_ARG not in arguments):
+    if _ROUTE_DEVICE_ARG not in arguments and (
+        keep_workspace or _ROUTE_WORKSPACE_ARG not in arguments
+    ):
         return body
     copied_rpc = dict(rpc)
     copied_params = dict(params)
@@ -756,6 +762,11 @@ class OAuthGateway:
         # stay on the root that created the handle without any DevBridge switch.
         self._workspace_handle_roots: dict[str, str] = {}
         self._session_lock = threading.Lock()
+        # Hot-path routing snapshot. Project config is disk-backed; avoid re-reading
+        # it for every MCP call while keeping start/stop/config changes fresh.
+        self._workspace_snapshot_lock = threading.Lock()
+        self._workspace_snapshot_expires = 0.0
+        self._workspace_snapshot: list[tuple[str, Path, str]] = []
 
     # ------------------------------------------------------------ build
     @property
@@ -976,8 +987,14 @@ class OAuthGateway:
                     )
                 workspace_id = route_workspace_id
             elif rpc is not None and jsonrpc_method == "tools/call":
+                with self._session_lock:
+                    preferred_workspace = (
+                        self._session_workspaces.get(session_id, "") if session_id else ""
+                    )
                 try:
-                    inferred_workspace = self._infer_workspace_for_call(tool_name, call_arguments)
+                    inferred_workspace = self._infer_workspace_for_call(
+                        tool_name, call_arguments, preferred_workspace=preferred_workspace
+                    )
                 except ValueError as exc:
                     return JSONResponse(_jsonrpc_error(rpc.get("id"), -32602, str(exc)))
                 if inferred_workspace:
@@ -995,7 +1012,9 @@ class OAuthGateway:
                 if not upstream_target:
                     return JSONResponse(
                         _jsonrpc_error(
-                            None, -32000, "目标工作区尚未运行。请先在 MCP DevBridge 桌面启动该根目录。"
+                            None,
+                            -32000,
+                            "目标工作区尚未运行。请先在 MCP DevBridge 桌面启动该根目录。",
                         ),
                         status_code=502,
                     )
@@ -1117,19 +1136,24 @@ class OAuthGateway:
                 handle = self._extract_structured_field(payload, "workspace_id")
                 if handle:
                     with self._session_lock:
-                        _remember_bounded_affinity(self._workspace_handle_roots, handle, workspace_id)
-                return Response(
-                    content=payload, status_code=upstream.status_code, headers=filtered
-                )
+                        _remember_bounded_affinity(
+                            self._workspace_handle_roots, handle, workspace_id
+                        )
+                        if session_id:
+                            _remember_bounded_affinity(
+                                self._session_workspaces, session_id, workspace_id
+                            )
+                    payload = self._inject_structured_field(
+                        payload, _ROUTE_WORKSPACE_ARG, workspace_id
+                    )
+                return Response(content=payload, status_code=upstream.status_code, headers=filtered)
             if jsonrpc_method == "tools/call" and affinity_tool == "bash" and workspace_id:
                 payload = await _read_and_close_upstream(upstream)
                 task_id = self._extract_task_id(payload)
                 if task_id:
                     with self._session_lock:
                         _remember_bounded_affinity(self._task_workspaces, task_id, workspace_id)
-                return Response(
-                    content=payload, status_code=upstream.status_code, headers=filtered
-                )
+                return Response(content=payload, status_code=upstream.status_code, headers=filtered)
             if b'"tools/list"' in body:
                 payload = await _read_and_close_upstream(upstream)
                 rewritten = _inject_tools(payload)
@@ -1184,15 +1208,33 @@ class OAuthGateway:
         rpc_id = rpc.get("id")
         arguments = _tool_arguments(params)
         workspace = self._resolve_workspace_path(workspace_id) or self._workspace or Path.cwd()
+        system_access = self._workspace_permission_mode(workspace_id) == "system"
         try:
             if name == "run_command":
                 command = str(arguments.get("command", ""))
                 if not command.strip():
                     raise ValueError("command 不能为空。")
                 cwd_rel = str(arguments.get("cwd", "")).strip()
-                cwd = self._local_tool_cwd(workspace, cwd_rel)
+                cwd = self._local_tool_cwd(workspace, cwd_rel, system_access=system_access)
+                from .execution_profile import check_execution
+
+                allowed, reason = check_execution(
+                    command, "full_system" if system_access else "safe"
+                )
+                if not allowed:
+                    raise ValueError(reason)
                 timeout = max(1, min(int(arguments.get("timeout_seconds") or 10), 20))
-                res = run_command(command, cwd=cwd, timeout_seconds=timeout)
+                if system_access and os.name == "nt":
+                    from .elevation import get_elevation_controller
+
+                    elevation = get_elevation_controller()
+                    if not elevation.is_registered():
+                        raise ValueError(
+                            "Windows full-system administrator capability is not authorized; complete the one-time UAC broker registration first."
+                        )
+                    res = elevation.execute_command(command, cwd, timeout)
+                else:
+                    res = run_command(command, cwd=cwd, timeout_seconds=timeout)
                 text = (
                     f"shell: {res.shell}\n"
                     f"exit_code: {res.exit_code}\n"
@@ -1209,9 +1251,27 @@ class OAuthGateway:
                     raise ValueError("executable 不能为空。")
                 args = [str(a) for a in (arguments.get("args") or [])]
                 cwd_rel = str(arguments.get("cwd", "")).strip()
-                cwd = self._local_tool_cwd(workspace, cwd_rel)
+                cwd = self._local_tool_cwd(workspace, cwd_rel, system_access=system_access)
+                from .execution_profile import check_execution
+
+                command_line = " ".join([executable, *args])
+                allowed, reason = check_execution(
+                    command_line, "full_system" if system_access else "safe"
+                )
+                if not allowed:
+                    raise ValueError(reason)
                 timeout = max(1, min(int(arguments.get("timeout_seconds") or 10), 20))
-                res = run_program(executable, args, cwd=cwd, timeout_seconds=timeout)
+                if system_access and os.name == "nt":
+                    from .elevation import get_elevation_controller
+
+                    elevation = get_elevation_controller()
+                    if not elevation.is_registered():
+                        raise ValueError(
+                            "Windows full-system administrator capability is not authorized; complete the one-time UAC broker registration first."
+                        )
+                    res = elevation.execute_program(executable, args, cwd, timeout)
+                else:
+                    res = run_program(executable, args, cwd=cwd, timeout_seconds=timeout)
                 text = (
                     f"command: {res.command}\n"
                     f"exit_code: {res.exit_code}\n"
@@ -1263,13 +1323,15 @@ class OAuthGateway:
                     _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": result}]})
                 )
             elif name == "devbridge_get_current_workspace":
-                result = self._get_current_workspace(workspace_id, session_id)
+                explicit_route = str(arguments.get(_ROUTE_WORKSPACE_ARG) or "").strip()
+                current_workspace_id = self._current_workspace_context(explicit_route, session_id)
+                result = self._get_current_workspace(current_workspace_id, session_id)
                 return JSONResponse(
                     _jsonrpc_result(
                         rpc_id,
                         {
                             "content": [{"type": "text", "text": result}],
-                            "structuredContent": {_ROUTE_WORKSPACE_ARG: workspace_id},
+                            "structuredContent": {_ROUTE_WORKSPACE_ARG: current_workspace_id},
                         },
                     )
                 )
@@ -1299,7 +1361,9 @@ class OAuthGateway:
                         rpc_id,
                         {
                             "content": [{"type": "text", "text": result}],
-                            "structuredContent": {_ROUTE_DEVICE_ARG: self._effective_device(session_id)},
+                            "structuredContent": {
+                                _ROUTE_DEVICE_ARG: self._effective_device(session_id)
+                            },
                         },
                     )
                 )
@@ -1489,27 +1553,37 @@ class OAuthGateway:
             # realpath resolves junctions/symlinks in existing parents while still
             # supporting a not-yet-created final path. This keeps textual children
             # from escaping a configured root through ``..`` or a link/junction.
-            child_text = os.path.normcase(os.path.realpath(os.path.abspath(str(child.expanduser()))))
-            parent_text = os.path.normcase(os.path.realpath(os.path.abspath(str(parent.expanduser()))))
+            child_text = os.path.normcase(
+                os.path.realpath(os.path.abspath(str(child.expanduser())))
+            )
+            parent_text = os.path.normcase(
+                os.path.realpath(os.path.abspath(str(parent.expanduser())))
+            )
             return os.path.commonpath([child_text, parent_text]) == parent_text
         except (OSError, ValueError):
             return False
 
-    def _local_tool_cwd(self, workspace: Path, raw_cwd: str) -> Path:
+    def _local_tool_cwd(
+        self, workspace: Path, raw_cwd: str, *, system_access: bool = False
+    ) -> Path:
         root = workspace.expanduser().resolve()
-        value = (raw_cwd or '').strip()
+        value = (raw_cwd or "").strip()
         candidate = Path(value).expanduser() if value else root
         if not candidate.is_absolute():
             candidate = root / candidate
         candidate = candidate.resolve()
-        if not self._path_within(candidate, root):
-            raise ValueError('cwd 超出目标工作区根目录。请使用该运行中根目录内的路径。')
+        if not system_access and not self._path_within(candidate, root):
+            raise ValueError("cwd 超出目标工作区根目录。请使用该运行中根目录内的路径。")
         return candidate
 
-    def _running_workspace_roots(self) -> list[tuple[str, Path]]:
+    def _running_workspace_records(self) -> list[tuple[str, Path, str]]:
         if self._workspace_registry is None:
             return []
-        rows: list[tuple[str, Path]] = []
+        now = time.monotonic()
+        with self._workspace_snapshot_lock:
+            if now < self._workspace_snapshot_expires:
+                return list(self._workspace_snapshot)
+        rows: list[tuple[str, Path, str]] = []
         try:
             from .config_store import load_projects
 
@@ -1521,19 +1595,41 @@ class OAuthGateway:
                     continue
                 _port, root = info
                 if root:
-                    rows.append((project.id, Path(root).expanduser()))
+                    rows.append((project.id, Path(root).expanduser(), project.permission_mode))
         except Exception:
-            return []
+            rows = []
         rows.sort(
             key=lambda item: (
                 -len(os.path.abspath(str(item[1]))),
                 os.path.normcase(os.path.abspath(str(item[1]))),
             )
         )
+        with self._workspace_snapshot_lock:
+            self._workspace_snapshot = list(rows)
+            self._workspace_snapshot_expires = now + 0.35
         return rows
 
+    def _running_workspace_roots(self) -> list[tuple[str, Path]]:
+        return [(project_id, root) for project_id, root, _mode in self._running_workspace_records()]
+
+    def _workspace_permission_mode(self, workspace_id: str) -> str:
+        for project_id, _root, mode in self._running_workspace_records():
+            if project_id == workspace_id:
+                return mode
+        return ""
+
+    def _stable_system_workspace_id(self) -> str:
+        candidates = [
+            project_id
+            for project_id, _root, mode in self._running_workspace_records()
+            if mode == "system"
+        ]
+        if not candidates:
+            return ""
+        return self._stable_workspace_id(candidates)
+
     def _workspace_for_path(self, raw_path: str, *, allow_new: bool = False) -> str:
-        value = (raw_path or "").strip().strip('\"')
+        value = (raw_path or "").strip().strip('"')
         if not value or value == ".":
             return ""
         roots = self._running_workspace_roots()
@@ -1641,10 +1737,18 @@ class OAuthGateway:
             return tool_name, arguments
         return action, child_arguments
 
-    def _infer_workspace_for_call(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    def _infer_workspace_for_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        preferred_workspace: str = "",
+    ) -> str:
         effective_tool, effective_arguments = self._unwrap_codexpro_call(tool_name, arguments)
         if effective_tool != tool_name:
-            return self._infer_workspace_for_call(effective_tool, effective_arguments)
+            return self._infer_workspace_for_call(
+                effective_tool, effective_arguments, preferred_workspace=preferred_workspace
+            )
 
         # Strong operation-specific evidence wins over a stale CodexPro workspace
         # handle. A task_id identifies the engine that owns the task; path/cwd
@@ -1678,9 +1782,11 @@ class OAuthGateway:
 
         allow_new = tool_name in _WRITE_ROUTE_TOOLS or tool_name in {"bash", "run_command"}
         absolute_matches: list[str] = []
+        had_absolute_path = False
         for value in values:
-            candidate = Path(value.strip().strip('\"')).expanduser()
+            candidate = Path(value.strip().strip('"')).expanduser()
             if candidate.is_absolute():
+                had_absolute_path = True
                 matched = self._workspace_for_path(value, allow_new=allow_new)
                 if matched and matched not in absolute_matches:
                     absolute_matches.append(matched)
@@ -1691,11 +1797,8 @@ class OAuthGateway:
             )
         if absolute_matches:
             return absolute_matches[0]
-        for value in values:
-            matched = self._workspace_for_path(value, allow_new=allow_new)
-            if matched:
-                return matched
 
+        # Explicit application workspace handles scope relative/pathless follow-ups.
         workspace_handle = str(arguments.get("workspace_id") or "").strip()
         if workspace_handle:
             with self._session_lock:
@@ -1706,6 +1809,28 @@ class OAuthGateway:
                 and self._workspace_registry(handle_workspace)
             ):
                 return handle_workspace
+
+        # Legacy transport affinity is only a soft context. Absolute paths above
+        # still override it, while relative paths stay in the selected context.
+        if (
+            preferred_workspace
+            and self._workspace_registry
+            and self._workspace_registry(preferred_workspace)
+        ):
+            return preferred_workspace
+
+        if had_absolute_path:
+            system_workspace = self._stable_system_workspace_id()
+            if system_workspace:
+                return system_workspace
+            raise ValueError(
+                "绝对路径位于所有运行根目录之外，且当前没有运行中的「完全访问」项目可承载该调用。"
+            )
+
+        for value in values:
+            matched = self._workspace_for_path(value, allow_new=allow_new)
+            if matched:
+                return matched
         return ""
 
     @staticmethod
@@ -1747,6 +1872,51 @@ class OAuthGateway:
         return ""
 
     @staticmethod
+    def _inject_structured_field(payload: bytes, field: str, value: str) -> bytes:
+        """Add one application field to a JSON-RPC tool result without replacing opaque handles."""
+
+        def patch_obj(obj: Any) -> Any:
+            if not isinstance(obj, dict):
+                return obj
+            result = obj.get("result")
+            if not isinstance(result, dict):
+                return obj
+            structured = result.get("structuredContent")
+            if not isinstance(structured, dict):
+                structured = {}
+                result["structuredContent"] = structured
+            structured[field] = value
+            return obj
+
+        try:
+            decoded = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return payload
+        if decoded.lstrip().startswith("data:") or "\ndata:" in decoded:
+            out: list[str] = []
+            for line in decoded.splitlines(keepends=True):
+                if line.startswith("data:"):
+                    body = line[5:].strip()
+                    if body and body != "[DONE]":
+                        try:
+                            obj = json.loads(body)
+                        except json.JSONDecodeError:
+                            pass
+                        else:
+                            suffix = "\r\n" if line.endswith("\r\n") else "\n"
+                            out.append(
+                                f"data: {json.dumps(patch_obj(obj), ensure_ascii=False)}{suffix}"
+                            )
+                            continue
+                out.append(line)
+            return "".join(out).encode("utf-8")
+        try:
+            obj = json.loads(decoded)
+        except json.JSONDecodeError:
+            return payload
+        return json.dumps(patch_obj(obj), ensure_ascii=False).encode("utf-8")
+
+    @staticmethod
     def _extract_task_id(payload: bytes) -> str:
         return OAuthGateway._extract_structured_field(payload, "task_id")
 
@@ -1757,18 +1927,7 @@ class OAuthGateway:
         return sid.strip()
 
     def _running_workspace_ids(self) -> list[str]:
-        if self._workspace_registry is None:
-            return []
-        try:
-            from .config_store import load_projects
-
-            return [
-                project.id
-                for project in load_projects()
-                if project.id and self._workspace_registry(project.id) is not None
-            ]
-        except Exception:
-            return []
+        return [project_id for project_id, _root, _mode in self._running_workspace_records()]
 
     def _stable_workspace_id(self, running: list[str]) -> str:
         """Choose a deterministic bootstrap root without giving it entry privileges."""
@@ -1782,7 +1941,9 @@ class OAuthGateway:
             ),
         )
 
-    def _effective_workspace(self, token_workspace: str, session_id: str, *, pinned: bool = False) -> str:
+    def _effective_workspace(
+        self, token_workspace: str, session_id: str, *, pinned: bool = False
+    ) -> str:
         """Resolve one upstream for this call without creating an implicit entry root.
 
         Only an explicit compatibility switch is persisted in ``_session_workspaces``.
@@ -1803,6 +1964,7 @@ class OAuthGateway:
         if len(running) == 1:
             return running[0]
         return self._stable_workspace_id(running)
+
     def _list_workspaces(self) -> str:
         """Build a text report of all registered projects with status."""
         lines = ["已注册的工作区：", ""]
@@ -1826,25 +1988,37 @@ class OAuthGateway:
             lines.append("（无法加载项目列表）")
         return "\n".join(lines)
 
-    def _get_current_workspace(self, workspace_id: str, session_id: str) -> str:
-        """Report explicit compatibility override state, not a fabricated entry root."""
-        running = self._running_workspace_ids()
+    def _current_workspace_context(self, explicit_workspace_id: str, session_id: str) -> str:
+        """Return only explicit/legacy soft context, never the bootstrap fallback."""
+        running = set(self._running_workspace_ids())
+        if explicit_workspace_id and explicit_workspace_id in running:
+            return explicit_workspace_id
         with self._session_lock:
             selected = self._session_workspaces.get(session_id, "") if session_id else ""
-        explicit = selected
+            if selected and selected not in running and session_id:
+                self._session_workspaces.pop(session_id, None)
+                selected = ""
+        return selected if selected in running else ""
+
+    def _get_current_workspace(self, workspace_id: str, session_id: str) -> str:
+        """Report explicit/soft context, never a fabricated entry root."""
+        running = self._running_workspace_ids()
+        explicit = workspace_id or self._current_workspace_context("", session_id)
         if explicit and explicit in running:
             root = str(self._resolve_workspace_path(explicit) or "未知")
             return (
-                f"当前存在显式工作区覆盖：id={explicit}\n路径：{root}\n"
-                "这是兼容覆盖；带 path/cwd/task 的调用仍按更强证据自动路由。"
+                f"当前工作区上下文：id={explicit}\n路径：{root}\n"
+                "这是显式/兼容软上下文；task 与绝对 path/cwd 仍按更强证据自动路由。"
             )
         if not running:
             return "当前没有运行中的工作区。请先在 MCP DevBridge 桌面启动一个或多个项目。"
-        roots = [str(self._resolve_workspace_path(project_id) or project_id) for project_id in running]
-        return (
-            "当前会话未固定工作区；所有运行根平等参与自动路由。\n"
-            + "\n".join(f"- {root}" for root in roots)
+        roots = [
+            str(self._resolve_workspace_path(project_id) or project_id) for project_id in running
+        ]
+        return "当前会话未固定工作区；所有运行根平等参与自动路由。\n" + "\n".join(
+            f"- {root}" for root in roots
         )
+
     def _do_switch_workspace(self, project_id: str, session_id: str) -> str:
         """Switch the current session's workspace binding."""
         # Verify the project exists

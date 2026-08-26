@@ -12,6 +12,7 @@ self-test) runs on QThreadPool workers so the UI never freezes.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import os
@@ -218,6 +219,7 @@ def _hub_access_token(*, ensure: bool = False, regenerate: bool = False) -> str:
         store.set(constants.ACCESS_TOKEN_CRED_NAME, value)
     return value
 
+
 def _tunnel_token_default() -> str:
     """Last-used Cloudflare tunnel token (remembered across starts)."""
     return SecretsStore().get(TUNNEL_TOKEN_CRED_NAME) or ""
@@ -366,7 +368,9 @@ class MainWindow(QMainWindow):
         proj_v.setSpacing(8)
         self.project_table = QTableWidget(0, 5)
         self.project_table.setHorizontalHeaderLabels(["名称", "路径", "状态", "端口", "操作"])
-        self.project_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.project_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
         self.project_table.verticalHeader().setVisible(False)
         self.project_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.project_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -468,14 +472,19 @@ class MainWindow(QMainWindow):
         secret_row.addWidget(self.gemini_secret_copy)
         gemini_form.addRow("Client Secret:", secret_row)
 
-
-        self.gemini_id_copy.clicked.connect(lambda: self._copy_with_feedback(self.gemini_id_copy, self.gemini_id_edit.text()))
-        self.gemini_secret_copy.clicked.connect(lambda: self._copy_with_feedback(self.gemini_secret_copy, self._gemini_secret))
+        self.gemini_id_copy.clicked.connect(
+            lambda: self._copy_with_feedback(self.gemini_id_copy, self.gemini_id_edit.text())
+        )
+        self.gemini_secret_copy.clicked.connect(
+            lambda: self._copy_with_feedback(self.gemini_secret_copy, self._gemini_secret)
+        )
         cfg_form.addRow("", self.gemini_box)
 
         if self.gemini_uri_edit.text():
             try:
-                client_id, secret = get_or_create_gemini_client(self.gemini_uri_edit.text(), rotate_secret=False)
+                client_id, secret = get_or_create_gemini_client(
+                    self.gemini_uri_edit.text(), rotate_secret=False
+                )
                 self.gemini_id_edit.setText(client_id)
                 self._gemini_secret = secret
                 self.gemini_secret_edit.setText("•" * 16)
@@ -519,7 +528,12 @@ class MainWindow(QMainWindow):
         self.git_branch_edit = QLineEdit()
         self.git_branch_edit.setPlaceholderText("例如: main（默认推送分支，可空）")
         git_form.addRow("默认推送分支:", self.git_branch_edit)
-        for field in (self.git_name_edit, self.git_email_edit, self.git_remote_edit, self.git_branch_edit):
+        for field in (
+            self.git_name_edit,
+            self.git_email_edit,
+            self.git_remote_edit,
+            self.git_branch_edit,
+        ):
             field.editingFinished.connect(self._autosave_project_settings)
         self.git_save_btn = QPushButton("保存 Git 设置")
         self.git_save_btn.clicked.connect(self._save_git_settings)
@@ -530,7 +544,9 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("状态：未启动")
         self.status_label.setWordWrap(True)
         self.ctrl_layout.addWidget(self.status_label)
-        self.component_status = QLabel("组件：Codex 未启动 · Gateway 未启动 · 隧道 未启动 · Windows 桥 未启动")
+        self.component_status = QLabel(
+            "组件：Codex 未启动 · Gateway 未启动 · 隧道 未启动 · Windows 桥 未启动"
+        )
         self.component_status.setWordWrap(True)
         self.component_status.setStyleSheet("color: #666666;")
 
@@ -552,9 +568,13 @@ class MainWindow(QMainWindow):
         self.token_copy_btn = QPushButton("复制令牌")
         self.token_regenerate_btn = QPushButton("重新生成")
         self.url_copy_btn = QPushButton("复制地址")
-        self.token_copy_btn.clicked.connect(lambda: self._copy_with_feedback(self.token_copy_btn, self._current_token))
+        self.token_copy_btn.clicked.connect(
+            lambda: self._copy_with_feedback(self.token_copy_btn, self._current_token)
+        )
         self.token_regenerate_btn.clicked.connect(self._regenerate_token)
-        self.url_copy_btn.clicked.connect(lambda: self._copy_with_feedback(self.url_copy_btn, self._display_url()))
+        self.url_copy_btn.clicked.connect(
+            lambda: self._copy_with_feedback(self.url_copy_btn, self._display_url())
+        )
         tok_row.addWidget(self.token_copy_btn)
         tok_row.addWidget(self.token_regenerate_btn)
         tok_row.addWidget(self.url_copy_btn)
@@ -589,7 +609,9 @@ class MainWindow(QMainWindow):
         service_row.setSpacing(8)
         service_row.addWidget(self.service_url_edit, 1)
         self.service_url_copy_btn = QPushButton("复制 Gateway 地址")
-        self.service_url_copy_btn.clicked.connect(lambda: self._copy_with_feedback(self.service_url_copy_btn, self._service_url_text()))
+        self.service_url_copy_btn.clicked.connect(
+            lambda: self._copy_with_feedback(self.service_url_copy_btn, self._service_url_text())
+        )
         service_row.addWidget(self.service_url_copy_btn)
         tok_layout.addLayout(service_row)
 
@@ -668,7 +690,6 @@ class MainWindow(QMainWindow):
         self._organize_top_level_tabs()
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-
     def _build_diagnostics_tab(self) -> None:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -715,37 +736,45 @@ class MainWindow(QMainWindow):
             if root_path.is_dir():
                 ok_items.append("项目文件夹可以正常访问")
             else:
-                problems.append((
-                    "找不到项目文件夹",
-                    "回到工作台移除这个项目，再重新添加正确的项目目录。",
-                ))
+                problems.append(
+                    (
+                        "找不到项目文件夹",
+                        "回到工作台移除这个项目，再重新添加正确的项目目录。",
+                    )
+                )
 
             node_exe = find_node()
             if node_exe:
                 ok_items.append("项目引擎运行组件已经就绪")
                 details.append(f"Node.js：{node_exe}")
             else:
-                problems.append((
-                    "安装包缺少项目引擎运行组件",
-                    "请重新安装 MCP DevBridge 正式版；正式安装包会自带 Node.js，不需要单独安装或修改 PATH。",
-                ))
+                problems.append(
+                    (
+                        "安装包缺少项目引擎运行组件",
+                        "请重新安装 MCP DevBridge 正式版；正式安装包会自带 Node.js，不需要单独安装或修改 PATH。",
+                    )
+                )
             uvx_exe = find_uvx()
             if uvx_exe:
                 details.append(f"uvx：{uvx_exe}")
             elif project.windows_enabled:
-                problems.append((
-                    "Windows 控制运行组件不完整",
-                    "请重新安装 MCP DevBridge 正式版；安装包会自带 uv/uvx。首次启用 Windows 控制时仍需要联网获取锁定的 Windows-MCP 组件。",
-                ))
+                problems.append(
+                    (
+                        "Windows 控制运行组件不完整",
+                        "请重新安装 MCP DevBridge 正式版；安装包会自带 uv/uvx。首次启用 Windows 控制时仍需要联网获取锁定的 Windows-MCP 组件。",
+                    )
+                )
 
             access_value = _hub_access_token(ensure=True)
             if access_value:
                 ok_items.append("共享 Hub 访问令牌已经准备好")
             else:
-                problems.append((
-                    "还没有共享 Hub 访问令牌",
-                    "回到工作台，在“连接信息”里点击“重新生成”。",
-                ))
+                problems.append(
+                    (
+                        "还没有共享 Hub 访问令牌",
+                        "回到工作台，在“连接信息”里点击“重新生成”。",
+                    )
+                )
 
             try:
                 method = ConnectionMethod(project.connection)
@@ -755,59 +784,81 @@ class MainWindow(QMainWindow):
 
             if method == ConnectionMethod.CLOUDFLARE:
                 if not project.public_hostname:
-                    problems.append((
-                        "没有填写固定公网域名",
-                        "打开“项目设置”，填写 Cloudflare Tunnel 对应的域名，例如 mcp.example.com。",
-                    ))
+                    problems.append(
+                        (
+                            "没有填写固定公网域名",
+                            "打开“项目设置”，填写 Cloudflare Tunnel 对应的域名，例如 mcp.example.com。",
+                        )
+                    )
                 else:
                     ok_items.append("固定公网域名已经填写")
                 if not get_project_tunnel_token(project.id):
-                    problems.append((
-                        "没有填写 Cloudflare 隧道令牌",
-                        "打开“项目设置”，把 Cloudflare Named Tunnel 的 Token 粘贴到“隧道令牌”。",
-                    ))
+                    problems.append(
+                        (
+                            "没有填写 Cloudflare 隧道令牌",
+                            "打开“项目设置”，把 Cloudflare Named Tunnel 的 Token 粘贴到“隧道令牌”。",
+                        )
+                    )
                 else:
                     ok_items.append("Cloudflare 隧道凭据已经保存")
             elif method == ConnectionMethod.NGROK:
                 if not project.public_hostname:
-                    problems.append((
-                        "没有填写 ngrok 固定域名",
-                        "打开“项目设置”，填写你的 ngrok Reserved Domain。",
-                    ))
+                    problems.append(
+                        (
+                            "没有填写 ngrok 固定域名",
+                            "打开“项目设置”，填写你的 ngrok Reserved Domain。",
+                        )
+                    )
                 if not (shutil.which("ngrok") or shutil.which("ngrok.exe")):
-                    problems.append((
-                        "电脑里没有找到 ngrok",
-                        "如果你没有使用过 ngrok，建议改用 Quick Tunnel；否则请安装 ngrok 并加入 PATH。",
-                    ))
+                    problems.append(
+                        (
+                            "电脑里没有找到 ngrok",
+                            "如果你没有使用过 ngrok，建议改用 Quick Tunnel；否则请安装 ngrok 并加入 PATH。",
+                        )
+                    )
             elif method == ConnectionMethod.QUICK:
-                if not (shutil.which("cloudflared") or Path(self.coord.tunnel.cloudflared).is_file()):
-                    problems.append((
-                        "没有找到 Quick Tunnel 所需的 cloudflared",
-                        "重新安装 MCP DevBridge 正式版；安装包会自带 cloudflared。",
-                    ))
+                if not (
+                    shutil.which("cloudflared") or Path(self.coord.tunnel.cloudflared).is_file()
+                ):
+                    problems.append(
+                        (
+                            "没有找到 Quick Tunnel 所需的 cloudflared",
+                            "重新安装 MCP DevBridge 正式版；安装包会自带 cloudflared。",
+                        )
+                    )
                 else:
                     ok_items.append("Quick Tunnel 所需组件已经就绪")
                 details.append("Quick Tunnel 的地址是临时的；重建后会换地址。")
             else:
                 details.append("“仅本机”不会把这台电脑暴露到互联网。")
                 if project.client_target in {"chatgpt", "gemini"}:
-                    problems.append((
-                        "当前选择了“仅本机”",
-                        "网页端 ChatGPT / Gemini 无法直接访问仅本机地址。到“项目设置”改用 Quick Tunnel、Cloudflare 固定地址或 ngrok。",
-                    ))
+                    problems.append(
+                        (
+                            "当前选择了“仅本机”",
+                            "网页端 ChatGPT / Gemini 无法直接访问仅本机地址。到“项目设置”改用 Quick Tunnel、Cloudflare 固定地址或 ngrok。",
+                        )
+                    )
 
             if project.client_target == "gemini" and not project.gemini_redirect_uri:
-                problems.append((
-                    "Gemini 还缺少 Redirect URI",
-                    "到“项目设置 → Gemini OAuth”，粘贴 Gemini Custom Connected App 提供的 Redirect URI。",
-                ))
+                problems.append(
+                    (
+                        "Gemini 还缺少 Redirect URI",
+                        "到“项目设置 → Gemini OAuth”，粘贴 Gemini Custom Connected App 提供的 Redirect URI。",
+                    )
+                )
 
-            ports = (self._app_config.gateway_port, project.codexpro_port, project.windows_bridge_port)
+            ports = (
+                self._app_config.gateway_port,
+                project.codexpro_port,
+                project.windows_bridge_port,
+            )
             if not all(ports) or len(set(ports)) != 3:
-                problems.append((
-                    "当前项目的内部端口配置有冲突",
-                    "停止这个项目后，打开“高级设置”，恢复默认端口或改成互不重复的端口。",
-                ))
+                problems.append(
+                    (
+                        "当前项目的内部端口配置有冲突",
+                        "停止这个项目后，打开“高级设置”，恢复默认端口或改成互不重复的端口。",
+                    )
+                )
             else:
                 details.append(
                     f"内部端口：共享 Hub {ports[0]} / 项目服务 {ports[1]} / Windows 控制 {ports[2]}"
@@ -817,48 +868,56 @@ class MainWindow(QMainWindow):
             state = self._project_state(project)
             if state == EngineState.READY:
                 ok_items.append("项目服务正在运行")
-                url = (
-                    self.coord.public_url
-                    if self.coord.public_url
-                    else self._local_url()
-                )
+                url = self.coord.public_url if self.coord.public_url else self._local_url()
                 try:
                     result = run_selftest(url, access_value or None)
                 except Exception as exc:  # noqa: BLE001
                     result = None
-                    problems.append((
-                        "连接测试没有完成",
-                        f"服务已经启动，但自测时出现异常：{exc}。先尝试停止再启动；仍失败时查看“日志 → 运行情况”。",
-                    ))
+                    problems.append(
+                        (
+                            "连接测试没有完成",
+                            f"服务已经启动，但自测时出现异常：{exc}。先尝试停止再启动；仍失败时查看“日志 → 运行情况”。",
+                        )
+                    )
                 if result is not None:
                     if result.ok:
                         ok_items.append("MCP 实际调用测试通过")
                     else:
-                        problems.append((
-                            "MCP 实际调用没有完全通过",
-                            "先停止并重新启动当前项目，再运行诊断。如果仍失败，查看“日志 → 运行情况”和“网络连接”。",
-                        ))
+                        problems.append(
+                            (
+                                "MCP 实际调用没有完全通过",
+                                "先停止并重新启动当前项目，再运行诊断。如果仍失败，查看“日志 → 运行情况”和“网络连接”。",
+                            )
+                        )
             elif state == EngineState.STARTING:
-                problems.append((
-                    "项目还在连接中",
-                    "等待工作台状态变成“可以使用”后，再运行一次诊断。",
-                ))
+                problems.append(
+                    (
+                        "项目还在连接中",
+                        "等待工作台状态变成“可以使用”后，再运行一次诊断。",
+                    )
+                )
             elif state == EngineState.STOPPING:
-                problems.append((
-                    "项目正在停止",
-                    "等待停止完成，再重新启动项目。",
-                ))
+                problems.append(
+                    (
+                        "项目正在停止",
+                        "等待停止完成，再重新启动项目。",
+                    )
+                )
             elif state == EngineState.ERROR:
                 message = unit.message if unit is not None else ""
-                problems.append((
-                    "项目上一次启动失败",
-                    f"先回到工作台重新启动。{('系统记录：' + str(message)) if message else '如果继续失败，请查看“日志 → 运行情况”。'}",
-                ))
+                problems.append(
+                    (
+                        "项目上一次启动失败",
+                        f"先回到工作台重新启动。{('系统记录：' + str(message)) if message else '如果继续失败，请查看“日志 → 运行情况”。'}",
+                    )
+                )
             else:
-                problems.append((
-                    "项目还没有启动",
-                    "回到工作台点击“启动服务”。状态变成“可以使用”后再运行诊断。",
-                ))
+                problems.append(
+                    (
+                        "项目还没有启动",
+                        "回到工作台点击“启动服务”。状态变成“可以使用”后再运行诊断。",
+                    )
+                )
 
             peer = SecretsStore().get(HUB_PEER_SECRET_KEY)
             if self._app_config.hub_url and peer:
@@ -870,25 +929,31 @@ class MainWindow(QMainWindow):
             ]
             if remote_views:
                 online = sum(1 for view in remote_views if view.online)
-                details.append(f"Multi-Device Hub：已配对 {len(remote_views)} 台远程电脑，其中 {online} 台在线")
+                details.append(
+                    f"Multi-Device Hub：已配对 {len(remote_views)} 台远程电脑，其中 {online} 台在线"
+                )
 
             lines: list[str] = []
             if problems:
-                lines.extend([
-                    "需要处理后再使用",
-                    f"发现 {len(problems)} 个需要处理的问题。按下面顺序操作即可：",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "需要处理后再使用",
+                        f"发现 {len(problems)} 个需要处理的问题。按下面顺序操作即可：",
+                        "",
+                    ]
+                )
                 for index, (title, action) in enumerate(problems, 1):
                     lines.append(f"{index}. {title}")
                     lines.append(f"   怎么做：{action}")
                     lines.append("")
             else:
-                lines.extend([
-                    "可以正常使用",
-                    "没有发现会阻止 ChatGPT / Gemini 使用当前项目的问题。",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "可以正常使用",
+                        "没有发现会阻止 ChatGPT / Gemini 使用当前项目的问题。",
+                        "",
+                    ]
+                )
 
             if ok_items:
                 lines.append("已经正常的项目")
@@ -987,7 +1052,9 @@ class MainWindow(QMainWindow):
         hub_v = QVBoxLayout(hub_box)
         hub_v.setContentsMargins(14, 18, 14, 14)
         hub_v.setSpacing(8)
-        hub_text = QLabel("把主 Hub 的 MCP 地址和下面的 6 位配对码发给另一台电脑。配对码 10 分钟内有效，只能使用一次。")
+        hub_text = QLabel(
+            "把主 Hub 的 MCP 地址和下面的 6 位配对码发给另一台电脑。配对码 10 分钟内有效，只能使用一次。"
+        )
         hub_text.setWordWrap(True)
         hub_text.setObjectName("MutedText")
         hub_v.addWidget(hub_text)
@@ -1026,10 +1093,16 @@ class MainWindow(QMainWindow):
         connected_v.setContentsMargins(14, 18, 14, 14)
         self.device_table = QTableWidget(0, 4)
         self.device_table.setHorizontalHeaderLabels(["电脑", "状态", "公网 MCP 地址", "操作"])
-        self.device_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.device_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.device_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
         self.device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.device_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.device_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
         self.device_table.verticalHeader().setVisible(False)
         self.device_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         connected_v.addWidget(self.device_table)
@@ -1104,7 +1177,10 @@ class MainWindow(QMainWindow):
         if selected is not None:
             return selected
         projects = self.pm.list()
-        ready = next((project for project in projects if self._project_state(project) == EngineState.READY), None)
+        ready = next(
+            (project for project in projects if self._project_state(project) == EngineState.READY),
+            None,
+        )
         return ready or (projects[0] if projects else None)
 
     def _public_hub_for_pairing(self) -> tuple[str, str] | None:
@@ -1119,6 +1195,7 @@ class MainWindow(QMainWindow):
             return None
         bearer = _hub_access_token(ensure=True)
         return (self.coord.public_url, bearer) if bearer else None
+
     def _join_remote_hub(self) -> None:
         hub_raw = self.hub_url_edit.text().strip()
         pair_code = self.hub_pair_edit.text().strip()
@@ -1169,7 +1246,9 @@ class MainWindow(QMainWindow):
                     )
                     payload = response.json()
                     if response.status_code >= 400 or not payload.get("ok"):
-                        raise RuntimeError(str(payload.get("message") or f"HTTP {response.status_code}"))
+                        raise RuntimeError(
+                            str(payload.get("message") or f"HTTP {response.status_code}")
+                        )
                     return {"hub_mcp": hub_mcp, "peer": str(payload.get("peer_secret") or "")}
                 except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                     last_error = exc
@@ -1274,7 +1353,9 @@ class MainWindow(QMainWindow):
             name = f"{view.name}（本机）" if view.local else view.name
             self.device_table.setItem(row, 0, QTableWidgetItem(name))
             self.device_table.setItem(row, 1, QTableWidgetItem("在线" if view.online else "离线"))
-            address = self.coord.public_url if view.local and self.coord.public_url else view.endpoint_url
+            address = (
+                self.coord.public_url if view.local and self.coord.public_url else view.endpoint_url
+            )
             self.device_table.setItem(row, 2, QTableWidgetItem(address or "—"))
             if view.local:
                 action = QLabel("—")
@@ -1282,7 +1363,11 @@ class MainWindow(QMainWindow):
                 self.device_table.setCellWidget(row, 3, action)
             else:
                 btn = QPushButton("移除")
-                btn.clicked.connect(lambda _checked=False, did=view.id, n=view.name: self._remove_remote_device(did, n))
+                btn.clicked.connect(
+                    lambda _checked=False, did=view.id, n=view.name: self._remove_remote_device(
+                        did, n
+                    )
+                )
                 self.device_table.setCellWidget(row, 3, btn)
 
     def _build_manual_tab(self) -> None:
@@ -1351,7 +1436,9 @@ class MainWindow(QMainWindow):
             self.manual_list.setCurrentRow(0)
             self._show_manual_topic(0)
         else:
-            self.manual_browser.setHtml("<h3>没有找到相关内容</h3><p>换一个更短的关键词试试，例如“Quick”“多设备”或“诊断”。</p>")
+            self.manual_browser.setHtml(
+                "<h3>没有找到相关内容</h3><p>换一个更短的关键词试试，例如“Quick”“多设备”或“诊断”。</p>"
+            )
             self.manual_prev.setEnabled(False)
             self.manual_next.setEnabled(False)
 
@@ -1405,11 +1492,15 @@ class MainWindow(QMainWindow):
         self._app_config.close_behavior = "exit" if value == "exit" else "tray"
         save_app_config(self._app_config)
 
-    def _flash_button_success(self, button: QPushButton | QToolButton, text: str = "复制成功") -> None:
+    def _flash_button_success(
+        self, button: QPushButton | QToolButton, text: str = "复制成功"
+    ) -> None:
         original = button.text()
         old_style = button.styleSheet()
         button.setText(text)
-        button.setStyleSheet("background:#dcfce7;color:#15803d;border:1px solid #86efac;font-weight:600;")
+        button.setStyleSheet(
+            "background:#dcfce7;color:#15803d;border:1px solid #86efac;font-weight:600;"
+        )
         QTimer.singleShot(1300, lambda: (button.setText(original), button.setStyleSheet(old_style)))
 
     def _copy_with_feedback(self, button: QPushButton | QToolButton, text: str) -> None:
@@ -1472,7 +1563,9 @@ class MainWindow(QMainWindow):
         install_btn = buttons.addButton("下载并安装", QDialogButtonBox.ButtonRole.AcceptRole)
         cancel_btn = buttons.addButton("稍后", QDialogButtonBox.ButtonRole.RejectRole)
         cancel_btn.clicked.connect(dialog.reject)
-        install_btn.clicked.connect(lambda: (dialog.accept(), self._download_and_install_update(info)))
+        install_btn.clicked.connect(
+            lambda: (dialog.accept(), self._download_and_install_update(info))
+        )
         layout.addWidget(buttons)
         dialog.exec()
 
@@ -1600,7 +1693,9 @@ class MainWindow(QMainWindow):
         row.addWidget(self.audit_success_combo)
         row.addWidget(self.audit_refresh_btn)
         audit_v.addLayout(row)
-        self.audit_empty = QLabel("还没有 AI 操作记录。ChatGPT / Gemini 读取文件、修改代码或执行命令后会出现在这里。")
+        self.audit_empty = QLabel(
+            "还没有 AI 操作记录。ChatGPT / Gemini 读取文件、修改代码或执行命令后会出现在这里。"
+        )
         self.audit_empty.setObjectName("MutedText")
         self.audit_empty.setWordWrap(True)
         audit_v.addWidget(self.audit_empty)
@@ -1621,10 +1716,13 @@ class MainWindow(QMainWindow):
     def _refresh_gateway_log(self) -> None:
         """Show network activity in beginner-friendly language."""
         from datetime import date as _date
+
         path = constants.LOG_DIR / f"gateway-{_date.today().isoformat()}.jsonl"
         self.gw_log_path_label.setToolTip(str(path))
         if not path.exists():
-            self.gw_log_view.setPlainText("还没有网页端连接记录。启动公网服务并从 ChatGPT / Gemini 连接后，这里会出现记录。")
+            self.gw_log_view.setPlainText(
+                "还没有网页端连接记录。启动公网服务并从 ChatGPT / Gemini 连接后，这里会出现记录。"
+            )
             return
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-500:]
@@ -1641,7 +1739,9 @@ class MainWindow(QMainWindow):
                 friendly = self._friendly_gateway_record(record)
                 if friendly:
                     display.append(friendly)
-        self.gw_log_view.setPlainText("\n".join(display[-300:]) if display else "目前没有需要关注的网络连接记录。")
+        self.gw_log_view.setPlainText(
+            "\n".join(display[-300:]) if display else "目前没有需要关注的网络连接记录。"
+        )
         sb = self.gw_log_view.verticalScrollBar()
         if sb:
             sb.setValue(sb.maximum())
@@ -1711,7 +1811,10 @@ class MainWindow(QMainWindow):
                     elif item.text() != value:
                         item.setText(value)
                 svc_btn = table.cellWidget(row, 4)
-                if not isinstance(svc_btn, QPushButton) or str(svc_btn.property("project_id") or "") != view.id:
+                if (
+                    not isinstance(svc_btn, QPushButton)
+                    or str(svc_btn.property("project_id") or "") != view.id
+                ):
                     svc_btn = QPushButton("启动服务")
                     svc_btn.setProperty("project_id", view.id)
                     svc_btn.setProperty("project_root", view.root_path)
@@ -1732,12 +1835,22 @@ class MainWindow(QMainWindow):
                     svc_btn.setText("重新启动")
                 else:
                     svc_btn.setText("启动服务")
-                svc_btn.setEnabled(not busy and state_obj not in (EngineState.STARTING, EngineState.STOPPING))
+                svc_btn.setEnabled(
+                    not busy and state_obj not in (EngineState.STARTING, EngineState.STOPPING)
+                )
                 svc_btn.setToolTip(f"启动或停止 {view.name}")
-            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-            table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-            table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.ResizeToContents
+            )
+            table.horizontalHeader().setSectionResizeMode(
+                2, QHeaderView.ResizeMode.ResizeToContents
+            )
+            table.horizontalHeader().setSectionResizeMode(
+                3, QHeaderView.ResizeMode.ResizeToContents
+            )
+            table.horizontalHeader().setSectionResizeMode(
+                4, QHeaderView.ResizeMode.ResizeToContents
+            )
             if views:
                 table.selectRow(max(self._row_of_root(selected_root), 0))
         finally:
@@ -1837,11 +1950,17 @@ class MainWindow(QMainWindow):
         missing: list[str] = []
         if not find_node():
             missing.append("Node.js")
-        if IS_WINDOWS and any(project.windows_enabled for project in self.pm.list()) and not find_uvx():
+        if (
+            IS_WINDOWS
+            and any(project.windows_enabled for project in self.pm.list())
+            and not find_uvx()
+        ):
             missing.append("uv/uvx")
         if missing:
             self._append_log(
-                "运行组件自检发现缺失：" + "、".join(missing) + "。正式安装包应内置这些组件，请重新安装最新版。"
+                "运行组件自检发现缺失："
+                + "、".join(missing)
+                + "。正式安装包应内置这些组件，请重新安装最新版。"
             )
         else:
             platform_name = "Windows" if IS_WINDOWS else "Linux/SteamOS"
@@ -1856,7 +1975,10 @@ class MainWindow(QMainWindow):
         def work() -> list[str]:
             shell_info = get_shell_info()
             default = cast(dict[str, Any], shell_info.get("default") or {})
-            detected = [str(s.get("name", "")) for s in cast(list[dict[str, Any]], shell_info.get("detected") or [])]
+            detected = [
+                str(s.get("name", ""))
+                for s in cast(list[dict[str, Any]], shell_info.get("detected") or [])
+            ]
             lines = [
                 f"已检测 Shell: {'、'.join(detected) or '（无）'}",
                 f"默认 Shell: {default.get('name')} ({default.get('path')})"
@@ -1874,7 +1996,9 @@ class MainWindow(QMainWindow):
                     continue
                 try:
                     res = _run_program(
-                        exe, [arg], cwd=Path(self._selected_root() or os.getcwd()),
+                        exe,
+                        [arg],
+                        cwd=Path(self._selected_root() or os.getcwd()),
                         timeout_seconds=30,
                     )
                     text = (res.stdout or res.stderr or "").strip().splitlines()
@@ -1889,10 +2013,15 @@ class MainWindow(QMainWindow):
             self.test_btn.setEnabled(True)
             self.env_btn.setEnabled(True)
             ok = all(
-                not line.endswith(("未安装（PATH 中找不到）", "不可执行！")) and "失败（" not in line
+                not line.endswith(("未安装（PATH 中找不到）", "不可执行！"))
+                and "失败（" not in line
                 for line in lines[2:]
             )
-            head = "开发环境检测：工具链就绪，可运行测试/检查命令。" if ok else "开发环境检测：存在缺失或异常项。"
+            head = (
+                "开发环境检测：工具链就绪，可运行测试/检查命令。"
+                if ok
+                else "开发环境检测：存在缺失或异常项。"
+            )
             output = "\n".join([head, *lines])
             if project_id:
                 self._test_outputs[project_id] = output
@@ -1912,7 +2041,11 @@ class MainWindow(QMainWindow):
         if self._loading_project:
             return
         selected = self._selected_root()
-        if self._loaded_project_root and selected and not _same_root(self._loaded_project_root, selected):
+        if (
+            self._loaded_project_root
+            and selected
+            and not _same_root(self._loaded_project_root, selected)
+        ):
             self._save_project_settings(root_override=self._loaded_project_root, show_errors=False)
         self._apply_selected_project()
         self._poll_status()
@@ -1956,7 +2089,9 @@ class MainWindow(QMainWindow):
         self.gemini_id_edit.setText(client_id)
         self._gemini_secret = secret
         self.gemini_secret_edit.setText("•" * 16)
-        self._append_log(f"已更新 {project.display_name or project.root_path} 的 Gemini OAuth 凭据。")
+        self._append_log(
+            f"已更新 {project.display_name or project.root_path} 的 Gemini OAuth 凭据。"
+        )
 
     @staticmethod
     def _copy_text(text: str) -> None:
@@ -2041,6 +2176,7 @@ class MainWindow(QMainWindow):
                 permission_mode=project.permission_mode,
                 execution_profile=PERMISSION_PROFILE.get(project.permission_mode, "full_system"),
                 windows_token=bridge,
+                elevated=bool(IS_WINDOWS and project.permission_mode == "system"),
             )
             if not self.coord.running:
                 options = self._current_options()
@@ -2075,7 +2211,8 @@ class MainWindow(QMainWindow):
                 candidate
                 for candidate in self.pm.list()
                 if candidate.id != project.id
-                and self._project_state(candidate) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
+                and self._project_state(candidate)
+                in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
             ]
             if not remaining and (self.coord.running or self.coord.state == EngineState.ERROR):
                 self.coord.stop()
@@ -2084,7 +2221,9 @@ class MainWindow(QMainWindow):
 
         def done(result: Any) -> None:
             self._set_project_busy(project.id, False)
-            self._append_log(str(result) if not isinstance(result, Exception) else f"停止项目出错：{result}")
+            self._append_log(
+                str(result) if not isinstance(result, Exception) else f"停止项目出错：{result}"
+            )
             self._poll_status()
 
         _run_async(run, done)
@@ -2112,7 +2251,8 @@ class MainWindow(QMainWindow):
             remaining = [
                 candidate
                 for candidate in self.pm.list()
-                if self._project_state(candidate) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
+                if self._project_state(candidate)
+                in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
             ]
             if not remaining and (self.coord.running or self.coord.state == EngineState.ERROR):
                 self.coord.stop()
@@ -2131,7 +2271,11 @@ class MainWindow(QMainWindow):
 
     def _has_active_projects(self) -> bool:
         for project in self.pm.list():
-            if self._project_state(project) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING):
+            if self._project_state(project) in (
+                EngineState.STARTING,
+                EngineState.READY,
+                EngineState.STOPPING,
+            ):
                 return True
         return False
 
@@ -2199,8 +2343,11 @@ class MainWindow(QMainWindow):
                         project.id,
                         codex_token=access[project.id],
                         permission_mode=project.permission_mode,
-                        execution_profile=PERMISSION_PROFILE.get(project.permission_mode, "full_system"),
+                        execution_profile=PERMISSION_PROFILE.get(
+                            project.permission_mode, "full_system"
+                        ),
                         windows_token=bridge,
+                        elevated=bool(IS_WINDOWS and project.permission_mode == "system"),
                     ): project
                     for project in projects
                 }
@@ -2212,7 +2359,9 @@ class MainWindow(QMainWindow):
                     except Exception as exc:  # noqa: BLE001
                         failures.append(f"{project.display_name}: {exc}")
             if not started_ids:
-                raise RuntimeError("没有任何项目成功启动。" + (f" {failures[0]}" if failures else ""))
+                raise RuntimeError(
+                    "没有任何项目成功启动。" + (f" {failures[0]}" if failures else "")
+                )
             if not self.coord.running:
                 self.coord.start(options)
                 if self.coord.state != EngineState.READY:
@@ -2229,7 +2378,9 @@ class MainWindow(QMainWindow):
         def done(result: Any) -> None:
             self._bulk_project_action = None
             self._busy_project_ids.difference_update(project_ids)
-            self._append_log(str(result) if not isinstance(result, Exception) else f"启动所有项目失败：{result}")
+            self._append_log(
+                str(result) if not isinstance(result, Exception) else f"启动所有项目失败：{result}"
+            )
             self._sync_token_ui()
             self._poll_status()
 
@@ -2256,7 +2407,9 @@ class MainWindow(QMainWindow):
                     failures.append(f"共享 Hub: {exc}")
             max_workers = min(len(projects), 8)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(self.pm.stop, project.id): project for project in projects}
+                futures = {
+                    executor.submit(self.pm.stop, project.id): project for project in projects
+                }
                 for future in as_completed(futures):
                     project = futures[future]
                     try:
@@ -2273,7 +2426,9 @@ class MainWindow(QMainWindow):
         def done(result: Any) -> None:
             self._bulk_project_action = None
             self._busy_project_ids.difference_update(project_ids)
-            self._append_log(str(result) if not isinstance(result, Exception) else f"停止所有项目出错：{result}")
+            self._append_log(
+                str(result) if not isinstance(result, Exception) else f"停止所有项目出错：{result}"
+            )
             self._poll_status()
 
         _run_async(run, done)
@@ -2291,6 +2446,7 @@ class MainWindow(QMainWindow):
 
     def _lookup_workspace_credential(self, project_id: str) -> str | None:
         return get_project_access_token(project_id)
+
     # -------------------------------------------------- service control
     def _toggle_service_for(self, project_root: str) -> None:
         project = self.pm.by_root(project_root)
@@ -2302,11 +2458,11 @@ class MainWindow(QMainWindow):
         if unit is not None and unit.state == EngineState.READY:
             self._stop_project_engine_for(project)
             return
-        if self._require_start_confirmations([project]):
-            return
         if not self._save_project_settings(show_errors=True):
             return
         project = self.pm.get(project.id) or project
+        if self._require_start_confirmations([project]):
+            return
         self._start_project_engine_for(project)
 
     def _current_options(self) -> StartOptions:
@@ -2316,6 +2472,7 @@ class MainWindow(QMainWindow):
             tunnel_token=self._tunnel_token_value(),
             gateway_port=self._app_config.gateway_port,
         )
+
     def _tunnel_token_value(self) -> str | None:
         field = self.cf_token_edit.text().strip()
         return field or self._tunnel_token_default or None
@@ -2343,7 +2500,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "完全访问模式风险确认",
-                "\"完全访问\"模式下 AI 可读写项目目录之外的文件、执行任意命令（含系统级命令）等高风险操作。\n"
+                '"完全访问"模式下 AI 可读写项目目录之外的文件、执行任意命令（含系统级命令）等高风险操作。\n'
                 "请确认您理解风险后继续（仅首次确认，之后不再提示）。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -2352,6 +2509,20 @@ class MainWindow(QMainWindow):
             self._app_config.first_system_risk_accepted = True
             self._app_config.full_system_risk_accepted = True
             save_app_config(self._app_config)
+        if needs_system and IS_WINDOWS:
+            try:
+                from .elevation import get_elevation_controller
+
+                if not get_elevation_controller().ensure_registered(interactive=True):
+                    QMessageBox.warning(
+                        self,
+                        "管理员执行授权未完成",
+                        "完全访问需要一次 Windows UAC 授权来注册高权限 broker。未完成授权时不会伪装成管理员执行。",
+                    )
+                    return True
+            except Exception as exc:
+                QMessageBox.warning(self, "管理员执行授权失败", str(exc))
+                return True
         return False
 
     def _save_git_settings(self) -> None:
@@ -2368,10 +2539,13 @@ class MainWindow(QMainWindow):
             project
             for project in projects
             if self._is_project_busy(project.id)
-            or self._project_state(project) in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
+            or self._project_state(project)
+            in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
         ]
         if active or self.coord.running:
-            QMessageBox.warning(self, "项目正在运行", "请先停止所有项目，再批量保存连接与权限设置。")
+            QMessageBox.warning(
+                self, "项目正在运行", "请先停止所有项目，再批量保存连接与权限设置。"
+            )
             return
         if not self._save_project_settings(show_errors=True):
             return
@@ -2391,7 +2565,9 @@ class MainWindow(QMainWindow):
             else:
                 clear_project_tunnel_token(target.id)
         self._append_log(f"已将连接与权限设置保存到 {len(projects)} 个项目。")
-        QMessageBox.information(self, "批量保存完成", f"连接与权限已同步到 {len(projects)} 个项目。")
+        QMessageBox.information(
+            self, "批量保存完成", f"连接与权限已同步到 {len(projects)} 个项目。"
+        )
         self._refresh_project_list()
 
     def _save_project_settings(
@@ -2484,7 +2660,9 @@ class MainWindow(QMainWindow):
                 f"共享 Hub 端口 {port} 已被占用。\n请关闭占用程序，或改用其他端口。",
             )
         else:
-            QMessageBox.information(self, "端口检测", f"共享 Hub 端口 {port} 当前空闲，可以正常使用。")
+            QMessageBox.information(
+                self, "端口检测", f"共享 Hub 端口 {port} 当前空闲，可以正常使用。"
+            )
 
     def _restore_default_gateway_port(self) -> None:
         if self.coord.running:
@@ -2525,7 +2703,9 @@ class MainWindow(QMainWindow):
         legacy_spin.setRange(1, 65535)
         legacy_spin.setValue(self._app_config.legacy_backend_port)
         form.addRow("Legacy backend（全局）:", legacy_spin)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
@@ -2533,7 +2713,9 @@ class MainWindow(QMainWindow):
             return
         ports = (self._app_config.gateway_port, codex_spin.value(), windows_spin.value())
         if len(set(ports)) != 3:
-            QMessageBox.warning(self, "端口冲突", "共享 Gateway、当前项目 CodexPro、Windows-MCP 端口必须互不相同。")
+            QMessageBox.warning(
+                self, "端口冲突", "共享 Gateway、当前项目 CodexPro、Windows-MCP 端口必须互不相同。"
+            )
             return
         project.codexpro_port = codex_spin.value()
         project.windows_bridge_port = windows_spin.value()
@@ -2544,7 +2726,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
             return
-        self._append_log(f"{project.display_name} 的项目引擎端口已保存；Gateway 端口仍由共享 Hub 管理。")
+        self._append_log(
+            f"{project.display_name} 的项目引擎端口已保存；Gateway 端口仍由共享 Hub 管理。"
+        )
         self._refresh_project_list()
         self._update_gateway_port_ui()
 
@@ -2552,6 +2736,7 @@ class MainWindow(QMainWindow):
         if not self.coord.running and port_in_use(options.gateway_port):
             return f"共享 Gateway 端口 {options.gateway_port} 已被占用。请先停止占用该端口的程序。"
         return None
+
     # -------------------------------------------------- coordinator events
     def _emit_coord_event(self, state: EngineState, message: str | None) -> None:
         self._signals.coord_event.emit(state, message)
@@ -2563,6 +2748,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------- status / URL
     def _local_url(self) -> str:
         return f"http://127.0.0.1:{self._app_config.gateway_port}{constants.DEFAULT_MCP_PATH}"
+
     def _display_url(self) -> str:
         project = self._project_config()
         if self.coord.public_url:
@@ -2620,7 +2806,9 @@ class MainWindow(QMainWindow):
         editable = bool(
             selected is not None and not busy and state in (EngineState.IDLE, EngineState.ERROR)
         )
-        self.gateway_port_spin.setEnabled(not self.coord.running and not self._has_active_projects())
+        self.gateway_port_spin.setEnabled(
+            not self.coord.running and not self._has_active_projects()
+        )
         for widget in (
             self.advanced_btn,
             self.permission_combo,
@@ -2681,7 +2869,9 @@ class MainWindow(QMainWindow):
 
     def _regenerate_token(self) -> None:
         if self._has_active_projects() or self.coord.running:
-            QMessageBox.warning(self, "Hub 正在运行", "请先停止所有项目，再重新生成共享 Hub 访问令牌。")
+            QMessageBox.warning(
+                self, "Hub 正在运行", "请先停止所有项目，再重新生成共享 Hub 访问令牌。"
+            )
             return
         self._append_log("正在重新生成共享 Hub 访问令牌…")
 
@@ -2697,6 +2887,7 @@ class MainWindow(QMainWindow):
             self._append_log("已重新生成共享 Hub 访问令牌；所有项目仍使用各自内部引擎凭据。")
 
         _run_async(run, done)
+
     def _run_selftest(self) -> None:
         project = self._project_config()
         if project is None:
@@ -2720,7 +2911,9 @@ class MainWindow(QMainWindow):
             if isinstance(result, Exception):
                 output = f"自测异常：{result}"
             else:
-                lines = [f"{'✔' if s['ok'] else '✘'}  {s['step']}：{s['detail']}" for s in result.steps]
+                lines = [
+                    f"{'✔' if s['ok'] else '✘'}  {s['step']}：{s['detail']}" for s in result.steps
+                ]
                 output = "\n".join(lines) if lines else "（无步骤）"
                 if result.ok:
                     self._append_log("共享 Hub 连接自测通过")
@@ -2731,6 +2924,7 @@ class MainWindow(QMainWindow):
                 self.test_output.setText(output)
 
         _run_async(run, done)
+
     def _append_log(self, text: str) -> None:
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_text.appendPlainText(f"[{now}] {text}")
@@ -2739,16 +2933,32 @@ class MainWindow(QMainWindow):
 
     def _friendly_tool_name(self, name: str) -> str:
         labels = {
-            "read_file": "读取文件", "read_files": "读取多个文件", "write_file": "写入文件",
-            "replace_text": "修改文件内容", "apply_patch": "应用代码补丁", "delete_path": "删除文件/目录",
-            "list_directory": "查看目录", "search_files": "搜索文件", "search_text": "搜索代码内容",
-            "run_command": "执行命令", "run_program": "运行程序", "start_process": "启动后台进程",
-            "stop_process": "停止后台进程", "git_status": "查看 Git 状态", "git_diff": "查看代码差异",
-            "git_commit": "提交 Git", "git_push": "推送 Git", "git_restore": "恢复 Git 文件",
-            "devbridge_list_workspaces": "查看项目列表", "devbridge_switch_workspace": "显式项目覆盖",
-            "devbridge_list_devices": "查看电脑列表", "devbridge_switch_device": "切换电脑",
-            "get_task": "查看任务", "wait_task": "等待任务",
-            "list_tasks": "查看任务列表", "cancel_task": "取消任务",
+            "read_file": "读取文件",
+            "read_files": "读取多个文件",
+            "write_file": "写入文件",
+            "replace_text": "修改文件内容",
+            "apply_patch": "应用代码补丁",
+            "delete_path": "删除文件/目录",
+            "list_directory": "查看目录",
+            "search_files": "搜索文件",
+            "search_text": "搜索代码内容",
+            "run_command": "执行命令",
+            "run_program": "运行程序",
+            "start_process": "启动后台进程",
+            "stop_process": "停止后台进程",
+            "git_status": "查看 Git 状态",
+            "git_diff": "查看代码差异",
+            "git_commit": "提交 Git",
+            "git_push": "推送 Git",
+            "git_restore": "恢复 Git 文件",
+            "devbridge_list_workspaces": "查看项目列表",
+            "devbridge_switch_workspace": "显式项目覆盖",
+            "devbridge_list_devices": "查看电脑列表",
+            "devbridge_switch_device": "切换电脑",
+            "get_task": "查看任务",
+            "wait_task": "等待任务",
+            "list_tasks": "查看任务列表",
+            "cancel_task": "取消任务",
             "shell_self_test": "检查开发环境",
         }
         return labels.get(name, name.replace("_", " ") or "未知操作")
@@ -2816,7 +3026,7 @@ class MainWindow(QMainWindow):
         else:
             message = f"收到网络请求：{path or '/'}"
         if status >= 400 or record.get("error"):
-            message += f" 结果：失败（{record.get('error') or 'HTTP '+str(status)}）"
+            message += f" 结果：失败（{record.get('error') or 'HTTP ' + str(status)}）"
         elif status:
             message += " 结果：正常。"
         return f"[{when}] {message}"
@@ -2892,12 +3102,26 @@ class MainWindow(QMainWindow):
         self.audit_view.setRowCount(len(records))
         for row, record in enumerate(records):
             duration = record.get("duration_ms", "")
-            self.audit_view.setItem(row, 0, QTableWidgetItem(str(record.get("timestamp", ""))[11:19]))
-            self.audit_view.setItem(row, 1, QTableWidgetItem(self._friendly_tool_name(str(record.get("tool_name", "")))))
-            self.audit_view.setItem(row, 2, QTableWidgetItem("成功" if record.get("success") else "失败"))
-            self.audit_view.setItem(row, 3, QTableWidgetItem(f"{duration} ms" if duration != "" else "—"))
-            self.audit_view.setItem(row, 4, QTableWidgetItem(self._friendly_client_name(str(record.get("client_name", "")))))
-            self.audit_view.setItem(row, 5, QTableWidgetItem(self._friendly_parameters(record.get("parameter_summary"))))
+            self.audit_view.setItem(
+                row, 0, QTableWidgetItem(str(record.get("timestamp", ""))[11:19])
+            )
+            self.audit_view.setItem(
+                row, 1, QTableWidgetItem(self._friendly_tool_name(str(record.get("tool_name", ""))))
+            )
+            self.audit_view.setItem(
+                row, 2, QTableWidgetItem("成功" if record.get("success") else "失败")
+            )
+            self.audit_view.setItem(
+                row, 3, QTableWidgetItem(f"{duration} ms" if duration != "" else "—")
+            )
+            self.audit_view.setItem(
+                row,
+                4,
+                QTableWidgetItem(self._friendly_client_name(str(record.get("client_name", "")))),
+            )
+            self.audit_view.setItem(
+                row, 5, QTableWidgetItem(self._friendly_parameters(record.get("parameter_summary")))
+            )
         self.audit_view.setColumnWidth(0, 70)
         self.audit_view.setColumnWidth(1, 120)
         self.audit_view.setColumnWidth(2, 60)
@@ -2923,7 +3147,11 @@ class MainWindow(QMainWindow):
             return
         request_file.unlink(missing_ok=True)
         raw_project_roots = payload.get("project_roots") or []
-        project_roots = [str(item).strip() for item in raw_project_roots if str(item).strip()] if isinstance(raw_project_roots, list) else []
+        project_roots = (
+            [str(item).strip() for item in raw_project_roots if str(item).strip()]
+            if isinstance(raw_project_roots, list)
+            else []
+        )
         legacy_root = str(payload.get("project_root") or "").strip()
         if legacy_root and legacy_root not in project_roots:
             project_roots.append(legacy_root)
@@ -2941,7 +3169,9 @@ class MainWindow(QMainWindow):
                 not self._app_config.first_system_risk_accepted
                 or not self._app_config.full_system_risk_accepted
             ):
-                self._append_log(f"升级接力未自动恢复 {project.display_name or project.root_path}：完全访问模式尚未确认。")
+                self._append_log(
+                    f"升级接力未自动恢复 {project.display_name or project.root_path}：完全访问模式尚未确认。"
+                )
                 continue
             targets.append(project)
         if not targets:
@@ -2949,9 +3179,12 @@ class MainWindow(QMainWindow):
             return
         self._select_root(targets[0].root_path)
         self._apply_selected_project()
-        self._append_log(f"检测到升级接力请求，正在平等恢复 {len(targets)} 个运行根；没有入口项目。")
+        self._append_log(
+            f"检测到升级接力请求，正在平等恢复 {len(targets)} 个运行根；没有入口项目。"
+        )
         for project in targets:
             self._start_project_engine_for(project)
+
     # --------------------------------------------------------------- end
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         if (
@@ -2987,6 +3220,11 @@ class MainWindow(QMainWindow):
         def cleanup() -> None:
             self.coord.stop()
             self.pm.stop_all()
+            if IS_WINDOWS:
+                with contextlib.suppress(Exception):
+                    from .elevation import get_elevation_controller
+
+                    get_elevation_controller().shutdown_if_idle()
 
         def done(_result: Any) -> None:
             self.tray_icon.hide()
@@ -2994,7 +3232,9 @@ class MainWindow(QMainWindow):
 
         _run_async(cleanup, done)
 
+
 _APP_LOCK: QLockFile | None = None
+
 
 def main() -> int:
     global _APP_LOCK
@@ -3007,7 +3247,11 @@ def main() -> int:
     if not lock.tryLock(100):
         lock.removeStaleLockFile()
         if not lock.tryLock(100):
-            QMessageBox.information(None, "MCP DevBridge 已在运行", "只能运行一个 MCP DevBridge。请从任务栏或系统托盘打开已运行的窗口。")
+            QMessageBox.information(
+                None,
+                "MCP DevBridge 已在运行",
+                "只能运行一个 MCP DevBridge。请从任务栏或系统托盘打开已运行的窗口。",
+            )
             return 0
     _APP_LOCK = lock
     font = QFont(app.font())

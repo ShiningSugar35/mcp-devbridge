@@ -75,8 +75,16 @@ class _RecoverableUnit:
         execution_profile: str = "developer",
         windows_token: str | None = None,
         windows_enabled: bool = False,
+        elevated: bool = False,
     ) -> None:
-        _ = codex_token, permission_mode, execution_profile, windows_token, windows_enabled
+        _ = (
+            codex_token,
+            permission_mode,
+            execution_profile,
+            windows_token,
+            windows_enabled,
+            elevated,
+        )
         self.start_count += 1
         self.engine_pid += 1
         self.healthy = True

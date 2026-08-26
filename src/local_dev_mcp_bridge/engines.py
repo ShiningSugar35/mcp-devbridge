@@ -315,6 +315,7 @@ def build_codex_env(
         "CODEXPRO_HTTP_TOKEN": token,
         "CODEXPRO_ROOT": root,
         "CODEXPRO_ALLOWED_ROOTS": root,
+        "CODEXPRO_SYSTEM_ACCESS": "1" if mode == "system" else "0",
         "CODEXPRO_WRITE_MODE": write_mode,
         "CODEXPRO_BASH_MODE": bash_mode,
         "CODEXPRO_TOOL_MODE": tool,

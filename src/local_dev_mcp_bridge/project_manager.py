@@ -58,6 +58,7 @@ class _RuntimeStartSpec:
     execution_profile: str = "developer"
     windows_token: str | None = field(default=None, repr=False)
     timeout_seconds: float | None = None
+    elevated: bool = False
 
 
 @dataclass
@@ -83,7 +84,7 @@ class ProjectUnit:
         self.project = project
         base = Path(log_dir or constants.process_log_dir())
         self.log_dir = base / (project.id or "project")
-        self.codex = CodexProManager(
+        self.codex: Any = CodexProManager(
             log_dir=self.log_dir,
             port=project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT,
         )
@@ -128,6 +129,7 @@ class ProjectUnit:
         execution_profile: str = "developer",
         windows_token: str | None = None,
         windows_enabled: bool = False,
+        elevated: bool = False,
     ) -> None:
         """Start this project's engines. Reuses an already-running engine.
 
@@ -137,6 +139,24 @@ class ProjectUnit:
         """
         windows_enabled = bool(windows_enabled and IS_WINDOWS)
         root = str(Path(self.project.root_path).expanduser().resolve())
+        if IS_WINDOWS:
+            from .elevation import ElevatedCodexProManager
+
+            if elevated and not isinstance(self.codex, ElevatedCodexProManager):
+                if self.codex.is_running:
+                    raise SpawnError("必须先停止普通权限 CodexPro，才能切换到高权限 broker。")
+                self.codex = ElevatedCodexProManager(
+                    self.project.id,
+                    log_dir=self.log_dir,
+                    port=self.project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT,
+                )
+            elif not elevated and isinstance(self.codex, ElevatedCodexProManager):
+                if self.codex.is_running:
+                    raise SpawnError("必须先停止高权限 CodexPro，才能降级到普通工作区权限。")
+                self.codex = CodexProManager(
+                    log_dir=self.log_dir,
+                    port=self.project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT,
+                )
         extra_env = None
         if windows_enabled and windows_token:
             extra_env = {
@@ -170,10 +190,19 @@ class ProjectUnit:
         )
 
     def stop(self, timeout_seconds: float = 8.0) -> None:
+        errors: list[Exception] = []
         if self.codex.state != EngineState.IDLE or self.codex.is_running:
-            self.codex.stop(timeout_seconds=timeout_seconds)
+            try:
+                self.codex.stop(timeout_seconds=timeout_seconds)
+            except Exception as exc:  # noqa: BLE001 - stop both engines before surfacing failure
+                errors.append(exc)
         if self.windows.state != EngineState.IDLE or self.windows.is_running:
-            self.windows.stop(timeout_seconds=timeout_seconds)
+            try:
+                self.windows.stop(timeout_seconds=timeout_seconds)
+            except Exception as exc:  # noqa: BLE001 - preserve first lifecycle failure
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
     def log_tail(self, count: int = 200) -> str:
         return self.codex.log_tail(count)
@@ -198,7 +227,13 @@ class ProjectUnit:
             with urllib_request.urlopen(req, timeout=timeout_seconds) as response:
                 status = int(getattr(response, "status", 0) or response.getcode() or 0)
                 payload = json.loads(response.read(64_000).decode("utf-8", errors="replace"))
-        except (OSError, TimeoutError, urllib_error.URLError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            OSError,
+            TimeoutError,
+            urllib_error.URLError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             return False, f"{type(exc).__name__}: {exc}"
         if not 200 <= status < 300 or payload.get("ok") is not True:
             return False, f"healthz status={status} ok={payload.get('ok')!r}"
@@ -230,7 +265,9 @@ class ProjectManager:
         self._supervisor_stop = threading.Event()
         self._supervisor_thread: threading.Thread | None = None
         # Fake-unit tests are deterministic by default; production uses the supervisor.
-        self._supervisor_enabled = unit_factory is None if supervisor_enabled is None else supervisor_enabled
+        self._supervisor_enabled = (
+            unit_factory is None if supervisor_enabled is None else supervisor_enabled
+        )
         # test hook: callable(project) -> ProjectUnit (usually None)
         self._unit_factory = unit_factory
 
@@ -263,7 +300,9 @@ class ProjectManager:
 
         return get_project(root)
 
-    def add(self, root: str, *, display_name: str = "", permission_mode: str = "system") -> ProjectConfig:
+    def add(
+        self, root: str, *, display_name: str = "", permission_mode: str = "system"
+    ) -> ProjectConfig:
         """Register a new project (assign id + ports, persist)."""
         from .config_store import suggest_commands
 
@@ -437,6 +476,7 @@ class ProjectManager:
             execution_profile=spec.execution_profile or "developer",
             windows_token=spec.windows_token,
             windows_enabled=project.windows_enabled and bool(spec.windows_token),
+            elevated=spec.elevated,
         )
         if not unit.wait_ready(timeout_seconds=spec.timeout_seconds):
             unit.stop()
@@ -522,6 +562,7 @@ class ProjectManager:
         execution_profile: str = "developer",
         windows_token: str | None = None,
         timeout_seconds: float | None = None,
+        elevated: bool = False,
     ) -> ProjectView:
         """Start one project's engines and arm in-memory crash recovery."""
         lock = self._operation_lock(project_id)
@@ -536,6 +577,7 @@ class ProjectManager:
                 execution_profile=execution_profile or "developer",
                 windows_token=windows_token,
                 timeout_seconds=timeout_seconds,
+                elevated=elevated,
             )
             view = self._start_unit_from_spec(project, spec)
             with self._lock:
@@ -558,10 +600,18 @@ class ProjectManager:
     def stop_all(self) -> None:
         with self._lock:
             project_ids = list(self._units)
+        errors: list[Exception] = []
         for project_id in project_ids:
-            self.stop(project_id)
+            try:
+                self.stop(project_id)
+            except Exception as exc:  # noqa: BLE001 - stop every project before surfacing failure
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
-    def start_enabled(self, *, codex_token: str, windows_token: str | None = None) -> list[ProjectView]:
+    def start_enabled(
+        self, *, codex_token: str, windows_token: str | None = None
+    ) -> list[ProjectView]:
         """Auto-restore: start engines of every enabled project in parallel."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -577,7 +627,12 @@ class ProjectManager:
                     self.start,
                     p.id,
                     codex_token=codex_token,
+                    permission_mode=p.permission_mode,
+                    execution_profile="full_system"
+                    if p.permission_mode == "system"
+                    else "developer",
                     windows_token=windows_token,
+                    elevated=bool(IS_WINDOWS and p.permission_mode == "system"),
                 ): p
                 for p in enabled_projects
             }

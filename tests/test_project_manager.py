@@ -60,18 +60,22 @@ class _FakeUnit:
         execution_profile: str = "developer",
         windows_token: str | None = None,
         windows_enabled: bool = False,
+        elevated: bool = False,
     ) -> None:
         self.calls.append(
             {
                 "permission_mode": permission_mode,
                 "windows_enabled": windows_enabled,
                 "windows_token": windows_token,
+                "elevated": elevated,
             }
         )
         self.codex.started = True
         self.windows.started = windows_enabled
         if windows_enabled and self.windows.port == 0:
-            self.windows.port = self.project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT
+            self.windows.port = (
+                self.project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT
+            )
         self._state = EngineState.READY
 
     def wait_ready(self, timeout_seconds: float | None = None) -> bool:
@@ -79,7 +83,10 @@ class _FakeUnit:
 
     def data_plane_health(self, token: str, timeout_seconds: float = 2.0) -> tuple[bool, str]:
         _ = token, timeout_seconds
-        return self._state == EngineState.READY, "ok" if self._state == EngineState.READY else "not ready"
+        return (
+            self._state == EngineState.READY,
+            "ok" if self._state == EngineState.READY else "not ready",
+        )
 
     def stop(self, timeout_seconds: float = 8.0) -> None:
         self._state = EngineState.IDLE
@@ -175,6 +182,7 @@ def test_legacy_per_project_gateway_port_is_ignored(tmp_path: Path) -> None:
     finally:
         os.environ.pop("LOCALDEV_MCP_CONFIG_DIR", None)
 
+
 def test_duplicate_add_returns_existing(manager: tuple[ProjectManager, Path]) -> None:
     pm, tmp = manager
     proj_a = pm.add(str(tmp / "projA"))
@@ -202,6 +210,36 @@ def test_start_uses_project_permission(manager: tuple[ProjectManager, Path]) -> 
     assert unit is not None
     assert unit.calls[0]["permission_mode"] == "system"
     assert unit.windows.started is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows elevation manager only")
+def test_project_unit_permission_downgrade_replaces_elevated_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_dev_mcp_bridge.elevation import ElevatedCodexProManager
+    from local_dev_mcp_bridge.engines import CodexProManager
+    from local_dev_mcp_bridge.project_manager import ProjectUnit
+
+    root = tmp_path / "project"
+    root.mkdir()
+    project = ProjectConfig(
+        id="downgrade-test",
+        display_name="downgrade-test",
+        root_path=str(root),
+        permission_mode="workspace",
+        codexpro_port=18787,
+        windows_bridge_port=28731,
+    )
+    unit = ProjectUnit(project, log_dir=tmp_path / "logs")
+    unit.codex = ElevatedCodexProManager(
+        project.id,
+        log_dir=tmp_path / "logs",
+        port=project.codexpro_port,
+    )
+    monkeypatch.setattr(CodexProManager, "start", lambda self, *args, **kwargs: None)
+    unit.start(TOKEN, permission_mode="workspace", elevated=False)
+    assert isinstance(unit.codex, CodexProManager)
+    assert not isinstance(unit.codex, ElevatedCodexProManager)
 
 
 def test_windows_starts_only_when_enabled_and_token(manager: tuple[ProjectManager, Path]) -> None:

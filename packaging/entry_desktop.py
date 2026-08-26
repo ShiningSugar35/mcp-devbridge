@@ -1,14 +1,15 @@
-"""PyInstaller entry wrapper — absolute imports so the frozen app can start.
-
-desktop_main.py uses relative imports (``from . import ...``); freezing it
-directly as the spec entry makes it a top-level ``__main__`` without a package
-and the relative imports fail. This module is a plain script that imports the
-package normally.
-"""
+"""PyInstaller entry wrapper — absolute imports so the frozen app can start."""
 
 import sys
 
-from local_dev_mcp_bridge.desktop_main import main
+if "--elevated-broker" in sys.argv or "--register-elevated-broker-task" in sys.argv:
+    from local_dev_mcp_bridge.elevation import broker_main
+    from local_dev_mcp_bridge.elevation import main as elevation_main
 
-if __name__ == "__main__":
-    sys.exit(main())
+    if __name__ == "__main__":
+        sys.exit(broker_main() if "--elevated-broker" in sys.argv else elevation_main())
+else:
+    from local_dev_mcp_bridge.desktop_main import main
+
+    if __name__ == "__main__":
+        sys.exit(main())

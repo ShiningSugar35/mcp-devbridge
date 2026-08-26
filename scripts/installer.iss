@@ -1,10 +1,10 @@
-﻿; Inno Setup script for MCP DevBridge
+; Inno Setup script for MCP DevBridge
 ; Compile with ISCC.exe (Inno Setup 6):  ISCC scripts\installer.iss
 ; Expects PyInstaller output in dist\MCPDevBridge
 
 #define MyAppName "MCP DevBridge"
 #define MyAppId "1A2B3C4D-5E6F-4A8B-9C0D-1E2F3A4B5C6D"
-#define MyAppVersion "0.8.7"
+#define MyAppVersion "0.8.8"
 #define MyAppPublisher "MCP DevBridge"
 #define MyAppExeName "MCPDevBridge.exe"
 #ifndef MySourceDir

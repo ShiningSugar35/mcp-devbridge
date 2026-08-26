@@ -13,6 +13,7 @@ export const MIN_HTTP_TOKEN_BYTES = 24;
 export interface CodexProConfig {
   defaultRoot: string;
   allowedRoots: string[];
+  systemAccess: boolean;
   host: string;
   port: number;
   widgetDomain: string;
@@ -305,6 +306,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   return {
     defaultRoot,
     allowedRoots,
+    systemAccess: boolFrom(process.env.CODEXPRO_SYSTEM_ACCESS, false),
     host,
     port: numberFrom(portArg ?? process.env.CODEXPRO_PORT ?? process.env.PORT, 8787, 1, 65535),
     widgetDomain: widgetDomainFrom(widgetDomainArg ?? process.env.CODEXPRO_WIDGET_DOMAIN),

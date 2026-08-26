@@ -169,6 +169,17 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
     monkeypatch.setattr(window.pm, "start", lambda project_id, **_kwargs: started.append(project_id))
     monkeypatch.setattr(window.pm, "stop", lambda project_id: stopped.append(project_id))
+    if IS_WINDOWS:
+        import local_dev_mcp_bridge.elevation as elevation
+
+        class FakeElevationController:
+            def ensure_registered(self, *, interactive: bool) -> bool:
+                assert interactive is True
+                return True
+
+        monkeypatch.setattr(
+            elevation, "get_elevation_controller", lambda: FakeElevationController()
+        )
 
     def fake_coord_start(_options) -> None:
         window.coord._state = EngineState.READY

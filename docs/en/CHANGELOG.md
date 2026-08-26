@@ -2,6 +2,16 @@
 
 All dates are local development dates.
 
+## 0.8.8 (2026-08-26) — explicit workspace context and authorized Windows elevation
+
+- Make the shared Gateway a true multi-root dispatcher instead of a hidden current-workspace owner. `open_workspace` keeps the opaque CodexPro workspace handle and also returns the DevBridge route id; explicit task/path/handle evidence wins over legacy soft affinity, and bootstrap fallback is never reported as the current workspace.
+- Fix relative-path routing after `open_workspace`: a valid opaque workspace handle scopes relative follow-ups to that workspace instead of re-running cross-root ambiguity resolution. Independent legacy client affinities remain bounded and isolated.
+- Give `system/full_system` its intended filesystem semantics: the workspace is the default cwd/context rather than a filesystem boundary, while read-only/workspace modes retain canonical containment and system mode retains blocked-path, symlink-write, secret-redaction and destructive-command guards.
+- Add a Windows elevated broker based on one explicit UAC authorization plus a `RunLevel Highest` Task Scheduler entry. The desktop remains `asInvoker`; later full-system commands and CodexPro engines run through the authenticated loopback broker without per-command UAC prompts. No UAC bypass or UAC disablement is used.
+- Harden the elevation lifecycle against privilege retention and startup/stop races: permission downgrade replaces an elevated manager with a normal one, broker startup is serialized across bulk-start workers, stop failures cannot be reported as IDLE, broker child enumeration is lock-scoped, and registration elevates the controlled executable rather than executing a writable temporary script.
+- Reduce routing and supervision overhead with a 350 ms active-root snapshot, an O(1) root-to-workspace index, and 250 ms elevated-status IPC coalescing. Keep workspace/affinity/request/output state explicitly bounded.
+- Add routing, full-system, elevation, permission-downgrade, concurrency, negative-security and release regressions; clean historical build intermediates and keep generated `.ai-bridge` runtime state out of release commits.
+
 ## 0.8.7 (2026-08-26) — stateless MCP and idle-502 self-healing
 
 - Upgrade the bundled CodexPro fork from monolithic MCP SDK v1 to the stable v2 packages (`@modelcontextprotocol/client`, `@modelcontextprotocol/server`, `@modelcontextprotocol/node`) plus Zod 4, using the official codemod followed by manual API migration.

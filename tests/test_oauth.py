@@ -157,6 +157,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Env:
 
 # ------------------------------------------------------------ 元数据
 
+
 def test_metadata_authorization_server(env: _Env) -> None:
     r = env.client.get("/.well-known/oauth-authorization-server")
     assert r.status_code == 200
@@ -187,6 +188,7 @@ def test_health(env: _Env) -> None:
 
 
 # ------------------------------------------------------ 动态注册
+
 
 def test_register_public_client(env: _Env) -> None:
     # register_client 内部已断言 201 + client_id
@@ -245,6 +247,7 @@ def test_confidential_client_secret_works(env: _Env) -> None:
 
 
 # ------------------------------------------------------ 授权 + 同意
+
 
 def test_authorize_redirects_to_consent(env: _Env) -> None:
     cid = env.register_client()
@@ -320,6 +323,7 @@ def test_authorize_missing_pkce(env: _Env) -> None:
 
 # ------------------------------------------------------------- 令牌
 
+
 def test_pkce_mismatch_rejected(env: _Env) -> None:
     cid = env.register_client()
     loc = env.authorize(cid).headers["location"]
@@ -383,6 +387,7 @@ def test_expired_refresh_token(env: _Env) -> None:
 
 # -------------------------------------------------------------- 资源
 
+
 def _access(env: _Env) -> str:
     cid = env.register_client()
     loc = env.authorize(cid).headers["location"]
@@ -432,8 +437,10 @@ def test_mcp_proxy_rejects_downstream_error(env: _Env) -> None:
     r = env.consent_allow(loc)
     code = r.headers["location"].split("code=", 1)[1].split("&", 1)[0]
     at = env.token(cid, "authorization_code", code=code).json()["access_token"]
+
     def _fail(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
+
     env.gateway._http = httpx.AsyncClient(transport=httpx.MockTransport(_fail))
     r = env.client.get("/mcp", headers={"Authorization": f"Bearer {at}"})
     assert r.status_code == 500
@@ -469,7 +476,16 @@ def test_initialize_plain_json_rewritten(env: _Env) -> None:
         return httpx.Response(
             200,
             headers={"content-type": "application/json"},
-            content=json.dumps({"result": {"serverInfo": {"name": "CodexPro", "title": "CodexPro"}, "capabilities": {}}, "jsonrpc": "2.0", "id": 1}),
+            content=json.dumps(
+                {
+                    "result": {
+                        "serverInfo": {"name": "CodexPro", "title": "CodexPro"},
+                        "capabilities": {},
+                    },
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                }
+            ),
         )
 
     env.gateway._http = httpx.AsyncClient(transport=httpx.MockTransport(_engine))
@@ -528,11 +544,23 @@ class _MultiWorkspaceEnv:
         calls_b: list[dict] = []
 
         def _handler_a(request: httpx.Request) -> httpx.Response:
-            calls_a.append({"path": request.url.path, "method": request.method, "authorization": request.headers.get("authorization")})
+            calls_a.append(
+                {
+                    "path": request.url.path,
+                    "method": request.method,
+                    "authorization": request.headers.get("authorization"),
+                }
+            )
             return httpx.Response(200, json={"source": "alpha", "ok": True})
 
         def _handler_b(request: httpx.Request) -> httpx.Response:
-            calls_b.append({"path": request.url.path, "method": request.method, "authorization": request.headers.get("authorization")})
+            calls_b.append(
+                {
+                    "path": request.url.path,
+                    "method": request.method,
+                    "authorization": request.headers.get("authorization"),
+                }
+            )
             return httpx.Response(200, json={"source": "beta", "ok": True})
 
         # Mock two CodexPro engines on different ports
@@ -556,10 +584,12 @@ class _MultiWorkspaceEnv:
                 return self.credential_b
             return None
 
-        save_projects([
-            ProjectConfig(id=WORKSPACE_A_ID, display_name="Alpha", root_path=WORKSPACE_A_ROOT),
-            ProjectConfig(id=WORKSPACE_B_ID, display_name="Beta", root_path=WORKSPACE_B_ROOT),
-        ])
+        save_projects(
+            [
+                ProjectConfig(id=WORKSPACE_A_ID, display_name="Alpha", root_path=WORKSPACE_A_ROOT),
+                ProjectConfig(id=WORKSPACE_B_ID, display_name="Beta", root_path=WORKSPACE_B_ROOT),
+            ]
+        )
 
         self.provider = LocalOAuthProvider(
             issuer_url="https://mcp.example.test",
@@ -585,7 +615,7 @@ class _MultiWorkspaceEnv:
 
     def register_and_authorize(self, workspace_id: str = "") -> tuple[str, str, str]:
         """Full flow: register → authorize → consent with workspace → get token.
-        
+
         Returns (access_token, refresh_token, client_id).
         """
         resp = self.client.post(
@@ -690,13 +720,16 @@ def test_refresh_token_preserves_hub_scoped_subject(mw_env: _MultiWorkspaceEnv) 
 def test_generic_oauth_defaults_to_entry_workspace(mw_env: _MultiWorkspaceEnv) -> None:
     at, _, _cid = mw_env.register_and_authorize()
     routed_to: list[int] = []
+
     class _Router(httpx.AsyncHTTPTransport):
         async def handle_async_request(self, request):
             from urllib.parse import urlparse
+
             port = urlparse(str(request.url)).port or 18787
             routed_to.append(port)
             target = mw_env.transport_a if port == 18787 else mw_env.transport_b
             return await target.handle_async_request(request)
+
     mw_env.gateway._http = httpx.AsyncClient(transport=_Router())
     r = mw_env.client.get("/mcp", headers={"Authorization": f"Bearer {at}"})
     assert r.status_code == 200, r.text
@@ -768,12 +801,17 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
     at_a, _, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
 
     # Simulate session A switching to workspace B
-    rpc_switch = json.dumps({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "devbridge_switch_workspace", "arguments": {"project_id": WORKSPACE_B_ID}},
-    })
+    rpc_switch = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "devbridge_switch_workspace",
+                "arguments": {"project_id": WORKSPACE_B_ID},
+            },
+        }
+    )
     # Session "sess-gpt" switches
     r = mw_env.client.post(
         "/mcp",
@@ -787,12 +825,14 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
     assert r.status_code == 200, r.text
 
     # Now session "sess-gpt" get_current_workspace should show B
-    rpc_gcw = json.dumps({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {"name": "devbridge_get_current_workspace", "arguments": {}},
-    })
+    rpc_gcw = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "devbridge_get_current_workspace", "arguments": {}},
+        }
+    )
     r2 = mw_env.client.post(
         "/mcp",
         content=rpc_gcw,
@@ -820,6 +860,7 @@ def test_switch_workspace_session_isolation(mw_env: _MultiWorkspaceEnv) -> None:
     assert r3.status_code == 200
     result3 = json.loads(r3.text)
     text3 = result3["result"]["content"][0]["text"]
+    assert result3["result"]["structuredContent"]["devbridge_workspace_id"] == ""
     assert "未固定工作区" in text3
     assert "所有运行根平等参与自动路由" in text3
     assert "sess-gemini" not in mw_env.gateway._session_workspaces
@@ -846,10 +887,17 @@ def test_switch_workspace_changes_real_proxy_target(mw_env: _MultiWorkspaceEnv) 
         "mcp-session-id": "sess-switch-real",
         "Content-Type": "application/json",
     }
-    switch_rpc = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "devbridge_switch_workspace", "arguments": {"project_id": WORKSPACE_B_ID}},
-    })
+    switch_rpc = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "devbridge_switch_workspace",
+                "arguments": {"project_id": WORKSPACE_B_ID},
+            },
+        }
+    )
     switched = mw_env.client.post("/mcp", content=switch_rpc, headers=headers)
     assert switched.status_code == 200
     routed_to.clear()
@@ -870,12 +918,17 @@ def test_switch_workspace_unknown_project_returns_error(mw_env: _MultiWorkspaceE
     """switch_workspace to non-existent project returns error."""
     at_a, _, _cid = mw_env.register_and_authorize(WORKSPACE_A_ID)
 
-    rpc = json.dumps({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "devbridge_switch_workspace", "arguments": {"project_id": "no-such-project"}},
-    })
+    rpc = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "devbridge_switch_workspace",
+                "arguments": {"project_id": "no-such-project"},
+            },
+        }
+    )
     r = mw_env.client.post(
         "/mcp",
         content=rpc,
@@ -893,6 +946,7 @@ def test_switch_workspace_unknown_project_returns_error(mw_env: _MultiWorkspaceE
 def test_list_workspaces_returns_projects() -> None:
     """list_workspaces tool returns registered projects (or empty list)."""
     from local_dev_mcp_bridge.gateway import OAuthGateway as _GW
+
     # Quick smoke: the method exists and doesn't crash
     gw = _GW(
         public_hostname="test.local",
@@ -933,8 +987,14 @@ def test_tool_names_use_devbridge_prefix() -> None:
     from local_dev_mcp_bridge.gateway import _PYTHON_TOOL_DEFS
 
     ws_tools = [
-        t for t in _PYTHON_TOOL_DEFS
-        if t["name"] in ("devbridge_list_workspaces", "devbridge_get_current_workspace", "devbridge_switch_workspace")
+        t
+        for t in _PYTHON_TOOL_DEFS
+        if t["name"]
+        in (
+            "devbridge_list_workspaces",
+            "devbridge_get_current_workspace",
+            "devbridge_switch_workspace",
+        )
     ]
     assert len(ws_tools) == 3
 
@@ -974,24 +1034,52 @@ def test_tool_analyze_function() -> None:
     c, d = _analyze_tools(json.dumps({"result": {"tools": []}}).encode())
     assert c == 0 and d == []
 
-    c, d = _analyze_tools(json.dumps({"result": {"tools": [
-        {"name": "read"}, {"name": "write"}, {"name": "devbridge_list_workspaces"},
-    ]}}).encode())
+    c, d = _analyze_tools(
+        json.dumps(
+            {
+                "result": {
+                    "tools": [
+                        {"name": "read"},
+                        {"name": "write"},
+                        {"name": "devbridge_list_workspaces"},
+                    ]
+                }
+            }
+        ).encode()
+    )
     assert c == 3 and d == []
 
-    c, d = _analyze_tools(json.dumps({"result": {"tools": [
-        {"name": "read"}, {"name": "read"}, {"name": "write"},
-    ]}}).encode())
+    c, d = _analyze_tools(
+        json.dumps(
+            {
+                "result": {
+                    "tools": [
+                        {"name": "read"},
+                        {"name": "read"},
+                        {"name": "write"},
+                    ]
+                }
+            }
+        ).encode()
+    )
     assert c == 3 and d == ["read"]
 
 
 def test_gateway_merge_no_duplicates() -> None:
     from local_dev_mcp_bridge.gateway import _analyze_tools, _inject_tools
 
-    codexpro = json.dumps({"result": {"tools": [
-        {"name": "read_file"}, {"name": "write_file"},
-        {"name": "list_workspaces"}, {"name": "switch_workspace"},
-    ]}}).encode()
+    codexpro = json.dumps(
+        {
+            "result": {
+                "tools": [
+                    {"name": "read_file"},
+                    {"name": "write_file"},
+                    {"name": "list_workspaces"},
+                    {"name": "switch_workspace"},
+                ]
+            }
+        }
+    ).encode()
     injected = _inject_tools(codexpro)
     count, dupes = _analyze_tools(injected)
     assert dupes == [], f"Collisions: {dupes}"
@@ -1023,7 +1111,6 @@ def test_diag_short_hash() -> None:
     h = _diag_short_hash("test")
     assert h == _diag_short_hash("test") and len(h) == 8
     assert _diag_short_hash("") == ""
-
 
 
 def test_v081_stateless_route_hint_survives_transport_recreation(
@@ -1129,6 +1216,7 @@ def test_v081_gateway_local_tool_reads_mcp_arguments(
         )
 
     monkeypatch.setattr("local_dev_mcp_bridge.gateway.run_command", fake_run)
+    monkeypatch.setattr(mw_env.gateway, "_workspace_permission_mode", lambda _wid: "workspace")
     rpc = {
         "jsonrpc": "2.0",
         "id": 91,
@@ -1193,7 +1281,6 @@ def test_v081_switch_workspace_returns_route_without_transport_session(
     data = json.loads(bytes(response.body))
     assert "error" not in data
     assert data["result"]["structuredContent"]["devbridge_workspace_id"] == WORKSPACE_B_ID
-
 
 
 def test_v082_relative_path_ambiguity_requires_absolute_path(
@@ -1279,6 +1366,9 @@ def test_v082_workspace_handle_affinity_survives_followup_without_path(
     )
     assert opened.status_code == 200, opened.text
     assert routed_to[-1] == 18788
+    opened_payload = json.loads(opened.text)
+    assert opened_payload["result"]["structuredContent"]["workspace_id"] == "ws-beta-child"
+    assert opened_payload["result"]["structuredContent"]["devbridge_workspace_id"] == WORKSPACE_B_ID
 
     followed = mw_env.client.post(
         "/mcp",
@@ -1297,6 +1387,52 @@ def test_v082_workspace_handle_affinity_survives_followup_without_path(
     )
     assert followed.status_code == 200, followed.text
     assert routed_to[-1] == 18788
+
+
+def test_open_workspace_updates_only_matching_legacy_session_soft_anchor(
+    mw_env: _MultiWorkspaceEnv,
+) -> None:
+    """Legacy client sessions may keep independent soft workspace contexts."""
+
+    class _Router(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request):
+            payload = json.loads(request.content.decode("utf-8")) if request.content else {}
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload.get("id"),
+                    "result": {
+                        "content": [{"type": "text", "text": "opened"}],
+                        "structuredContent": {"workspace_id": "ws-session-b"},
+                    },
+                },
+            )
+
+    mw_env.gateway._http = httpx.AsyncClient(transport=_Router())
+    token, _, _cid = mw_env.register_and_authorize()
+    opened = mw_env.client.post(
+        "/mcp",
+        content=json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 301,
+                "method": "tools/call",
+                "params": {
+                    "name": "open_workspace",
+                    "arguments": {"root": os.path.join(WORKSPACE_B_ROOT, "Nested")},
+                },
+            }
+        ),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "mcp-session-id": "legacy-chat-b",
+            "Content-Type": "application/json",
+        },
+    )
+    assert opened.status_code == 200, opened.text
+    assert mw_env.gateway._session_workspaces.get("legacy-chat-b") == WORKSPACE_B_ID
+    assert "other-chat" not in mw_env.gateway._session_workspaces
 
 
 def test_gateway_stateless_upstream_never_forwards_session_headers(
@@ -1442,7 +1578,9 @@ def test_gateway_stateless_upstream_never_replays_session_not_found_404(
     assert events == [("tools/call", "")]
 
 
-def test_gateway_affinity_cache_is_bounded_and_refreshes_recent_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gateway_affinity_cache_is_bounded_and_refreshes_recent_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(gateway_module, "_MAX_AFFINITY_ENTRIES", 2)
     mapping: dict[str, str] = {}
     gateway_module._remember_bounded_affinity(mapping, "a", "A")
