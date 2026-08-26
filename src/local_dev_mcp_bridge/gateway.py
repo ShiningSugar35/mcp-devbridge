@@ -598,7 +598,12 @@ def _tool_arguments(params: Any) -> dict[str, Any]:
 
 
 def _strip_route_arguments(
-    body: bytes, rpc: dict[str, Any] | None, *, keep_workspace: bool
+    body: bytes,
+    rpc: dict[str, Any] | None,
+    *,
+    keep_workspace: bool,
+    drop_workspace_handle: bool = False,
+    tool_name: str = "",
 ) -> bytes:
     if rpc is None or str(rpc.get("method", "")) != "tools/call":
         return body
@@ -608,8 +613,16 @@ def _strip_route_arguments(
     arguments = params.get("arguments")
     if not isinstance(arguments, dict):
         return body
-    if _ROUTE_DEVICE_ARG not in arguments and (
-        keep_workspace or _ROUTE_WORKSPACE_ARG not in arguments
+    nested = arguments.get("args") if tool_name == "codexpro" else None
+    has_workspace_handle = (
+        isinstance(nested, dict) and "workspace_id" in nested
+        if tool_name == "codexpro"
+        else "workspace_id" in arguments
+    )
+    if (
+        _ROUTE_DEVICE_ARG not in arguments
+        and (keep_workspace or _ROUTE_WORKSPACE_ARG not in arguments)
+        and not (drop_workspace_handle and has_workspace_handle)
     ):
         return body
     copied_rpc = dict(rpc)
@@ -618,6 +631,13 @@ def _strip_route_arguments(
     copied_args.pop(_ROUTE_DEVICE_ARG, None)
     if not keep_workspace:
         copied_args.pop(_ROUTE_WORKSPACE_ARG, None)
+    if drop_workspace_handle:
+        if tool_name == "codexpro" and isinstance(nested, dict):
+            copied_nested = dict(nested)
+            copied_nested.pop("workspace_id", None)
+            copied_args["args"] = copied_nested
+        else:
+            copied_args.pop("workspace_id", None)
     copied_params["arguments"] = copied_args
     copied_rpc["params"] = copied_params
     return json.dumps(copied_rpc, ensure_ascii=False).encode("utf-8")
@@ -1037,7 +1057,20 @@ class OAuthGateway:
                 self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
                 return result
 
-        body = _strip_route_arguments(body, rpc, keep_workspace=remote is not None)
+        drop_workspace_handle = bool(
+            remote is None
+            and rpc is not None
+            and jsonrpc_method == "tools/call"
+            and workspace_id
+            and self._workspace_handle_targets_other_root(tool_name, call_arguments, workspace_id)
+        )
+        body = _strip_route_arguments(
+            body,
+            rpc,
+            keep_workspace=remote is not None,
+            drop_workspace_handle=drop_workspace_handle,
+            tool_name=tool_name,
+        )
         return await self._proxy(
             request,
             body,
@@ -1736,6 +1769,17 @@ class OAuthGateway:
         if action == "codexpro":
             return tool_name, arguments
         return action, child_arguments
+
+    def _workspace_handle_targets_other_root(
+        self, tool_name: str, arguments: dict[str, Any], target_workspace: str
+    ) -> bool:
+        _effective_tool, effective_arguments = self._unwrap_codexpro_call(tool_name, arguments)
+        workspace_handle = str(effective_arguments.get("workspace_id") or "").strip()
+        if not workspace_handle:
+            return False
+        with self._session_lock:
+            handle_workspace = self._workspace_handle_roots.get(workspace_handle, "")
+        return handle_workspace != target_workspace
 
     def _infer_workspace_for_call(
         self,

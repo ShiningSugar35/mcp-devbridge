@@ -10,6 +10,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
+import local_dev_mcp_bridge.gateway as gateway_module
 from local_dev_mcp_bridge.config_store import save_projects
 from local_dev_mcp_bridge.gateway import OAuthGateway
 from local_dev_mcp_bridge.models import ProjectConfig
@@ -330,6 +331,81 @@ def test_task_and_path_affinity_override_stale_workspace_handle(
         == "b"
     )
     assert gateway._infer_workspace_for_call("show_changes", {"workspace_id": "ws-a"}) == "a"
+
+
+def test_strong_path_route_strips_stale_opaque_handle_before_upstream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    target_b = root_b / "target.txt"
+    target_b.write_text("b", encoding="utf-8")
+    gateway = _gateway_for_roots(tmp_path, {"a": root_a, "b": root_b})
+    gateway._workspace_handle_roots["ws-a"] = "a"
+    arguments = {"workspace_id": "ws-a", "path": str(target_b)}
+
+    target = gateway._infer_workspace_for_call("read", arguments)
+    assert target == "b"
+    assert gateway._workspace_handle_targets_other_root("read", arguments, target) is True
+
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "read", "arguments": arguments},
+    }
+    sanitized = gateway_module._strip_route_arguments(
+        json.dumps(rpc).encode("utf-8"),
+        rpc,
+        keep_workspace=False,
+        drop_workspace_handle=True,
+        tool_name="read",
+    )
+    forwarded = json.loads(sanitized)
+    forwarded_args = forwarded["params"]["arguments"]
+    assert forwarded_args["path"] == str(target_b)
+    assert "workspace_id" not in forwarded_args
+
+
+def test_codexpro_wrapper_strips_nested_stale_workspace_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    target_b = root_b / "target.txt"
+    target_b.write_text("b", encoding="utf-8")
+    gateway = _gateway_for_roots(tmp_path, {"a": root_a, "b": root_b})
+    gateway._workspace_handle_roots["ws-a"] = "a"
+    arguments = {
+        "action": "read",
+        "args": {"workspace_id": "ws-a", "path": str(target_b)},
+    }
+    target = gateway._infer_workspace_for_call("codexpro", arguments)
+    assert target == "b"
+    assert gateway._workspace_handle_targets_other_root("codexpro", arguments, target) is True
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "codexpro", "arguments": arguments},
+    }
+    sanitized = gateway_module._strip_route_arguments(
+        json.dumps(rpc).encode("utf-8"),
+        rpc,
+        keep_workspace=False,
+        drop_workspace_handle=True,
+        tool_name="codexpro",
+    )
+    forwarded = json.loads(sanitized)
+    forwarded_args = forwarded["params"]["arguments"]["args"]
+    assert forwarded_args["path"] == str(target_b)
+    assert "workspace_id" not in forwarded_args
 
 
 def test_path_bearing_tools_cover_read_write_edit_search_shell_git_and_patch(

@@ -14,6 +14,8 @@ All dates are local development dates.
 - Fix the final Windows elevation live-probe defects before publication: declare pointer-sized Win32 token APIs so a real High Integrity process is not misclassified, validate the scheduled-task action against the current runtime, and grant the original user only read/execute access to the pre-authorized task while SYSTEM/Administrators retain full control.
 - Make administrator setup recoverable and non-technical in the desktop UI. A successful normal-launch authorization and an already-elevated launch now converge on the same verified high-integrity path; failure offers an explicit workspace-only recovery instead of preventing MCP from starting. Ordinary UI uses user-language labels such as administrator access, access code and connection service, while implementation terms remain in diagnostics/developer docs.
 - Align the CodexPro CLI with the already-supported `developer` bash mode and harden HTTP smoke child-exit handling so release tests do not fail or hang on a fast process-exit race.
+- Harden final live routing: when task/path/cwd evidence overrides a stale opaque workspace handle from another active root, strip that foreign handle before proxying to the selected engine (including nested `codexpro(action,args)` calls), preventing a correctly routed call from failing with `Unknown workspace_id`.
+- Make Windows live-upgrade preserve the launcher's integrity level: an already-elevated desktop creates its detached upgrade worker at Highest so it can replace the High Integrity process; ordinary launchers keep an ordinary worker. Dry-run records launcher/worker elevation for release diagnostics.
 
 ## 0.8.7 (2026-08-26) — stateless MCP and idle-502 self-healing
 

@@ -42,6 +42,9 @@ def test_live_upgrade_script_snapshots_equal_running_roots_and_shared_gateway() 
     assert "install_dir = $currentInstallDir" in script
     assert '/DIR="{0}"' in script
     assert 'Join-Path $installDir "MCPDevBridge.exe"' in script
+    assert "$launcherElevated" in script
+    assert 'launcher_elevated = [bool]$launcherElevated' in script
+    assert '$createArgs += @("/RL", "HIGHEST")' in script
 
 
 def test_upgrade_resume_restores_all_roots_without_entry_owner(tmp_path: Path, monkeypatch) -> None:

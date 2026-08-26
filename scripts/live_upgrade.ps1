@@ -28,6 +28,11 @@ function Write-JsonAtomic {
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
+function Test-AdministratorToken {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Test-LoopbackPort {
     param([int]$Port)
     if ($Port -le 0) { return $false }
@@ -127,6 +132,7 @@ if (-not $Worker) {
         }
     }
 
+    $launcherElevated = Test-AdministratorToken
     $request = [ordered]@{
         installer_path = $InstallerPath
         resume_project_roots = @($resumeProjectRoots)
@@ -134,6 +140,7 @@ if (-not $Worker) {
         fallback_exe = $FallbackExe
         install_dir = $currentInstallDir
         dry_run = [bool]$DryRun
+        launcher_elevated = [bool]$launcherElevated
         task_name = "MCPDevBridge-LiveUpgrade-" + (Get-Date -Format "yyyyMMdd-HHmmss")
         requested_at = (Get-Date).ToString("o")
     }
@@ -149,7 +156,9 @@ if (-not $Worker) {
 
     $when = (Get-Date).AddMinutes(1).ToString("HH:mm")
     $taskCommand = "cmd.exe /c `"$workerCmd`""
-    & schtasks.exe /Create /TN $request.task_name /TR $taskCommand /SC ONCE /ST $when /F | Out-Null
+    $createArgs = @("/Create", "/TN", $request.task_name, "/TR", $taskCommand, "/SC", "ONCE", "/ST", $when, "/F")
+    if ($launcherElevated) { $createArgs += @("/RL", "HIGHEST") }
+    & schtasks.exe @createArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Unable to create detached upgrade task." }
     & schtasks.exe /Run /TN $request.task_name | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Unable to start detached upgrade task." }
@@ -171,6 +180,8 @@ try {
             worker_pid = $PID
             project_root = [string]$request.project_root
             task_name = $taskName
+            launcher_elevated = [bool]$request.launcher_elevated
+            worker_elevated = [bool](Test-AdministratorToken)
             finished_at = (Get-Date).ToString("o")
         })
         Write-UpgradeLog "Detached upgrade dry-run completed."
