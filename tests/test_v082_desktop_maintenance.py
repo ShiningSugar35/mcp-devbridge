@@ -177,6 +177,10 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
                 assert interactive is True
                 return True
 
+            def ensure_running(self, *, interactive_registration: bool = False):
+                assert interactive_registration is False
+                return {"ok": True, "elevated": True}
+
         monkeypatch.setattr(
             elevation, "get_elevation_controller", lambda: FakeElevationController()
         )

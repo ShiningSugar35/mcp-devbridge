@@ -92,6 +92,90 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
         _close(app, window)
 
 
+def test_admin_setup_failure_can_recover_with_workspace_mode(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import local_dev_mcp_bridge.elevation as elevation
+
+    app, window, project_a, project_b = _window(tmp_path, monkeypatch)
+    try:
+        window._app_config.first_system_risk_accepted = True
+        window._app_config.full_system_risk_accepted = True
+        monkeypatch.setattr(dm, "IS_WINDOWS", True)
+
+        class FakeController:
+            def ensure_registered(self, *, interactive: bool) -> bool:
+                assert interactive is True
+                return False
+
+            def ensure_running(self, *, interactive_registration: bool = False):
+                raise AssertionError("must not start when registration failed")
+
+        monkeypatch.setattr(elevation, "get_elevation_controller", lambda: FakeController())
+        monkeypatch.setattr(window, "_admin_setup_choice", lambda: "workspace")
+        projects = window.pm.list()
+        assert window._require_start_confirmations(projects) is False
+        assert all(project.permission_mode == "workspace" for project in projects)
+        stored_a = window.pm.get(project_a.id)
+        stored_b = window.pm.get(project_b.id)
+        assert stored_a is not None
+        assert stored_b is not None
+        assert stored_a.permission_mode == "workspace"
+        assert stored_b.permission_mode == "workspace"
+    finally:
+        _close(app, window)
+
+
+def test_admin_setup_success_continues_without_failure_dialog(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import local_dev_mcp_bridge.elevation as elevation
+
+    app, window, _a, _b = _window(tmp_path, monkeypatch)
+    try:
+        window._app_config.first_system_risk_accepted = True
+        window._app_config.full_system_risk_accepted = True
+        monkeypatch.setattr(dm, "IS_WINDOWS", True)
+        calls = {"running": 0}
+
+        class FakeController:
+            def ensure_registered(self, *, interactive: bool) -> bool:
+                assert interactive is True
+                return True
+
+            def ensure_running(self, *, interactive_registration: bool = False):
+                assert interactive_registration is False
+                calls["running"] += 1
+                return {"ok": True, "elevated": True}
+
+        monkeypatch.setattr(elevation, "get_elevation_controller", lambda: FakeController())
+        monkeypatch.setattr(
+            window,
+            "_admin_setup_choice",
+            lambda: (_ for _ in ()).throw(AssertionError("failure dialog must not open")),
+        )
+        assert window._require_start_confirmations(window.pm.list()) is False
+        assert calls["running"] == 1
+    finally:
+        _close(app, window)
+
+
+def test_workbench_hides_internal_port_and_uses_plain_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, _a, _b = _window(tmp_path, monkeypatch)
+    try:
+        assert window.project_table.isColumnHidden(3)
+        assert window.token_copy_btn.text() == "复制访问码"
+        assert window.service_url_copy_btn.text() == "复制本机连接地址"
+        assert "Gateway" not in window._service_url_text()
+        forbidden = ("UAC", "broker", "full_system", "token", "Gateway")
+        plain_text = dm.ADMIN_SETUP_TITLE + dm.ADMIN_SETUP_TEXT
+        assert all(term not in plain_text for term in forbidden)
+    finally:
+        _close(app, window)
+
+
 def test_close_to_tray_hides_without_quitting(tmp_path: Path, monkeypatch) -> None:
     app, window, _a, _b = _window(tmp_path, monkeypatch)
     try:

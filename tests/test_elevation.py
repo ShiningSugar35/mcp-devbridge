@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,7 +12,7 @@ def test_registration_is_one_time(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = elevation.ElevationController()
     called = {"uac": 0}
     monkeypatch.setattr(elevation, "IS_WINDOWS", True)
-    monkeypatch.setattr(elevation, "_task_exists", lambda: True)
+    monkeypatch.setattr(elevation, "_task_matches_current_command", lambda: True)
 
     def run_uac() -> bool:
         called["uac"] += 1
@@ -26,7 +27,8 @@ def test_noninteractive_registration_never_prompts(monkeypatch: pytest.MonkeyPat
     controller = elevation.ElevationController()
     called = {"uac": 0}
     monkeypatch.setattr(elevation, "IS_WINDOWS", True)
-    monkeypatch.setattr(elevation, "_task_exists", lambda: False)
+    monkeypatch.setattr(elevation, "_task_matches_current_command", lambda: False)
+    monkeypatch.setattr(elevation, "_token_is_elevated", lambda: False)
 
     def run_uac() -> bool:
         called["uac"] += 1
@@ -35,6 +37,40 @@ def test_noninteractive_registration_never_prompts(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(elevation, "_run_registration_uac", run_uac)
     assert controller.ensure_registered(interactive=False) is False
     assert called["uac"] == 0
+
+
+def test_already_elevated_registration_never_prompts_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = elevation.ElevationController()
+    called = {"register": 0, "uac": 0}
+    monkeypatch.setattr(elevation, "IS_WINDOWS", True)
+    monkeypatch.setattr(elevation, "_task_matches_current_command", lambda: False)
+    monkeypatch.setattr(elevation, "_token_is_elevated", lambda: True)
+
+    def register() -> bool:
+        called["register"] += 1
+        return True
+
+    def run_uac() -> bool:
+        called["uac"] += 1
+        return True
+
+    monkeypatch.setattr(elevation, "_register_task_current_process", register)
+    monkeypatch.setattr(elevation, "_run_registration_uac", run_uac)
+    assert controller.ensure_registered(interactive=True) is True
+    assert called == {"register": 1, "uac": 0}
+
+
+def test_stale_registered_task_is_not_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = elevation.ElevationController()
+    monkeypatch.setattr(elevation, "IS_WINDOWS", True)
+    monkeypatch.setattr(elevation, "_task_matches_current_command", lambda: False)
+    monkeypatch.setattr(elevation, "_token_is_elevated", lambda: False)
+    monkeypatch.setattr(elevation, "_run_registration_uac", lambda: True)
+    assert controller.ensure_registered(interactive=True) is True
 
 
 def test_elevated_registration_uses_highest_interactive_task(
@@ -62,13 +98,20 @@ def test_elevated_registration_uses_highest_interactive_task(
         return Result()
 
     monkeypatch.setattr(elevation.subprocess, "run", fake_run)
-    assert elevation._register_task_current_process() is True
+    caller_sid = "S-1-5-21-111-222-333-1001"
+    assert elevation._register_task_current_process(caller_sid) is True
     args = seen["args"]
     assert isinstance(args, list)
     text = str(args[-1])
     assert "-RunLevel Highest" in text
     assert "-LogonType Interactive" in text
     assert "--elevated-broker" in text
+    assert "SetSecurityDescriptor" in text
+    assert f"$callerSid = '{caller_sid}'" in text
+    assert "FRFX;;;" in text
+    assert "FA;;;' + $callerSid" not in text
+    assert "FA;;;SY" in text
+    assert "FA;;;BA" in text
     assert "DisableLUA" not in text
     assert "fodhelper" not in text.lower()
 
@@ -102,7 +145,84 @@ def test_uac_registration_elevates_current_executable_not_writable_script(
     assert isinstance(args, list)
     command = str(args[-1])
     assert "--register-elevated-broker-task" in command
+    assert "--caller-sid" in command
+    assert "WindowsIdentity]::GetCurrent().User.Value" in command
     assert "register-elevated-broker.ps1" not in command
+
+
+def test_token_elevation_uses_pointer_sized_win32_signatures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFn:
+        def __init__(self, impl):
+            self.impl = impl
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            return self.impl(*args)
+
+    def get_current_process():
+        return 0xFFFFFFFFFFFFFFFF
+
+    def open_process_token(process, _access, handle_ptr):
+        assert process == 0xFFFFFFFFFFFFFFFF
+        elevation.ctypes.cast(
+            handle_ptr, elevation.ctypes.POINTER(elevation.ctypes.c_void_p)
+        ).contents.value = 123
+        return 1
+
+    def get_token_information(_handle, info_class, output, _size, size_ptr):
+        assert info_class == 20
+        elevation.ctypes.cast(
+            output, elevation.ctypes.POINTER(elevation.ctypes.c_uint32)
+        ).contents.value = 1
+        elevation.ctypes.cast(
+            size_ptr, elevation.ctypes.POINTER(elevation.ctypes.c_uint32)
+        ).contents.value = 4
+        return 1
+
+    get_process = FakeFn(get_current_process)
+    open_token = FakeFn(open_process_token)
+    get_info = FakeFn(get_token_information)
+    close_handle = FakeFn(lambda _handle: 1)
+    fake_windll = SimpleNamespace(
+        kernel32=SimpleNamespace(GetCurrentProcess=get_process, CloseHandle=close_handle),
+        advapi32=SimpleNamespace(
+            OpenProcessToken=open_token, GetTokenInformation=get_info
+        ),
+    )
+    monkeypatch.setattr(elevation, "IS_WINDOWS", True)
+    monkeypatch.setattr(elevation.ctypes, "windll", fake_windll, raising=False)
+    assert elevation._token_is_elevated() is True
+    assert get_process.restype is elevation.ctypes.c_void_p
+    assert open_token.argtypes is not None
+    assert get_info.argtypes is not None
+
+
+def test_registered_task_must_match_current_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(elevation, "IS_WINDOWS", True)
+    monkeypatch.setattr(elevation, "_task_exists", lambda: True)
+    monkeypatch.setattr(
+        elevation,
+        "_broker_command",
+        lambda: (r"C:\App\MCPDevBridge.exe", "--elevated-broker", r"C:\App"),
+    )
+
+    class Result:
+        returncode = 0
+        stdout = elevation.json.dumps(
+            {
+                "execute": r"C:\App\MCPDevBridge.exe",
+                "arguments": "--elevated-broker",
+                "working_directory": r"C:\App",
+            }
+        )
+
+    monkeypatch.setattr(elevation.subprocess, "run", lambda *_args, **_kwargs: Result())
+    assert elevation._task_matches_current_command() is True
 
 
 def test_state_file_never_contains_broker_credential(

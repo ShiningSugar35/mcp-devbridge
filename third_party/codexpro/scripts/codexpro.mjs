@@ -71,7 +71,7 @@ Options:
   --pro-planning            Shortcut for --mode pro.
   --host <host>             Local bind host. Default: 127.0.0.1.
   --port <port>             Local port. Default: 8787.
-  --bash <off|safe|full>    Bash mode. Default: safe.
+  --bash <off|safe|developer|full>    Bash mode. Default: safe.
   --no-bash                 Shortcut for --bash off.
   --bash-transcript <compact|full>
                              Chat transcript for bash results. Default: compact.
@@ -3120,7 +3120,7 @@ async function runDoctor(argv) {
   record(fs.existsSync(path.join(projectRoot, 'package.json')) ? 'ok' : 'fail', 'Package root', projectRoot);
   record(profile.profilePath ? 'ok' : 'warn', 'Saved profile', profile.profilePath ? profileSummary(profile) || profile.profilePath : 'none for this workspace');
   record(['agent', 'handoff', 'pro'].includes(mode) ? 'ok' : 'fail', 'Mode', ['agent', 'handoff', 'pro'].includes(mode) ? mode : '--mode must be agent, handoff, or pro');
-  record(['off', 'safe', 'full'].includes(bash) ? 'ok' : 'fail', 'Bash mode', ['off', 'safe', 'full'].includes(bash) ? bash : '--bash must be off, safe, or full');
+  record(['off', 'safe', 'developer', 'full'].includes(bash) ? 'ok' : 'fail', 'Bash mode', ['off', 'safe', 'developer', 'full'].includes(bash) ? bash : '--bash must be off, safe, developer, or full');
   record(!writeError && ['off', 'handoff', 'workspace'].includes(write) ? 'ok' : 'fail', 'Write mode', writeError || write);
   record(['minimal', 'standard', 'full'].includes(toolMode) ? 'ok' : 'fail', 'Tool mode', ['minimal', 'standard', 'full'].includes(toolMode) ? toolMode : '--tool-mode must be minimal, standard, or full');
   record(clipboard ? 'ok' : 'warn', 'Clipboard', clipboard || 'not found; URL will be printed for manual copy');
@@ -4062,7 +4062,7 @@ async function main() {
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], 'https://rebel0789.github.io');
   const toolCards = optionBool(args, profile, 'toolCards', ['CODEXPRO_TOOL_CARDS'], false);
-  validateChoice('bash', bash, ['off', 'safe', 'full']);
+  validateChoice('bash', bash, ['off', 'safe', 'developer', 'full']);
   validateChoice('write', write, ['off', 'handoff', 'workspace']);
   validateChoice('tool-mode', toolMode, ['minimal', 'standard', 'full']);
 

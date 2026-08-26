@@ -72,6 +72,7 @@ from .config_store import (
     load_app_config,
     load_projects,
     save_app_config,
+    save_projects,
 )
 from .device_hub import HUB_PEER_SECRET_KEY, DeviceRegistry, mcp_base_url, normalize_mcp_url
 from .engines import EngineState, find_node, find_uvx
@@ -118,6 +119,11 @@ PERMISSION_MODES = [
     ("system", "完全访问（危险，默认）"),
 ]
 PERMISSION_PROFILE = {"read_only": "safe", "workspace": "developer", "system": "full_system"}
+ADMIN_SETUP_TITLE = "管理员权限设置未完成"
+ADMIN_SETUP_TEXT = (
+    "Windows 管理员授权没有成功完成，因此“完全访问”暂时无法启用。\n\n"
+    "你可以先以普通权限启动，只访问项目目录。稍后可在“项目设置”中重新启用“完全访问”。"
+)
 CLIENT_TARGETS = [("chatgpt", "ChatGPT 网页端"), ("gemini", "Gemini Spark")]
 CONNECTION_METHODS = [
     ConnectionMethod.CLOUDFLARE,
@@ -368,6 +374,7 @@ class MainWindow(QMainWindow):
         proj_v.setSpacing(8)
         self.project_table = QTableWidget(0, 5)
         self.project_table.setHorizontalHeaderLabels(["名称", "路径", "状态", "端口", "操作"])
+        self.project_table.setColumnHidden(3, True)
         self.project_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
         )
@@ -430,47 +437,47 @@ class MainWindow(QMainWindow):
 
         self.cf_token_edit = QLineEdit()
         self.cf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.cf_token_edit.setPlaceholderText("Cloudflare Tunnel Token")
+        self.cf_token_edit.setPlaceholderText("粘贴 Cloudflare 提供的访问码")
         self.cf_token_edit.setToolTip("加密保存到当前项目，不写入项目配置文件。")
         if self._tunnel_token_default:
             self.cf_token_edit.setText(self._tunnel_token_default)
         self.cf_token_edit.textEdited.connect(self._on_tunnel_token_edited)
-        cfg_form.addRow(self._help_label("隧道令牌", HELP_TUNNEL_TOKEN), self.cf_token_edit)
+        cfg_form.addRow(self._help_label("Cloudflare 访问码", HELP_TUNNEL_TOKEN), self.cf_token_edit)
 
-        self.gemini_box = QGroupBox("Gemini OAuth")
+        self.gemini_box = QGroupBox("Gemini 授权")
         gemini_form = QFormLayout(self.gemini_box)
         gemini_form.setContentsMargins(12, 12, 12, 12)
         gemini_form.setSpacing(8)
         self._gemini_store = SecretsStore()
         self._gemini_secret = ""
         self.gemini_uri_edit = QLineEdit()
-        self.gemini_uri_edit.setPlaceholderText("粘贴 Gemini Redirect URI")
+        self.gemini_uri_edit.setPlaceholderText("粘贴 Gemini 提供的回调地址")
         self.gemini_uri_edit.editingFinished.connect(self._on_gemini_uri_edited)
-        gemini_form.addRow("Gemini Redirect URI:", self.gemini_uri_edit)
+        gemini_form.addRow("Gemini 回调地址:", self.gemini_uri_edit)
 
-        self.gemini_gen_btn = QPushButton("生成 / 更新凭证")
+        self.gemini_gen_btn = QPushButton("生成 / 更新授权信息")
         self.gemini_gen_btn.clicked.connect(self._generate_gemini_credentials)
         gemini_form.addRow("", self.gemini_gen_btn)
 
         self.gemini_id_edit = QLineEdit("—")
         self.gemini_id_edit.setReadOnly(True)
-        self.gemini_id_edit.setToolTip("Client ID：只读，可选中复制")
+        self.gemini_id_edit.setToolTip("应用编号：只读，可选中复制")
         self.gemini_id_copy = QPushButton("复制")
         id_row = QHBoxLayout()
         id_row.setSpacing(8)
         id_row.addWidget(self.gemini_id_edit, 1)
         id_row.addWidget(self.gemini_id_copy)
-        gemini_form.addRow("Client ID:", id_row)
+        gemini_form.addRow("应用编号:", id_row)
 
         self.gemini_secret_edit = QLineEdit("—")
         self.gemini_secret_edit.setReadOnly(True)
-        self.gemini_secret_edit.setToolTip("Client Secret：掩码显示，仅可复制")
+        self.gemini_secret_edit.setToolTip("应用密钥：掩码显示，仅可复制")
         self.gemini_secret_copy = QPushButton("复制")
         secret_row = QHBoxLayout()
         secret_row.setSpacing(8)
         secret_row.addWidget(self.gemini_secret_edit, 1)
         secret_row.addWidget(self.gemini_secret_copy)
-        gemini_form.addRow("Client Secret:", secret_row)
+        gemini_form.addRow("应用密钥:", secret_row)
 
         self.gemini_id_copy.clicked.connect(
             lambda: self._copy_with_feedback(self.gemini_id_copy, self.gemini_id_edit.text())
@@ -499,7 +506,7 @@ class MainWindow(QMainWindow):
             self.bridge_check.setEnabled(False)
             self.bridge_check.setText("Windows 控制桥接（Linux/SteamOS 不适用）")
             self.bridge_check.setToolTip(
-                "Linux/SteamOS 使用原生文件、Shell 与进程工具，不启动 Windows-MCP。"
+                "Linux/SteamOS 使用系统自带的文件与程序控制能力，不启用 Windows 控制组件。"
             )
         cfg_form.addRow("", self.bridge_check)
 
@@ -545,7 +552,7 @@ class MainWindow(QMainWindow):
         self.status_label.setWordWrap(True)
         self.ctrl_layout.addWidget(self.status_label)
         self.component_status = QLabel(
-            "组件：Codex 未启动 · Gateway 未启动 · 隧道 未启动 · Windows 桥 未启动"
+            "运行状态：项目服务未启动 · 连接服务未启动 · 外网连接未启动 · Windows 控制未启动"
         )
         self.component_status.setWordWrap(True)
         self.component_status.setStyleSheet("color: #666666;")
@@ -565,7 +572,7 @@ class MainWindow(QMainWindow):
         self.url_edit.setReadOnly(True)
         tok_row = QHBoxLayout()
         tok_row.setSpacing(8)
-        self.token_copy_btn = QPushButton("复制令牌")
+        self.token_copy_btn = QPushButton("复制访问码")
         self.token_regenerate_btn = QPushButton("重新生成")
         self.url_copy_btn = QPushButton("复制地址")
         self.token_copy_btn.clicked.connect(
@@ -586,14 +593,14 @@ class MainWindow(QMainWindow):
         # --- shared Hub Gateway port
         port_row = QHBoxLayout()
         port_row.setSpacing(8)
-        port_row.addWidget(self._help_label("共享 Hub 端口", HELP_GATEWAY_PORT))
+        port_row.addWidget(self._help_label("本机连接编号", HELP_GATEWAY_PORT))
         self.gateway_port_spin = QSpinBox()
         self.gateway_port_spin.setRange(1, 65535)
         self.gateway_port_spin.setValue(self._app_config.gateway_port)
         self.gateway_port_spin.setFixedWidth(90)
         self.gateway_port_spin.valueChanged.connect(self._on_gateway_port_changed)
         port_row.addWidget(self.gateway_port_spin)
-        port_check_btn = QPushButton("检测端口")
+        port_check_btn = QPushButton("检查连接")
         port_check_btn.clicked.connect(self._check_gateway_port)
         port_row.addWidget(port_check_btn)
         port_default_btn = QPushButton("恢复默认")
@@ -608,7 +615,7 @@ class MainWindow(QMainWindow):
         service_row = QHBoxLayout()
         service_row.setSpacing(8)
         service_row.addWidget(self.service_url_edit, 1)
-        self.service_url_copy_btn = QPushButton("复制 Gateway 地址")
+        self.service_url_copy_btn = QPushButton("复制本机连接地址")
         self.service_url_copy_btn.clicked.connect(
             lambda: self._copy_with_feedback(self.service_url_copy_btn, self._service_url_text())
         )
@@ -767,11 +774,11 @@ class MainWindow(QMainWindow):
 
             access_value = _hub_access_token(ensure=True)
             if access_value:
-                ok_items.append("共享 Hub 访问令牌已经准备好")
+                ok_items.append("连接访问码已经准备好")
             else:
                 problems.append(
                     (
-                        "还没有共享 Hub 访问令牌",
+                        "还没有连接访问码",
                         "回到工作台，在“连接信息”里点击“重新生成”。",
                     )
                 )
@@ -795,8 +802,8 @@ class MainWindow(QMainWindow):
                 if not get_project_tunnel_token(project.id):
                     problems.append(
                         (
-                            "没有填写 Cloudflare 隧道令牌",
-                            "打开“项目设置”，把 Cloudflare Named Tunnel 的 Token 粘贴到“隧道令牌”。",
+                            "没有填写 Cloudflare 访问码",
+                            "打开“项目设置”，把 Cloudflare 提供的访问码粘贴到“Cloudflare 访问码”。",
                         )
                     )
                 else:
@@ -843,7 +850,7 @@ class MainWindow(QMainWindow):
                 problems.append(
                     (
                         "Gemini 还缺少 Redirect URI",
-                        "到“项目设置 → Gemini OAuth”，粘贴 Gemini Custom Connected App 提供的 Redirect URI。",
+                        "到“项目设置 → Gemini 授权”，粘贴 Gemini 提供的回调地址。",
                     )
                 )
 
@@ -861,7 +868,7 @@ class MainWindow(QMainWindow):
                 )
             else:
                 details.append(
-                    f"内部端口：共享 Hub {ports[0]} / 项目服务 {ports[1]} / Windows 控制 {ports[2]}"
+                    f"内部连接：主连接 {ports[0]} / 项目服务 {ports[1]} / Windows 控制 {ports[2]}"
                 )
 
             unit = self.pm.unit(project.id)
@@ -881,11 +888,11 @@ class MainWindow(QMainWindow):
                     )
                 if result is not None:
                     if result.ok:
-                        ok_items.append("MCP 实际调用测试通过")
+                        ok_items.append("实际连接测试通过")
                     else:
                         problems.append(
                             (
-                                "MCP 实际调用没有完全通过",
+                                "实际连接测试没有完全通过",
                                 "先停止并重新启动当前项目，再运行诊断。如果仍失败，查看“日志 → 运行情况”和“网络连接”。",
                             )
                         )
@@ -921,7 +928,7 @@ class MainWindow(QMainWindow):
 
             peer = SecretsStore().get(HUB_PEER_SECRET_KEY)
             if self._app_config.hub_url and peer:
-                details.append(f"这台电脑已加入 Multi-Device Hub：{self._app_config.hub_url}")
+                details.append(f"这台电脑已加入主电脑：{self._app_config.hub_url}")
             remote_views = [
                 view
                 for view in self.device_registry.views(local_online=state == EngineState.READY)
@@ -930,7 +937,7 @@ class MainWindow(QMainWindow):
             if remote_views:
                 online = sum(1 for view in remote_views if view.online)
                 details.append(
-                    f"Multi-Device Hub：已配对 {len(remote_views)} 台远程电脑，其中 {online} 台在线"
+                    f"已配对 {len(remote_views)} 台远程电脑，其中 {online} 台在线"
                 )
 
             lines: list[str] = []
@@ -1048,12 +1055,12 @@ class MainWindow(QMainWindow):
         identity_form.addRow("设备 ID", id_view)
         layout.addWidget(identity_box)
 
-        hub_box = QGroupBox("让别的电脑加入这台 Hub")
+        hub_box = QGroupBox("让别的电脑连接这台主电脑")
         hub_v = QVBoxLayout(hub_box)
         hub_v.setContentsMargins(14, 18, 14, 14)
         hub_v.setSpacing(8)
         hub_text = QLabel(
-            "把主 Hub 的 MCP 地址和下面的 6 位配对码发给另一台电脑。配对码 10 分钟内有效，只能使用一次。"
+            "把这台主电脑的连接地址和下面的 6 位配对码发给另一台电脑。配对码 10 分钟内有效，只能使用一次。"
         )
         hub_text.setWordWrap(True)
         hub_text.setObjectName("MutedText")
@@ -1069,21 +1076,21 @@ class MainWindow(QMainWindow):
         hub_v.addLayout(code_row)
         layout.addWidget(hub_box)
 
-        join_box = QGroupBox("把这台电脑加入别人的 Hub")
+        join_box = QGroupBox("把这台电脑连接到另一台主电脑")
         join_form = QFormLayout(join_box)
         join_form.setContentsMargins(14, 18, 14, 14)
         join_form.setSpacing(10)
         self.hub_url_edit = QLineEdit(self._app_config.hub_url)
-        self.hub_url_edit.setPlaceholderText("主 Hub 的 MCP 地址，例如 https://mcp.example.com/mcp")
+        self.hub_url_edit.setPlaceholderText("主电脑的连接地址，例如 https://mcp.example.com/mcp")
         self.hub_pair_edit = QLineEdit()
         self.hub_pair_edit.setPlaceholderText("6 位配对码")
         self.hub_pair_edit.setMaxLength(6)
-        self.join_hub_btn = QPushButton("加入 Hub")
+        self.join_hub_btn = QPushButton("连接主电脑")
         self.join_hub_btn.clicked.connect(self._join_remote_hub)
-        join_form.addRow("Hub MCP 地址", self.hub_url_edit)
+        join_form.addRow("主电脑连接地址", self.hub_url_edit)
         join_form.addRow("配对码", self.hub_pair_edit)
         join_form.addRow("", self.join_hub_btn)
-        self.hub_status_label = QLabel("未加入其它 Hub")
+        self.hub_status_label = QLabel("未连接其它主电脑")
         self.hub_status_label.setObjectName("MutedText")
         join_form.addRow("状态", self.hub_status_label)
         layout.addWidget(join_box)
@@ -1092,7 +1099,7 @@ class MainWindow(QMainWindow):
         connected_v = QVBoxLayout(connected_box)
         connected_v.setContentsMargins(14, 18, 14, 14)
         self.device_table = QTableWidget(0, 4)
-        self.device_table.setHorizontalHeaderLabels(["电脑", "状态", "公网 MCP 地址", "操作"])
+        self.device_table.setHorizontalHeaderLabels(["电脑", "状态", "公网连接地址", "操作"])
         self.device_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
         )
@@ -1150,7 +1157,7 @@ class MainWindow(QMainWindow):
                 changed = True
         if changed:
             self._append_log(
-                "检测到远端设备复用了主 Hub 的 Cloudflare Tunnel；已自动改为 Quick Tunnel，避免 OAuth 请求被分流到错误电脑。"
+                "检测到远端电脑和主电脑使用了同一个固定连接；已自动改为临时连接，避免请求被发到错误的电脑。"
             )
             self._apply_selected_project()
 
@@ -1201,7 +1208,7 @@ class MainWindow(QMainWindow):
         pair_code = self.hub_pair_edit.text().strip()
         public = self._public_hub_for_pairing()
         if not hub_raw or len(pair_code) != 6:
-            QMessageBox.warning(self, "还差一点", "请填写主 Hub 的 MCP 地址和 6 位配对码。")
+            QMessageBox.warning(self, "还差一点", "请填写主电脑的连接地址和 6 位配对码。")
             return
         if public is None:
             QMessageBox.warning(
@@ -1215,15 +1222,15 @@ class MainWindow(QMainWindow):
             hub_mcp = normalize_mcp_url(hub_raw)
             hub_base = mcp_base_url(hub_mcp)
         except ValueError as exc:
-            QMessageBox.warning(self, "Hub 地址不正确", str(exc))
+            QMessageBox.warning(self, "主电脑地址不正确", str(exc))
             return
         public_url, token = public
         if self._named_tunnel_conflicts_with_hub(hub_mcp):
             QMessageBox.warning(
                 self,
-                "不能复用主 Hub 的 Cloudflare Tunnel",
-                "这台电脑正在使用与主 Hub 相同的固定域名/Tunnel。这样会让 Cloudflare 把同一 OAuth 请求随机送到两台电脑，导致 Client ID not found。\n\n"
-                "请把这台远端电脑的连接方式改为 Quick Tunnel、ngrok 或它自己的独立域名。ChatGPT 仍然只连接主 Hub 的固定地址。",
+                "不能和主电脑使用同一个 Cloudflare 固定连接",
+                "这台电脑正在使用与主电脑相同的固定连接。这样会让访问请求随机发到不同电脑，从而导致连接失败。\n\n"
+                "请给这台远端电脑使用临时连接、ngrok 或它自己的独立域名。ChatGPT 仍然只连接主电脑的固定地址。",
             )
             return
         self.join_hub_btn.setEnabled(False)
@@ -1263,7 +1270,7 @@ class MainWindow(QMainWindow):
                 return
             peer = str(result.get("peer") or "")
             if not peer:
-                self.hub_status_label.setText("配对失败：Hub 未返回设备凭据")
+                self.hub_status_label.setText("配对失败：主电脑没有返回连接信息")
                 return
             SecretsStore().set(HUB_PEER_SECRET_KEY, peer)
             self._app_config.hub_url = str(result["hub_mcp"])
@@ -1272,9 +1279,9 @@ class MainWindow(QMainWindow):
             self.hub_pair_edit.clear()
             self._update_hub_status()
             self.hub_status_label.setText(
-                "已连接主 Hub。下一步：在 ChatGPT 继续使用主 Hub 插件，需要时切换到这台电脑。"
+                "已连接主电脑。下一步：继续在 ChatGPT 使用原来的连接，需要时切换到这台电脑。"
             )
-            self._append_log("这台电脑已加入 Multi-Device Hub；ChatGPT 无需新增第二个同域名插件。")
+            self._append_log("这台电脑已连接主电脑；ChatGPT 无需新增第二个连接。")
             self._send_device_heartbeat()
 
         _run_async(work, done)
@@ -1282,9 +1289,9 @@ class MainWindow(QMainWindow):
     def _update_hub_status(self) -> None:
         peer = SecretsStore().get(HUB_PEER_SECRET_KEY)
         if self._app_config.hub_url and peer:
-            self.hub_status_label.setText(f"已连接主 Hub：{self._app_config.hub_url}")
+            self.hub_status_label.setText(f"已连接主电脑：{self._app_config.hub_url}")
         else:
-            self.hub_status_label.setText("未加入其它 Hub")
+            self.hub_status_label.setText("未连接其它主电脑")
 
     def _send_device_heartbeat(self) -> None:
         if self._device_heartbeat_busy:
@@ -1321,7 +1328,7 @@ class MainWindow(QMainWindow):
         def done(result: Any) -> None:
             self._device_heartbeat_busy = False
             if isinstance(result, Exception):
-                self.hub_status_label.setText(f"Hub 暂时不可达：{result}")
+                self.hub_status_label.setText(f"主电脑暂时无法连接：{result}")
             else:
                 self._update_hub_status()
             self._refresh_device_table()
@@ -1332,7 +1339,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "移除电脑",
-            f"确定让“{name}”退出这个 Hub 吗？对方之后需要重新配对才能接入。",
+            f"确定断开“{name}”吗？对方之后需要重新配对才能连接。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -2090,7 +2097,7 @@ class MainWindow(QMainWindow):
         self._gemini_secret = secret
         self.gemini_secret_edit.setText("•" * 16)
         self._append_log(
-            f"已更新 {project.display_name or project.root_path} 的 Gemini OAuth 凭据。"
+            f"已更新 {project.display_name or project.root_path} 的 Gemini 授权信息。"
         )
 
     @staticmethod
@@ -2170,7 +2177,7 @@ class MainWindow(QMainWindow):
         self._append_log(f"正在启动项目（{project.display_name}）…")
 
         def run() -> str:
-            view = self.pm.start(
+            self.pm.start(
                 project.id,
                 codex_token=access,
                 permission_mode=project.permission_mode,
@@ -2187,8 +2194,8 @@ class MainWindow(QMainWindow):
                 self.coord.start(options)
                 if self.coord.state != EngineState.READY:
                     self.pm.stop(project.id)
-                    raise RuntimeError(self.coord.message or "共享 Hub 未进入已连接状态。")
-            return f"项目已连接：{project.display_name} @127.0.0.1:{view.codexpro_port}；共享 Hub 保持可用"
+                    raise RuntimeError(self.coord.message or "连接服务未进入可用状态。")
+            return f"项目已连接：{project.display_name}；连接服务保持可用"
 
         def done(result: Any) -> None:
             self._set_project_busy(project.id, False)
@@ -2216,8 +2223,8 @@ class MainWindow(QMainWindow):
             ]
             if not remaining and (self.coord.running or self.coord.state == EngineState.ERROR):
                 self.coord.stop()
-                return f"项目已停止：{project.display_name}；已无运行项目，共享 Hub 一并停止。"
-            return f"项目已停止：{project.display_name}；其它运行根和共享 Hub 不受影响。"
+                return f"项目已停止：{project.display_name}；已无运行项目，连接服务一并停止。"
+            return f"项目已停止：{project.display_name}；其它运行项目和连接服务不受影响。"
 
         def done(result: Any) -> None:
             self._set_project_busy(project.id, False)
@@ -2367,7 +2374,7 @@ class MainWindow(QMainWindow):
                 if self.coord.state != EngineState.READY:
                     for project_id in started_ids:
                         self.pm.stop(project_id)
-                    raise RuntimeError(self.coord.message or "共享 Hub 未进入已连接状态。")
+                    raise RuntimeError(self.coord.message or "连接服务未进入可用状态。")
             if failures:
                 preview = "；".join(failures[:3])
                 if len(failures) > 3:
@@ -2404,7 +2411,7 @@ class MainWindow(QMainWindow):
                 try:
                     self.coord.stop()
                 except Exception as exc:  # noqa: BLE001
-                    failures.append(f"共享 Hub: {exc}")
+                    failures.append(f"连接服务: {exc}")
             max_workers = min(len(projects), 8)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
@@ -2421,7 +2428,7 @@ class MainWindow(QMainWindow):
                 if len(failures) > 3:
                     preview += f"；另有 {len(failures) - 3} 个失败"
                 return f"停止完成，但有 {len(failures)} 项异常：{preview}"
-            return f"已停止全部 {len(projects)} 个项目和共享 Hub。"
+            return f"已停止全部 {len(projects)} 个项目和连接服务。"
 
         def done(result: Any) -> None:
             self._bulk_project_action = None
@@ -2486,8 +2493,56 @@ class MainWindow(QMainWindow):
         remember_project_tunnel_token(project.id, value)
         self._tunnel_token_default = value.strip()
 
+    def _admin_setup_choice(self) -> str:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle(ADMIN_SETUP_TITLE)
+        dialog.setText(ADMIN_SETUP_TEXT)
+        fallback = dialog.addButton(
+            "以普通权限启动", QMessageBox.ButtonRole.AcceptRole
+        )
+        retry = dialog.addButton("重新设置", QMessageBox.ButtonRole.ActionRole)
+        cancel = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(retry)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is retry:
+            return "retry"
+        if clicked is fallback:
+            return "workspace"
+        if clicked is cancel:
+            return "cancel"
+        return "cancel"
+
+    def _use_workspace_recovery(self, projects: list[ProjectConfig]) -> bool:
+        changed = [project for project in projects if project.permission_mode == "system"]
+        if not changed:
+            return True
+        affected_ids = {project.id for project in changed}
+        try:
+            catalog = self.pm.list()
+            for stored in catalog:
+                if stored.id in affected_ids:
+                    stored.permission_mode = "workspace"
+            save_projects(catalog)
+            for project in changed:
+                project.permission_mode = "workspace"
+        except Exception as exc:
+            self._append_log(f"普通权限恢复失败：{type(exc).__name__}: {exc}")
+            QMessageBox.warning(
+                self,
+                "无法使用普通权限启动",
+                "程序没能保存新的权限设置。请打开“项目设置”，选择“项目工作区”后再试。",
+            )
+            return False
+        self._append_log(
+            "管理员权限设置未完成；已按你的选择改为“项目工作区”，继续启动项目。"
+        )
+        self._apply_selected_project()
+        return True
+
     def _require_start_confirmations(self, projects: list[ProjectConfig] | None = None) -> bool:
-        """True when the user declined a mandatory full-system warning."""
+        """Return True when startup must stop because a required confirmation failed."""
         needs_system = (
             any(project.permission_mode == "system" for project in projects)
             if projects is not None
@@ -2499,9 +2554,9 @@ class MainWindow(QMainWindow):
         ):
             answer = QMessageBox.question(
                 self,
-                "完全访问模式风险确认",
-                '"完全访问"模式下 AI 可读写项目目录之外的文件、执行任意命令（含系统级命令）等高风险操作。\n'
-                "请确认您理解风险后继续（仅首次确认，之后不再提示）。",
+                "完全访问风险确认",
+                '“完全访问”允许 AI 操作项目目录之外的文件，并执行系统级操作。\n'
+                "请确认你了解这个权限范围后继续（只需确认一次）。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.No:
@@ -2510,18 +2565,26 @@ class MainWindow(QMainWindow):
             self._app_config.full_system_risk_accepted = True
             save_app_config(self._app_config)
         if needs_system and IS_WINDOWS:
-            try:
-                from .elevation import get_elevation_controller
+            target_projects = list(projects or [])
+            while True:
+                detail = "Windows 管理员授权没有完成。"
+                try:
+                    from .elevation import get_elevation_controller
 
-                if not get_elevation_controller().ensure_registered(interactive=True):
-                    QMessageBox.warning(
-                        self,
-                        "管理员执行授权未完成",
-                        "完全访问需要一次 Windows UAC 授权来注册高权限 broker。未完成授权时不会伪装成管理员执行。",
-                    )
+                    controller = get_elevation_controller()
+                    if controller.ensure_registered(interactive=True):
+                        controller.ensure_running(interactive_registration=False)
+                        break
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}: {exc}"
+                self._append_log(f"管理员权限设置未完成：{detail}")
+                choice = self._admin_setup_choice()
+                if choice == "retry":
+                    continue
+                if choice == "workspace":
+                    if target_projects and self._use_workspace_recovery(target_projects):
+                        break
                     return True
-            except Exception as exc:
-                QMessageBox.warning(self, "管理员执行授权失败", str(exc))
                 return True
         return False
 
@@ -2629,7 +2692,7 @@ class MainWindow(QMainWindow):
         return unit.state if unit is not None else EngineState.IDLE
 
     def _service_url_text(self) -> str:
-        return f"Gateway 本机地址（Cloudflare Service URL）: {gateway_service_url(self.gateway_port_spin.value())}"
+        return f"本机连接地址：{gateway_service_url(self.gateway_port_spin.value())}"
 
     def _on_gateway_port_changed(self, _value: int) -> None:
         if not self._loading_project:
@@ -2642,7 +2705,7 @@ class MainWindow(QMainWindow):
         port = self.gateway_port_spin.value()
         if port != constants.DEFAULT_GATEWAY_PORT:
             self.port_warn_label.setText(
-                f"Hub 端口修改后，请同步将 Cloudflare Tunnel 的 Service URL 修改为 "
+                f"本机连接编号修改后，请同步更新 Cloudflare 的连接地址为 "
                 f"{gateway_service_url(port)}，否则公网连接会失败。"
             )
             self.port_warn_label.setVisible(True)
@@ -2652,27 +2715,27 @@ class MainWindow(QMainWindow):
     def _check_gateway_port(self) -> None:
         port = self.gateway_port_spin.value()
         if self.coord.running:
-            QMessageBox.information(self, "Hub 正在运行", f"共享 Hub 当前正在使用端口 {port}。")
+            QMessageBox.information(self, "连接服务正在运行", f"当前正在使用本机连接编号 {port}。")
         elif port_in_use(port):
             QMessageBox.warning(
                 self,
-                "端口被占用",
-                f"共享 Hub 端口 {port} 已被占用。\n请关闭占用程序，或改用其他端口。",
+                "本机连接设置被占用",
+                f"本机连接编号 {port} 已被其他程序占用。\n请关闭占用程序，或改用其他编号。",
             )
         else:
             QMessageBox.information(
-                self, "端口检测", f"共享 Hub 端口 {port} 当前空闲，可以正常使用。"
+                self, "连接检查", f"本机连接编号 {port} 当前可用。"
             )
 
     def _restore_default_gateway_port(self) -> None:
         if self.coord.running:
-            QMessageBox.warning(self, "Hub 正在运行", "请先停止所有项目，再修改共享 Hub 端口。")
+            QMessageBox.warning(self, "连接服务正在运行", "请先停止所有项目，再修改本机连接设置。")
             return
         self.gateway_port_spin.setValue(constants.DEFAULT_GATEWAY_PORT)
         QMessageBox.information(
             self,
             "已恢复默认",
-            f"共享 Hub 端口已恢复为默认值 {constants.DEFAULT_GATEWAY_PORT}。",
+            f"本机连接编号已恢复为默认值 {constants.DEFAULT_GATEWAY_PORT}。",
         )
 
     def _open_advanced_settings(self) -> None:
@@ -2690,19 +2753,19 @@ class MainWindow(QMainWindow):
         form = QFormLayout(dialog)
         hub_label = QLineEdit(str(self._app_config.gateway_port))
         hub_label.setReadOnly(True)
-        form.addRow("共享 Hub Gateway:", hub_label)
+        form.addRow("连接服务:", hub_label)
         codex_spin = QSpinBox()
         codex_spin.setRange(1, 65535)
         codex_spin.setValue(project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT)
-        form.addRow("CodexPro 引擎:", codex_spin)
+        form.addRow("开发服务:", codex_spin)
         windows_spin = QSpinBox()
         windows_spin.setRange(1, 65535)
         windows_spin.setValue(project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT)
-        form.addRow("Windows-MCP 桥接:", windows_spin)
+        form.addRow("Windows 控制:", windows_spin)
         legacy_spin = QSpinBox()
         legacy_spin.setRange(1, 65535)
         legacy_spin.setValue(self._app_config.legacy_backend_port)
-        form.addRow("Legacy backend（全局）:", legacy_spin)
+        form.addRow("兼容服务（全局）:", legacy_spin)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -2714,7 +2777,7 @@ class MainWindow(QMainWindow):
         ports = (self._app_config.gateway_port, codex_spin.value(), windows_spin.value())
         if len(set(ports)) != 3:
             QMessageBox.warning(
-                self, "端口冲突", "共享 Gateway、当前项目 CodexPro、Windows-MCP 端口必须互不相同。"
+                self, "内部连接设置冲突", "这些内部连接编号必须互不相同。"
             )
             return
         project.codexpro_port = codex_spin.value()
@@ -2727,14 +2790,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "保存失败", str(exc))
             return
         self._append_log(
-            f"{project.display_name} 的项目引擎端口已保存；Gateway 端口仍由共享 Hub 管理。"
+            f"{project.display_name} 的内部连接设置已保存。"
         )
         self._refresh_project_list()
         self._update_gateway_port_ui()
 
     def _ports_conflict(self, options: StartOptions) -> str | None:
         if not self.coord.running and port_in_use(options.gateway_port):
-            return f"共享 Gateway 端口 {options.gateway_port} 已被占用。请先停止占用该端口的程序。"
+            return f"本机连接编号 {options.gateway_port} 已被占用。请先停止占用它的程序。"
         return None
 
     # -------------------------------------------------- coordinator events
@@ -2836,7 +2899,7 @@ class MainWindow(QMainWindow):
         )
         bridge_label = "Windows 控制" if IS_WINDOWS else "Linux 原生工具"
         self.component_status.setText(
-            f"项目服务：{codex_state} · 共享 Gateway：{gateway_state} · "
+            f"项目服务：{codex_state} · 连接服务：{gateway_state} · "
             f"公网连接：{tunnel_state} · {bridge_label}：{windows_state}"
         )
         self._refresh_project_list()
@@ -2870,21 +2933,21 @@ class MainWindow(QMainWindow):
     def _regenerate_token(self) -> None:
         if self._has_active_projects() or self.coord.running:
             QMessageBox.warning(
-                self, "Hub 正在运行", "请先停止所有项目，再重新生成共享 Hub 访问令牌。"
+                self, "连接服务正在运行", "请先停止所有项目，再重新生成连接访问码。"
             )
             return
-        self._append_log("正在重新生成共享 Hub 访问令牌…")
+        self._append_log("正在重新生成连接访问码…")
 
         def run() -> str:
             return _hub_access_token(regenerate=True)
 
         def done(result: Any) -> None:
             if isinstance(result, Exception):
-                self._append_log(f"令牌生成失败：{result}")
+                self._append_log(f"访问码生成失败：{result}")
                 return
             self._current_token = str(result)
             self._sync_token_ui()
-            self._append_log("已重新生成共享 Hub 访问令牌；所有项目仍使用各自内部引擎凭据。")
+            self._append_log("已重新生成连接访问码。")
 
         _run_async(run, done)
 
@@ -2895,13 +2958,13 @@ class MainWindow(QMainWindow):
             return
         unit = self.pm.unit(project.id)
         if unit is None or unit.state != EngineState.READY or self.coord.state != EngineState.READY:
-            self.test_output.setText("（请先启动当前项目和共享 Hub）")
+            self.test_output.setText("（请先启动当前项目和连接服务）")
             return
         project_id = project.id
         url = self.coord.public_url or self._local_url()
         access_value = _hub_access_token(ensure=True)
         self.test_btn.setEnabled(False)
-        self.test_output.setText(f"正在通过共享 Hub 自测 {url} …")
+        self.test_output.setText(f"正在检查连接 {url} …")
 
         def run() -> SelftestResult:
             return run_selftest(url, access_value or None)
@@ -2916,9 +2979,9 @@ class MainWindow(QMainWindow):
                 ]
                 output = "\n".join(lines) if lines else "（无步骤）"
                 if result.ok:
-                    self._append_log("共享 Hub 连接自测通过")
+                    self._append_log("连接自测通过")
                 else:
-                    self._append_log(f"共享 Hub 连接自测未通过：{result.error or '有步骤失败'}")
+                    self._append_log(f"连接自测未通过：{result.error or '有步骤失败'}")
             self._test_outputs[project_id] = output
             if project_id == self._selected_project_id():
                 self.test_output.setText(output)
@@ -2986,7 +3049,7 @@ class MainWindow(QMainWindow):
             return "ChatGPT"
         if "gemini" in lowered or "google" in lowered:
             return "Gemini"
-        return "MCP 客户端" if value else "—"
+        return "网页客户端" if value else "—"
 
     def _friendly_process_line(self, line: str) -> str:
         lowered = line.lower()
@@ -3012,15 +3075,15 @@ class MainWindow(QMainWindow):
         if path == "/device/heartbeat" and status < 400:
             return None
         if event == "device_paired":
-            message = "新电脑已成功加入 Multi-Device Hub。"
+            message = "新电脑已成功连接。"
         elif "consent" in path:
             message = "Gemini 授权流程已到达这台电脑。"
         elif method == "initialize":
-            message = "网页端正在建立 MCP 连接。"
+            message = "网页端正在建立连接。"
         elif method == "tools/list":
             message = "网页端已成功获取可用功能列表。"
         elif path == "/mcp":
-            message = "收到了一次来自网页端的 MCP 请求。"
+            message = "收到了一次来自网页端的请求。"
         elif path.startswith("/device/"):
             message = "收到了一次多设备连接请求。"
         else:

@@ -38,6 +38,7 @@ BROKER_MAX_OUTPUT_CHARS = 262_144
 BROKER_IDLE_SECONDS = 600.0
 BROKER_REQUEST_TIMEOUT_SECONDS = 120.0
 BROKER_START_TIMEOUT_SECONDS = 25.0
+TASK_VALIDATION_TTL_SECONDS = 5.0
 
 
 def _auth_store_key() -> str:
@@ -82,22 +83,79 @@ def _task_exists() -> bool:
         return False
 
 
-def _register_task_current_process() -> bool:
+def _normalized_windows_path(value: str) -> str:
+    return os.path.normcase(os.path.normpath(value.strip().strip('"')))
+
+
+def _task_matches_current_command() -> bool:
+    """Verify the registered task still targets this installed/runtime build."""
+    if not IS_WINDOWS or not _task_exists():
+        return False
+    exe, args, workdir = _broker_command()
+    script = f"""$ErrorActionPreference = 'Stop'
+$task = Get-ScheduledTask -TaskName {_ps_quote(BROKER_TASK_NAME)} -TaskPath '\\'
+$action = @($task.Actions)[0]
+[pscustomobject]@{{
+  execute = [string]$action.Execute
+  arguments = [string]$action.Arguments
+  working_directory = [string]$action.WorkingDirectory
+}} | ConvertTo-Json -Compress
+"""
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+            **run_platform_kwargs(),
+        )
+        if result.returncode != 0:
+            return False
+        payload = json.loads(result.stdout.strip() or "{}")
+        return bool(
+            isinstance(payload, dict)
+            and _normalized_windows_path(str(payload.get("execute") or ""))
+            == _normalized_windows_path(exe)
+            and str(payload.get("arguments") or "").strip() == args.strip()
+            and _normalized_windows_path(str(payload.get("working_directory") or ""))
+            == _normalized_windows_path(workdir)
+        )
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+        return False
+
+
+def _register_task_current_process(caller_sid: str = "") -> bool:
     """Register the highest-token task from an already elevated process.
 
     The standard-user desktop never executes a writable temporary script under
     UAC. It elevates the currently running executable into a dedicated
     registration entry point; only that elevated process creates the task.
+
+    The task DACL deliberately gives the original medium-integrity caller only
+    FILE_GENERIC_READ + FILE_GENERIC_EXECUTE. This lets the desktop query/run
+    the pre-authorized task without allowing a medium process to rewrite the
+    elevated action into an arbitrary privilege-escalation trampoline.
     """
     if not IS_WINDOWS or not _token_is_elevated():
         return False
     exe, args, workdir = _broker_command()
+    safe_sid = caller_sid.strip()
+    sid_expr = _ps_quote(safe_sid) if safe_sid else "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
     script = f"""$ErrorActionPreference = 'Stop'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$callerSid = {sid_expr}
 $action = New-ScheduledTaskAction -Execute {_ps_quote(exe)} -Argument {_ps_quote(args)} -WorkingDirectory {_ps_quote(workdir)}
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName {_ps_quote(BROKER_TASK_NAME)} -Action $action -Principal $principal -Settings $settings -Description 'MCP DevBridge local high-integrity broker; created after explicit UAC consent.' -Force | Out-Null
+$service = New-Object -ComObject 'Schedule.Service'
+$service.Connect()
+$registered = $service.GetFolder('\\').GetTask({_ps_quote(BROKER_TASK_NAME)})
+$sddl = 'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;' + $callerSid + ')'
+$registered.SetSecurityDescriptor($sddl, 0)
 """
     try:
         result = subprocess.run(
@@ -138,13 +196,14 @@ def _run_registration_uac() -> bool:
     exe, args, workdir = _registration_command()
     ps_args = ",".join(_ps_quote(arg) for arg in args)
     command = (
+        "$callerSid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
         "$p=Start-Process -FilePath "
         + _ps_quote(exe)
         + " -Verb RunAs -Wait -PassThru -WorkingDirectory "
         + _ps_quote(workdir)
         + " -ArgumentList @("
         + ps_args
-        + "); exit $p.ExitCode"
+        + ",'--caller-sid',$callerSid); exit $p.ExitCode"
     )
     try:
         result = subprocess.run(
@@ -181,23 +240,48 @@ def _token_is_elevated() -> bool:
     if not IS_WINDOWS:
         return False
     try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
+        get_current_process = kernel32.GetCurrentProcess
+        get_current_process.argtypes = []
+        get_current_process.restype = ctypes.c_void_p
+        open_process_token = advapi32.OpenProcessToken
+        open_process_token.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        open_process_token.restype = ctypes.c_int
+        get_token_information = advapi32.GetTokenInformation
+        get_token_information.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        get_token_information.restype = ctypes.c_int
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+
         handle = ctypes.c_void_p()
-        process = ctypes.windll.kernel32.GetCurrentProcess()  # type: ignore[attr-defined]
-        if not ctypes.windll.advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(handle)):  # type: ignore[attr-defined]
+        process = get_current_process()
+        if not open_process_token(process, 0x0008, ctypes.byref(handle)):
             return False
         try:
-            elevated = ctypes.c_uint(0)
-            size = ctypes.c_uint(0)
-            ok = ctypes.windll.advapi32.GetTokenInformation(  # type: ignore[attr-defined]
+            elevated = ctypes.c_uint32(0)
+            size = ctypes.c_uint32(0)
+            ok = get_token_information(
                 handle,
-                20,
-                ctypes.byref(elevated),
+                20,  # TokenElevation
+                ctypes.cast(ctypes.byref(elevated), ctypes.c_void_p),
                 ctypes.sizeof(elevated),
                 ctypes.byref(size),
             )
             return bool(ok and elevated.value)
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+            close_handle(handle)
     except Exception:
         return False
 
@@ -536,9 +620,24 @@ class ElevationController:
     def __init__(self) -> None:
         self._auth_cache = ""
         self._lock = threading.RLock()
+        self._registration_cache_until = 0.0
+        self._registration_cache_value = False
 
     def is_registered(self) -> bool:
-        return _task_exists()
+        with self._lock:
+            now = time.monotonic()
+            if now < self._registration_cache_until:
+                return self._registration_cache_value
+            value = _task_matches_current_command()
+            self._registration_cache_value = value
+            self._registration_cache_until = now + TASK_VALIDATION_TTL_SECONDS
+            return value
+
+    def _cache_registration(self, value: bool) -> bool:
+        with self._lock:
+            self._registration_cache_value = value
+            self._registration_cache_until = time.monotonic() + TASK_VALIDATION_TTL_SECONDS
+        return value
 
     def _auth_value(self) -> str:
         with self._lock:
@@ -557,10 +656,12 @@ class ElevationController:
             return False
         if self.is_registered():
             return True
+        self._auth_value()
+        if _token_is_elevated():
+            return self._cache_registration(_register_task_current_process())
         if not interactive:
             return False
-        self._auth_value()
-        return _run_registration_uac()
+        return self._cache_registration(_run_registration_uac())
 
     def _request_raw(
         self,
@@ -884,7 +985,12 @@ def broker_main() -> int:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if "--register-task" in args or "--register-elevated-broker-task" in args:
-        return 0 if _register_task_current_process() else 5
+        caller_sid = ""
+        if "--caller-sid" in args:
+            index = args.index("--caller-sid")
+            if index + 1 < len(args):
+                caller_sid = args[index + 1]
+        return 0 if _register_task_current_process(caller_sid) else 5
     if "--broker" in args or "--elevated-broker" in args:
         return broker_main()
     return 2

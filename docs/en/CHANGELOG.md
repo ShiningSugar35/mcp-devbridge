@@ -11,6 +11,9 @@ All dates are local development dates.
 - Harden the elevation lifecycle against privilege retention and startup/stop races: permission downgrade replaces an elevated manager with a normal one, broker startup is serialized across bulk-start workers, stop failures cannot be reported as IDLE, broker child enumeration is lock-scoped, and registration elevates the controlled executable rather than executing a writable temporary script.
 - Reduce routing and supervision overhead with a 350 ms active-root snapshot, an O(1) root-to-workspace index, and 250 ms elevated-status IPC coalescing. Keep workspace/affinity/request/output state explicitly bounded.
 - Add routing, full-system, elevation, permission-downgrade, concurrency, negative-security and release regressions; clean historical build intermediates and keep generated `.ai-bridge` runtime state out of release commits.
+- Fix the final Windows elevation live-probe defects before publication: declare pointer-sized Win32 token APIs so a real High Integrity process is not misclassified, validate the scheduled-task action against the current runtime, and grant the original user only read/execute access to the pre-authorized task while SYSTEM/Administrators retain full control.
+- Make administrator setup recoverable and non-technical in the desktop UI. A successful normal-launch authorization and an already-elevated launch now converge on the same verified high-integrity path; failure offers an explicit workspace-only recovery instead of preventing MCP from starting. Ordinary UI uses user-language labels such as administrator access, access code and connection service, while implementation terms remain in diagnostics/developer docs.
+- Align the CodexPro CLI with the already-supported `developer` bash mode and harden HTTP smoke child-exit handling so release tests do not fail or hang on a fast process-exit race.
 
 ## 0.8.7 (2026-08-26) — stateless MCP and idle-502 self-healing
 

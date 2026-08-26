@@ -40,18 +40,32 @@ function waitForListening(child) {
 function waitForExit(child, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     let stderr = '';
+    let settled = false;
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       child.kill('SIGTERM');
       reject(new Error(`timeout waiting for process exit\n${stderr}`));
     }, timeoutMs);
     timer.unref();
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on('exit', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stderr });
-    });
+    const finish = (code, signal) => {
+      const resolveAfterStderr = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code, signal, stderr });
+      };
+      if (child.stderr.readableEnded) resolveAfterStderr();
+      else child.stderr.once('end', resolveAfterStderr);
+    };
+    if (child.exitCode !== null || child.signalCode !== null) {
+      finish(child.exitCode, child.signalCode);
+    } else {
+      child.once('exit', finish);
+    }
   });
 }
 

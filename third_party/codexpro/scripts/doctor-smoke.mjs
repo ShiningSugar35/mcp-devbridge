@@ -51,6 +51,24 @@ if (result.status !== 0) {
 }
 
 const output = `${result.stdout}\n${result.stderr}`;
+const developerDoctor = spawnSync(process.execPath, [
+  'scripts/codexpro.mjs',
+  'doctor',
+  '--root',
+  root,
+  '--port',
+  String(await getFreePort()),
+  '--tunnel',
+  'none'
+], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_HOME: home, CODEXPRO_BASH_MODE: 'developer' },
+  encoding: 'utf8'
+});
+const developerOutput = `${developerDoctor.stdout}\n${developerDoctor.stderr}`;
+if (developerDoctor.status !== 0 || !developerOutput.includes('bash=developer')) {
+  throw new Error(`doctor did not accept developer bash mode\n${developerOutput}`);
+}
 for (const expected of ['CodexPro doctor', 'Node', 'Build artifacts', 'Local port', 'Ready']) {
   if (!output.includes(expected)) {
     throw new Error(`doctor output missing ${expected}\n${output}`);
@@ -88,7 +106,7 @@ const invalidOutput = `${invalidDoctor.stdout}\n${invalidDoctor.stderr}`;
 if (
   invalidDoctor.status === 0 ||
   !invalidOutput.includes('Bash mode') ||
-  !invalidOutput.includes('--bash must be off, safe, or full') ||
+  !invalidOutput.includes('--bash must be off, safe, developer, or full') ||
   !invalidOutput.includes('Write mode') ||
   !invalidOutput.includes('--write must be off, handoff, or workspace') ||
   !invalidOutput.includes('Tool mode') ||

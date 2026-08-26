@@ -129,7 +129,13 @@ MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP �
 - elevated broker 只能 loopback/本机受控 IPC + 强随机 secret；接口必须最小化、请求/输出有界、可审计，不得成为一个裸露的“任意管理员命令公网 RPC”。
 - 拒绝首次 UAC 授权时，系统必须明确说明 full-system admin capability 未启用；不得静默降级后仍显示“完全访问已生效”。
 
-### 3.4 长任务执行纪律也是硬约束
+### 3.4 普通用户界面必须使用用户语言
+
+- 工作台、项目设置、普通状态提示和错误弹窗只描述用户需要理解的概念与下一步操作；不得直接暴露 `UAC`、`broker`、`token`、`Gateway`、`full_system`、`IPC`、`CodexPro` 等实现术语。
+- 技术术语可保留在诊断、日志、开发文档和代码中；若普通界面确有必要展示底层信息，应先转换成“管理员权限”“访问码”“连接服务”“开发服务”“完全访问”等用户可理解名称。
+- 错误提示至少说明：发生了什么、当前影响、用户下一步可做什么。高级能力失败不得把基础连接能力一并锁死；能安全降级时必须提供显式恢复入口，并准确显示降级后的权限状态。
+
+### 3.5 长任务执行纪律也是硬约束
 
 - 多阶段任务或预计超过约 2 分钟的工作，在有写权限时先 `long_run_start`，把 objective、steps 与 acceptance criteria 持久化。
 - 长命令只通过后台 `bash` 执行，并用 `long_run_id` / `long_run_step_id` 绑定；禁止把 build/test/install/upload 放进同步 `run_command` / `run_program` 等待数分钟。
