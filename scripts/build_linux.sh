@@ -12,9 +12,9 @@ with open('pyproject.toml','rb') as f:
 PY
 )"
 fi
-python3 scripts/check_release_version.py --root "$ROOT" --expected "$VERSION"
 PY="$ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || { echo "Missing .venv/bin/python" >&2; exit 2; }
+"$PY" scripts/check_release_version.py --root "$ROOT" --expected "$VERSION"
 
 DIST_ROOT="$ROOT/dist/staging-$VERSION"
 DIST_DIR="$DIST_ROOT/MCPDevBridge"
