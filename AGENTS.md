@@ -155,6 +155,10 @@ MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP �
 - 浏览器刷新、Connector 重连、上下文压缩或新会话恢复时，先按 §1.1 的五级事实源顺序恢复；其中 `.ai-bridge/long-runs/<run_id>.json` 是**长任务执行状态**的最终事实源，用于恢复 step/checkpoint/task/review revision，但不得覆盖 `AGENTS.md`、当前真实架构或已验收文档事实。禁止靠聊天记忆猜进度或重新制造超长接管提示词。
 - MCP/CodexPro 重启后旧 `task_id` unknown 时，必须提供明确终态证据后再 resolve。
 - 目标仍可执行且无需真实用户输入/授权时，`wait_task` 返回 running 不能成为结束 turn 的理由；继续自动推进并定期给用户简短进展。
+- **ChatGPT host 的单轮总执行上限不是 DevBridge 可配置项，OpenAI 当前公开文档也没有给出一个可依赖的固定分钟数。** 禁止把一次约 20–30 分钟的历史中断经验写成平台 SLA。应把可控超时与 host turn 生命周期分离：`run_command/run_program` 单次硬上限 20 秒；`wait_task` 无 progress token 时单次最多 30 秒，有可用 MCP progress token 时最多 120 秒；后台 `bash` 子进程本身无固定执行时限。
+- 长任务默认采用“**短工具调用 + 无界后台执行 + 持久 checkpoint**”：普通轮询优先 15–30 秒，不用一个超长 MCP 请求赌 host 生命周期；后台任务继续运行，轮询超时绝不能取消它。每个阶段完成、任何 restart/install/release 等高风险边界前，以及连续执行约 5–10 分钟仍未形成新证据时，都要把事实写入 durable run，确保 host 即使结束当前 turn 也能零猜测恢复。
+- 预计独立执行超过约 10 分钟且能由本地 executor 自主完成的 build/test/soak/release 子阶段，优先交给 `bash`、`execute-handoff/loop-handoff` 或等价本地持久 executor；ChatGPT 只做短轮询、审查和决策。不要让浏览器/MCP 请求本身承担长计算寿命。
+- 缩短单次工具调用能显著降低“单个 MCP 请求超时/中间层断开”的风险，但**不能保证延长 ChatGPT host 的整轮生命周期**；单轮总生命周期若由平台结束，本地 DevBridge 无法自行创建新的 ChatGPT UI turn。目标是让这种平台边界只造成“自动执行仍在继续/下轮立即恢复”，而不是丢失工作或要求用户重新粘贴上下文。
 
 ## 4. Hub、设备与连接方式
 

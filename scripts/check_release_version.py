@@ -3,10 +3,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 _VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 
@@ -27,9 +26,16 @@ def _read_text(path: Path) -> str:
 
 
 def _pyproject_version(root: Path) -> str:
-    with (root / "pyproject.toml").open("rb") as handle:
-        value = tomllib.load(handle).get("project", {}).get("version")
-    return str(value or "").strip()
+    text = _read_text(root / "pyproject.toml")
+    section = re.search(r"(?ms)^\[project\]\s*$\n(.*?)(?=^\[|\Z)", text)
+    if not section:
+        return ""
+    match = re.search(
+        r'^\s*version\s*=\s*["\']([^"\']+)["\']\s*$',
+        section.group(1),
+        re.MULTILINE,
+    )
+    return str(match.group(1) if match else "").strip()
 
 
 def _regex_version(root: Path, relative: str, pattern: str) -> str:
@@ -62,13 +68,21 @@ def _installer_version(root: Path) -> str:
 
 
 def _lock_version(root: Path) -> str:
-    with (root / "uv.lock").open("rb") as handle:
-        packages = tomllib.load(handle).get("package", [])
-    if not isinstance(packages, list):
-        return ""
-    for package in packages:
-        if isinstance(package, dict) and package.get("name") == "local-dev-mcp-bridge":
-            return str(package.get("version") or "").strip()
+    text = _read_text(root / "uv.lock")
+    for block in re.split(r"(?m)^\[\[package\]\]\s*$", text)[1:]:
+        name = re.search(
+            r'^\s*name\s*=\s*["\']([^"\']+)["\']\s*$',
+            block,
+            re.MULTILINE,
+        )
+        if not name or name.group(1) != "local-dev-mcp-bridge":
+            continue
+        version = re.search(
+            r'^\s*version\s*=\s*["\']([^"\']+)["\']\s*$',
+            block,
+            re.MULTILINE,
+        )
+        return str(version.group(1) if version else "").strip()
     return ""
 
 
@@ -86,7 +100,7 @@ def check_release_versions(root: Path, expected: str) -> VersionCheckResult:
     for label, reader in readers:
         try:
             value = reader(root)
-        except (OSError, tomllib.TOMLDecodeError, ValueError):
+        except (OSError, ValueError):
             value = ""
         observed[label] = value
         if not value:

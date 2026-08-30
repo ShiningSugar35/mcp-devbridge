@@ -123,6 +123,12 @@ This is an execution-discipline guardrail, not a way for the server to override 
 
 No timeout above is treated as proof of successful work. A timeout or lost task must be reflected in persisted state and reviewed.
 
+### Host-turn budget: what is and is not controllable
+
+OpenAI's public ChatGPT documentation does not currently publish a fixed, contractual maximum duration for one interactive ChatGPT turn. Do not infer such a limit from one observed 20–30 minute interruption. The limits above are **DevBridge/MCP call limits**, not a documented ChatGPT-wide turn limit. OpenAI's API documentation separately recommends Background mode for model requests that may take several minutes, which confirms the general principle that request lifetime and work lifetime should be separated; that API facility is not something a local MCP server can force the ChatGPT web app to use.
+
+DevBridge therefore uses a turn-budget discipline rather than trying to “increase” an unknown host limit: keep ordinary MCP polls at 15–30 seconds; put long work in `bash`/local executors whose process lifetime is independent of the poll request; persist a durable checkpoint at every phase boundary, before restart/install/release boundaries, and after roughly 5–10 minutes without a new durable fact; prefer `execute-handoff`/`loop-handoff` for autonomous subphases expected to run beyond about 10 minutes. Shortening individual calls reduces per-request timeout and intermediary-disconnect risk, but it cannot guarantee that the ChatGPT host will keep the same assistant turn alive indefinitely. If the host ends the turn, the durable run and background process continue to be the recovery source of truth, and the next turn resumes from `long_run_status` without asking the user to reconstruct context.
+
 ## Local executor/reviewer loop
 
 `codexpro loop-handoff` remains useful when a local CLI agent can execute independently of the browser. v0.8.4 persists a versioned loop state containing:
