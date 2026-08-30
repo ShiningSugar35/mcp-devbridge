@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
-import { BASH_TASK_WAIT_MAX_MS, BashTaskManager } from "../dist/bashOps.js";
+import {
+  BASH_TASK_WAIT_MAX_MS,
+  BashTaskManager,
+  normalizeWindowsEnvironment,
+  resolveBashShell
+} from "../dist/bashOps.js";
 import { loadConfig } from "../dist/config.js";
 import { PathGuard, WorkspaceManager } from "../dist/guard.js";
 
@@ -13,6 +20,27 @@ const workspaces = new WorkspaceManager(config);
 const workspace = workspaces.defaultWorkspace();
 assert.equal(BASH_TASK_WAIT_MAX_MS, 30_000, "wait_task polling cap must stay at 30 seconds");
 const tasks = new BashTaskManager();
+
+const normalizedWindowsEnv = normalizeWindowsEnvironment({
+  PATH: "preferred-path",
+  Path: "shadow-path",
+  SystemRoot: "C:\\Windows",
+  SYSTEMROOT: "C:\\ShadowWindows",
+  MixedCaseOnly: "kept"
+});
+assert.deepEqual(
+  Object.keys(normalizedWindowsEnv).filter((key) => key.toLowerCase() === "path"),
+  ["PATH"],
+  "Windows environment normalization must keep exactly one PATH key"
+);
+assert.equal(normalizedWindowsEnv.PATH, "preferred-path", "the canonical PATH value must win deterministically");
+assert.deepEqual(
+  Object.keys(normalizedWindowsEnv).filter((key) => key.toLowerCase() === "systemroot"),
+  ["SystemRoot"],
+  "Windows environment normalization must keep exactly one SystemRoot key"
+);
+assert.equal(normalizedWindowsEnv.SystemRoot, "C:\\Windows");
+assert.equal(normalizedWindowsEnv.MixedCaseOnly, "kept");
 
 const startedAt = Date.now();
 const started = tasks.start(
@@ -28,6 +56,59 @@ const completed = await tasks.wait(workspace, started.taskId, 5_000);
 assert.equal(completed.status, "completed");
 assert.equal(completed.exitCode, 0);
 assert.match(completed.stdout, /ASYNC_OK/);
+
+if (process.platform === "win32") {
+  const originalPath = process.env.PATH;
+  try {
+    process.env.PATH = "";
+    const noPathTasks = new BashTaskManager();
+    const noPathStarted = noPathTasks.start(
+      config,
+      guard,
+      workspace,
+      "Write-Output 'ABSOLUTE_POWERSHELL_OK'"
+    );
+    process.env.PATH = originalPath;
+    const noPathCompleted = await noPathTasks.wait(workspace, noPathStarted.taskId, 5_000);
+    assert.equal(noPathCompleted.status, "completed");
+    assert.equal(noPathCompleted.exitCode, 0);
+    assert.match(noPathCompleted.stdout, /ABSOLUTE_POWERSHELL_OK/);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+}
+
+if (process.platform === "win32") {
+  const resolvedShell = resolveBashShell(config);
+  assert.ok(path.isAbsolute(resolvedShell.executable), "the default Windows shell must resolve to an absolute path");
+  assert.equal(fs.existsSync(resolvedShell.executable), true, "the resolved Windows shell must exist before spawn");
+
+  const missingRoot = path.join(process.cwd(), `__codexpro_missing_windows_root_${process.pid}_${Date.now()}`);
+  assert.equal(fs.existsSync(missingRoot), false);
+  assert.throws(
+    () =>
+      resolveBashShell(
+        { ...config, shell: "powershell" },
+        { SystemRoot: missingRoot, WINDIR: missingRoot, PATH: "" }
+      ),
+    /shell executable not found.*Windows PowerShell/i,
+    "a missing supported shell must fail before spawn with an actionable error"
+  );
+
+  const missingCwd = `__codexpro_missing_cwd_${process.pid}_${Date.now()}`;
+  assert.throws(
+    () =>
+      new BashTaskManager().start(
+        config,
+        guard,
+        workspace,
+        "Write-Output 'SHOULD_NOT_START'",
+        { cwd: missingCwd }
+      ),
+    /working directory does not exist/i,
+    "a missing cwd must be distinguished from a missing shell executable"
+  );
+}
 
 const cancellable = tasks.start(
   config,
@@ -68,5 +149,34 @@ assert.equal(
 watchdogTasks.cancel(workspace, watchdogStarted.taskId);
 const watchdogCancelled = await watchdogTasks.wait(workspace, watchdogStarted.taskId, 5_000);
 assert.equal(watchdogCancelled.status, "cancelled");
+
+const boundedTasks = new BashTaskManager(undefined, 2);
+const boundedA = boundedTasks.start(
+  config,
+  guard,
+  workspace,
+  'node -e "setTimeout(() => console.log(\'BOUND_A\'), 30000)"'
+);
+const boundedB = boundedTasks.start(
+  config,
+  guard,
+  workspace,
+  'node -e "setTimeout(() => console.log(\'BOUND_B\'), 30000)"'
+);
+assert.throws(
+  () =>
+    boundedTasks.start(
+      config,
+      guard,
+      workspace,
+      'node -e "setTimeout(() => console.log(\'BOUND_C\'), 30000)"'
+    ),
+  /active|concurrent|limit|上限/i,
+  "a third running task must be rejected instead of growing the active task map without a hard bound"
+);
+boundedTasks.cancel(workspace, boundedA.taskId);
+boundedTasks.cancel(workspace, boundedB.taskId);
+await boundedTasks.wait(workspace, boundedA.taskId, 5_000);
+await boundedTasks.wait(workspace, boundedB.taskId, 5_000);
 
 console.log("async-task-smoke: ok");

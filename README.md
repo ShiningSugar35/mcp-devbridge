@@ -1,143 +1,63 @@
 # MCP DevBridge
 
-> 让 ChatGPT、Gemini 等支持 MCP 的客户端安全连接本机开发目录，并在多个运行根之间按路径自动路由。
+MCP DevBridge 是一个面向本地开发场景的桌面桥接工具，用于把用户明确授权的本机目录通过 Model Context Protocol（MCP）提供给 ChatGPT、Gemini 等支持 MCP 的客户端。
 
-MCP DevBridge 是一款 PySide6 桌面桥接工具。Windows 10/11 是主要发行平台；v0.8.8 同时提供 Linux / SteamOS Desktop Mode 的构建、用户目录安装和升级链。
+它负责本地工具、权限、路由、认证和连接管理，**不提供模型推理，也不调用 OpenAI / Gemini 模型 API**。模型侧的可用功能、确认流程、配额和套餐限制仍由对应客户端平台决定。
 
-它**不提供模型推理，也不调用 OpenAI / Gemini 模型 API**。客户端是否允许写入、是否需要额外确认，以及相关额度/套餐限制，仍由对应平台决定。
+## 主要能力
 
-## v0.8.8 的核心变化
+- **多项目根同时在线**：可同时启动多个目录或磁盘根，按 `path`、`cwd`、后台任务和 workspace handle 自动路由到正确项目。
+- **明确的权限边界**：提供只读、项目工作区和完全访问等模式；路径访问使用 canonical/real-path 语义，防止 `..`、symlink/junction 等越界。
+- **统一 MCP Hub**：Local 模式和公网模式都通过共享 Gateway 暴露稳定的 MCP 入口，不要求客户端先选择“入口项目”。
+- **公网连接**：支持 Cloudflare Named Tunnel、ngrok、Quick Tunnel 等方式；本地引擎和 Gateway 默认只监听 loopback。
+- **OAuth / Bearer 认证**：公网连接通过 Gateway 认证，敏感凭据使用系统安全存储或受保护的本地 fallback，不写入普通配置文件和日志。
+- **后台任务与耐久长任务**：长命令通过后台 task 执行；多阶段工作可使用 durable long-run 状态机保存步骤、证据、审查和恢复状态。
+- **连接诊断与局部恢复**：项目引擎、Gateway 和 Tunnel 分层探测并按责任层恢复，避免单个项目故障触发无关组件的全局重启。
+- **跨平台发行链**：Windows 10/11 为主要桌面平台，同时提供 Linux / SteamOS Desktop Mode 的用户目录安装与构建支持。
 
-### 长稳 transport 与 502 自愈
-
-- CodexPro 已升级到 **MCP TypeScript SDK v2 + Zod 4**。HTTP `/mcp` 使用 `createMcpHandler(..., { legacy: "stateless" })`：2026-07-28 协议按请求无状态执行，2025-era 客户端也走 SDK 的 stateless fallback。
-- 删除旧 `Mcp-Session-Id → transport` Map、30 分钟 protocol-session TTL、prune timer 和 Gateway 的 upstream-session 虚拟化。外部 `Mcp-Session-Id` 不会再转发给 CodexPro，上游 404/`Session not found` 也不会触发工具调用自动重放。
-- protocol 无状态不丢业务能力：workspace handle、后台 task 和 durable long-run 是进程级业务状态；selected workspace / `show_changes(last_shown)` 用有界 client-affinity 隔离，不参与鉴权或根路由。
-- `EngineManager` 会实时发现已退出的 CodexPro；`ProjectManager` 用认证 `/healthz` 做数据面探针并只恢复失败项目；共享 Gateway 连续本地失败时由 `ServiceCoordinator` 单独重建，Tunnel 失败仍走 tunnel-only recovery。
-- Windows 公网 Hub 运行时通过 `SystemAwakeGuard` 请求 `ES_SYSTEM_REQUIRED | ES_CONTINUOUS`，防止 Modern Standby idle timeout 停掉后台 origin，但不会保持屏幕点亮。
-- 延续 v0.8.6 的 12 秒 SSE keepalive、progress-aware `wait_task`、紧凑轮询结果与 durable `long_run_*`。这些能力减少本地/Tunnel/空闲链路故障并增强恢复，但仍不能绕过 ChatGPT 宿主自身的 hard turn/message-delivery timeout。
-
-### 更新器直达最高正式版本
-
-- 应用内更新会扫描正式 GitHub Releases，跳过 draft、prerelease 和缺少当前平台安装包的版本，再按版本号选择最高可安装版本。
-- 落后多个版本时一次升级到最高正式版，例如 `0.8.4 → 0.8.8`；不再逐级安装相邻版本。安装包的 size / SHA-256 校验和 detached live-upgrade 接力保持不变。
-
-### 数小时长任务：持久化 plan → 执行 → 审查 → 返工 → PASS → return
-
-v0.8.8 延续 v0.8.4 引入的**耐久长任务编排**。对于多阶段或预计超过约 2 分钟的任务，不再依赖某一次 MCP `tools/call` 长时间保持连接，也不再只依赖模型当前聊天上下文记住“做到哪一步”。
-
-CodexPro 新增：
-
-- `long_run_start`：先把目标、步骤和每步验收标准持久化到 `.ai-bridge/long-runs/<run_id>.json`。
-- `long_run_update`：记录进度、证据、返工和后台 `task_id`；步骤首次标记 `done` 必须有证据。
-- `long_run_review`：按当前 work revision 做 PASS/FAIL 审查；FAIL 必须给出可执行返工项并重新打开失败步骤。
-- `long_run_complete`：只有所有步骤完成、最新 PASS 审查覆盖当前 revision、且没有仍在运行/未知未解释的后台任务时才允许完成。
-- `long_run_status` / `long_run_list`：网页刷新、Connector 重连、上下文压缩或 CodexPro 进程重启后，可以依靠 durable `run_id` 恢复，不需要猜测之前聊天里做到哪里。
-- `bash` 继续支持 `long_run_id` / `long_run_step_id` 绑定；后台任务本身仍**没有固定执行时长上限**。`wait_task` 无 progress token 时最多 30 秒；客户端提供标准 progress token 时可请求最多 120 秒并持续发 progress notification，running 状态只带 2 KiB 日志尾部以控制上下文压力。
-
-模型侧指令也同步收紧：长任务应先建 durable plan，分阶段 checkpoint，审查失败则返工；**在 `long_run_complete` 成功前不得向用户返回“已全部完成”**。只要目标仍可执行且不需要真正的用户输入/授权，就应在同一 ChatGPT assistant turn 内自动继续，并用简短 commentary 告知阶段进展，而不是要求用户反复发送“继续”。完整设计、故障恢复及宿主 hard-timeout 边界见 `docs/en/LONG_RUNNING_TASKS.md` 与 `docs/en/GOAL_LONG_RUNNING_TASKS.md`。
-
-### 所有运行根同时 active
-
-项目列表不再有“入口项目”或“当前工作区决定权限”的概念。只要一个项目根处于运行中（READY），它和其它运行根就同时参与 Hub 路由。
-
-例如同时启动：
+## 工作方式
 
 ```text
-C:\
-D:\
+ChatGPT / Gemini / MCP Client
+            │
+            │ Streamable HTTP / MCP
+            ▼
+     OAuth / Bearer Gateway
+            │
+            ├── active root A ──> CodexPro
+            ├── active root B ──> CodexPro
+            ├── active root N ──> CodexPro
+            │
+            └── optional remote device
 ```
 
-那么：
+所有处于运行状态的项目根地位平等。一次工具调用会根据实际路径、cwd、task affinity 或显式 workspace handle 选择目标项目；如果证据不足且存在歧义，系统应明确失败，而不是猜测目标根。
 
-```text
-C:\Program Files (x86)\...
-C:\Users\...\project
-D:\Environment\mcp
-D:\meme
-```
-
-都可以直接作为目标路径，无论它们是不是 Git 仓库，也不需要把每个子目录单独加入项目列表。
-
-路由规则：
-
-1. 绝对路径优先；若多个运行根有包含关系，选择最具体的根。
-2. 相对路径只有在能唯一定位到一个运行根时才自动选择。
-3. 多个根存在同名相对路径时返回歧义错误，要求改用绝对路径，不猜测。
-4. `bash` 任务产生的 `task_id` 会绑定原运行根，后续 `wait_task/get_task/cancel_task` 自动回到同一根。
-5. CodexPro `workspace_id=ws_...` 仅作为没有路径/任务证据时的兼容 affinity。
-6. `devbridge_switch_workspace` / `devbridge_workspace_id` 仍保留兼容和显式覆盖能力，但不是正常开发工作流的前置步骤。
-
-路径安全没有因为自动路由而放松：`..`、symlink/junction 逃逸和本地工具越界 `cwd` 都会被拒绝；根盘扫描遇到无权限目录会跳过并返回 warning，而不是让整次扫描失败。
-
-Hub 本身只有一个全局 Gateway 端口和一个客户端访问 Bearer；每个项目只保留自己的内部 CodexPro / Windows-MCP 端口与上游凭据。旧配置中的 per-project gateway_port 会被兼容读取后忽略，不再形成入口端口。
-
-### 多根 Hub 生命周期
-
-Gateway/Tunnel 是独立于项目的共享 Hub 连接。Hub 启停不再绑定任何项目根、项目端口或项目 Bearer；项目只负责自己的 CodexPro/Windows 内部引擎。
-
-- 停止一个运行根：只停止该根的 ProjectUnit，其它运行根和 Hub 保持可用。
-- 停止最后一个运行根：再关闭共享 Gateway/Tunnel。
-- “启动所有项目 / 停止所有项目”用于批量生命周期控制。
-- 项目表只保留：名称 / 路径 / 状态 / 端口 / 操作。
-
-> `Local` 模式同样经过共享 loopback Gateway，只是不建立公网 Tunnel。无论 Local 还是公网模式，一个客户端地址都可以在所有 READY 根之间按 path/cwd/task 自动路由，不需要先选入口项目。
-
-## 架构概览
-
-```text
-ChatGPT / Gemini
-        │ MCP over HTTPS
-        ▼
-Cloudflare / ngrok / Quick Tunnel
-        ▼
-OAuth/Bearer Gateway (loopback)
-        │
-        ├── active root C:\  → CodexPro
-        ├── active root D:\  → CodexPro
-        ├── active nested root → CodexPro
-        └── optional remote device → remote DevBridge Hub
-                                      │
-                                      └── its own active roots
-```
-
-CodexPro 提供文件、Git、Shell、异步任务、代码分析等开发工具。Windows-MCP 是可选系统控制桥；注册表、环境配置等系统类命令在允许的权限模式下不需要先“切换项目”。
+更完整的运行架构见 [`docs/en/ARCHITECTURE.md`](docs/en/ARCHITECTURE.md)。
 
 ## 安装
 
 ### Windows
 
-从 GitHub Release 下载：
+1. 打开 [GitHub Releases](https://github.com/ShiningSugar35/mcp-devbridge/releases/latest)。
+2. 下载最新稳定版 `MCPDevBridge-Setup-<version>.exe`。
+3. 运行安装程序并选择安装目录。
+4. 启动 MCP DevBridge。
 
-```text
-MCPDevBridge-Setup-0.8.8.exe
-```
-
-安装器为 per-user 安装，不要求管理员权限。v0.8.8 显式保留安装目录选择页，用户可以安装到默认目录，也可以选择其它目录。
-
-正式包自带固定版本的 Node.js、uv/uvx 和 cloudflared 私有运行时，不要求把这些工具安装到系统 PATH。可选 Windows-MCP 仍由内置 uvx 按锁定版本首次获取。
-
-首次使用：
-
-1. 打开 MCP DevBridge。
-2. 添加希望授权的根目录；如果希望整盘下所有子路径都可访问，可以直接添加 `C:\`、`D:\` 等盘根。
-3. 按需要选择权限模式和连接方式。
-4. 启动一个或多个项目，或点击“启动所有项目”。
-5. 将桌面显示的 MCP URL / 授权信息配置到 ChatGPT、Gemini 等客户端。
-6. 后续请求直接在提示词或工具参数中使用目标绝对路径，无需先切换 workspace。
+正式 Windows 包包含运行所需的私有 Node.js、uv/uvx 和 cloudflared 运行时，不要求把这些组件额外加入系统 `PATH`。
 
 ### Linux / SteamOS Desktop Mode
 
-GitHub Release 提供：
+从 [GitHub Releases](https://github.com/ShiningSugar35/mcp-devbridge/releases/latest) 下载：
 
 ```text
-MCPDevBridge-Linux-x86_64-0.8.8.tar.gz
+MCPDevBridge-Linux-x86_64-<version>.tar.gz
 ```
 
-解压后执行：
+解压后运行随包提供的安装脚本：
 
 ```bash
-tar -xzf MCPDevBridge-Linux-x86_64-0.8.8.tar.gz
+tar -xzf MCPDevBridge-Linux-x86_64-<version>.tar.gz
 cd MCPDevBridge
 ./install.sh
 ```
@@ -148,59 +68,84 @@ cd MCPDevBridge
 ~/.local/opt/MCPDevBridge
 ```
 
-也可以显式选择用户可写目录：
+也可以指定其它用户可写目录：
 
 ```bash
 ./install.sh --target-dir "$HOME/Applications/MCPDevBridge"
 ```
 
-安装器会拒绝 `/`、`$HOME`、`$HOME/.local` 等危险目标，也不会覆盖一个看起来不是 MCP DevBridge 的非空目录。Desktop Entry / autostart 遵循有效的绝对 `XDG_DATA_HOME` / `XDG_CONFIG_HOME`；相对 XDG 值按规范视为无效并回退到用户默认目录。
+SteamOS 建议在 Desktop Mode 下使用用户目录安装，不修改只读系统基座。
 
-SteamOS 建议在 Desktop Mode 使用用户目录安装，不改写只读系统基座。
+平台兼容细节见 [`docs/en/COMPATIBILITY.md`](docs/en/COMPATIBILITY.md)。
+
+## 快速开始
+
+1. 启动 MCP DevBridge。
+2. 添加要授权的目录。需要让某个磁盘下的子目录都可路由时，可以直接添加磁盘根，例如 `C:\` 或 `D:\`。
+3. 为项目选择权限模式和连接方式。
+4. 启动一个或多个项目，或使用“启动所有项目”。
+5. 在桌面应用中获取 MCP 连接信息，并配置到支持 MCP 的客户端。
+6. 后续调用直接使用目标绝对路径，或继续使用已经获得的 workspace handle；通常不需要手工切换“当前项目”。
+
+例如同时启动：
+
+```text
+C:\
+D:\
+```
+
+则这些路径都可以由同一个 Hub 自动路由：
+
+```text
+C:\Users\...\project
+C:\Program Files\...
+D:\Environment\mcp
+D:\other-project
+```
 
 ## 连接方式
 
-| 方式 | 说明 | 适合 |
+| 模式 | 说明 | 典型用途 |
 |---|---|---|
-| Cloudflare Named Tunnel | 固定域名，公网长期地址 | 主 Hub / 长期使用 |
-| ngrok 固定域名 | 固定 ngrok hostname | 已有 ngrok reserved domain |
-| Quick Tunnel | 随机 `trycloudflare.com`，重建会变化 | 临时测试 / 远端设备回传 |
-| Local | 仅 loopback，共享 Gateway，多根自动路由 | 本机开发 / 无公网暴露 |
+| Cloudflare Named Tunnel | 固定公网域名 | 长期主 Hub |
+| ngrok 固定域名 | 固定 ngrok hostname | 已有 reserved domain 的环境 |
+| Quick Tunnel | 临时随机公网地址 | 测试或临时设备连接 |
+| Local | 仅本机 loopback | 无公网暴露的本地开发 |
 
-所有公网模式都终止在 Gateway；CodexPro、Gateway、Windows 桥本身只监听 loopback。
-
-## 多设备
-
-一个主 Hub 可以登记其它 MCP DevBridge 设备。设备切换和本机工作区路由是两层独立逻辑：
-
-```text
-客户端
-  → 选择/自动确定设备
-  → 目标设备内部按 path/cwd/task 自动确定 active root
-  → 执行工具
-```
-
-远端 Quick Tunnel 地址变化可通过心跳更新到主 Hub，而 ChatGPT 仍只需要配置主 Hub 的固定地址。
+公网模式只暴露经过认证的 Gateway；CodexPro、可选 Windows bridge 等内部服务保持本机监听。
 
 ## 权限与安全
 
-桌面新项目默认仍是“完全访问（危险）”语义，对应 `system + full_system`，首次实际启用时必须完成一次风险确认。用户可主动降为项目工作区或只读模式。
+MCP DevBridge 能够向远端 MCP 客户端开放高权限的本地开发能力。请只添加你愿意授权的目录，并根据实际需求选择最低必要权限。
 
-主要安全边界：
+核心安全边界包括：
 
-- 路径 containment 使用 canonical/real path，防止 `..` 和 symlink/junction 越界。
-- 本地 `run_command/run_program` 的 `cwd` 必须位于目标运行根内。
-- 公网请求必须通过 Gateway 的 OAuth/Bearer 认证；loopback 匿名仅限本机兼容路径。
-- command/content/patch 与 secret-like 字段写审计日志前会脱敏。
-- 已知格式化磁盘、破坏引导、递归删除系统盘等高风险命令仍受硬拦截。
-- Windows 密钥优先使用 Credential Manager，兼容 DPAPI fallback。
-- Linux/SteamOS 优先桌面 secret service；无服务时使用用户配置目录中的 AES-GCM 加密 fallback，并限制文件权限。
+- workspace/read-only 模式下使用 canonical path containment 限制文件访问范围；
+- 防止 `..`、symlink/junction 等路径逃逸；
+- 公网入口要求 OAuth/Bearer 认证；
+- 凭据和 token 不写入普通日志、URL 或项目配置；
+- 日志中的 command、content、patch 和 secret-like 字段会经过脱敏；
+- 已知格式化磁盘、破坏引导、递归删除系统目录等高风险命令受硬限制；
+- Windows 管理员能力使用受控的系统授权机制，不通过关闭或绕过 UAC 获得权限。
 
-详细模型见 `docs/en/SECURITY.md` 与 `项目架构.md`。
+完整威胁模型、凭据存储和权限说明见 [`docs/en/SECURITY.md`](docs/en/SECURITY.md)。
+
+## 更新
+
+桌面应用可检查 GitHub 的稳定 Releases，并在存在可安装的新版本时执行升级。发布资产、版本元数据和校验值应来自同一个正式发布提交。
+
+具体版本变化不在 README 中维护；请查看 [`docs/en/CHANGELOG.md`](docs/en/CHANGELOG.md) 和 GitHub Releases。
 
 ## 开发
 
-### Windows
+### 环境
+
+- Python 3.12+
+- Node.js / npm
+- `uv`
+- Windows 发布构建需要 Inno Setup 6
+
+### 本地开发
 
 ```powershell
 uv venv --python 3.12
@@ -213,59 +158,30 @@ cd ../..
 
 .venv\Scripts\python.exe -m ruff check src tests
 .venv\Scripts\python.exe -m pyright --pythonpath .venv\Scripts\python.exe src tests
-.venv\Scripts\python.exe -m pytest tests -q --disable-warnings
-
-cd third_party/codexpro
-npm run smoke
+.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-完整 Windows 发布构建：
+Windows 完整构建可使用：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.8
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 
-产物：
-
-```text
-release/MCPDevBridge-Setup-0.8.8.exe
-```
-
-### Linux build host
-
-```bash
-uv venv --python 3.12
-uv pip install -p .venv -e '.[dev,package]'
-cd third_party/codexpro && npm ci && npm run build && cd ../..
-bash scripts/build_linux.sh 0.8.8
-```
-
-产物：
-
-```text
-release/MCPDevBridge-Linux-x86_64-0.8.8.tar.gz
-```
-
-CI 的 Linux 构建基线为 Ubuntu 22.04，以避免在过新的 glibc 环境构建后失去对较旧发行环境的兼容性。
-
-## 发布与更新
-
-桌面启动后检查 GitHub Release，之后按固定周期检查更新。更新器扫描正式 release 列表并选择当前平台可安装的最高稳定版本，因此旧版本可以一次直升最新正式版，不要求逐级安装。Windows 使用内置 `live_upgrade.ps1` 做 detached 升级接力；Linux 使用随包提供的 `live_upgrade.sh`。升级接力文件只保存非敏感恢复元数据，真正凭据在新进程启动后从 SecretsStore 重新读取。
-
-当前维护版本：**0.8.8**。`v0.9.x` 远端 tag/历史仍保留，但不属于本维护线，也不会被 v0.8.8 发布覆盖或 force-push。
+完整开发、测试和跨平台构建流程见 [`docs/en/DEVELOPMENT.md`](docs/en/DEVELOPMENT.md)。
 
 ## 文档
 
-- `AGENTS.md`：开发/Agent 快速约束。
-- `项目架构.md`：当前架构与数据流。
-- `开发计划.md`：v0.8.8 维护目标和发布门。
-- `进度验收.md`：当前发布的真实测试/构建/Release 证据。
-- `docs/en/ARCHITECTURE.md`：English architecture.
-- `docs/en/COMPATIBILITY.md`：Windows / Linux / SteamOS compatibility.
-- `docs/en/SECURITY.md`：security model.
-- `docs/en/DEVELOPMENT.md`：build and verification commands.
-- `docs/en/CHANGELOG.md`：release history.
+- [`docs/en/ARCHITECTURE.md`](docs/en/ARCHITECTURE.md) — 运行架构与路由模型
+- [`docs/en/SECURITY.md`](docs/en/SECURITY.md) — 安全、权限和凭据模型
+- [`docs/en/COMPATIBILITY.md`](docs/en/COMPATIBILITY.md) — Windows / Linux / SteamOS 兼容性
+- [`docs/en/DEVELOPMENT.md`](docs/en/DEVELOPMENT.md) — 开发、测试和构建
+- [`docs/en/LONG_RUNNING_TASKS.md`](docs/en/LONG_RUNNING_TASKS.md) — durable long-run 使用约定
+- [`docs/en/CHANGELOG.md`](docs/en/CHANGELOG.md) — 版本历史
+
+## 问题反馈
+
+如果发现连接、安装、兼容或安全问题，请在 GitHub Issues 中提供可复现步骤、平台版本和必要的脱敏日志。请勿公开提交 token、OAuth code、访问凭据或其它敏感信息。
 
 ## License
 
-项目许可证见 `LICENSE`；第三方组件及其许可证见 `THIRD_PARTY_LICENSES.md`。
+本项目许可证见 [`LICENSE`](LICENSE)。第三方组件及许可证信息见 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。

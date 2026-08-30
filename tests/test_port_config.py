@@ -68,8 +68,8 @@ class TestPortValidation:
             RuntimeConfig(workspace="C:/x", legacy_backend_port=0)
 
     def test_gateway_service_url(self) -> None:
-        assert gateway_service_url(8786) == "http://localhost:8786"
-        assert gateway_service_url(9090) == "http://localhost:9090"
+        assert gateway_service_url(8786) == "http://127.0.0.1:8786"
+        assert gateway_service_url(9090) == "http://127.0.0.1:9090"
         with pytest.raises(ValueError):
             gateway_service_url(0)
 

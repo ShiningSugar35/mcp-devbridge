@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -102,7 +106,7 @@ class TestLifecycle:
 
         def fake_spawn(self, cmd, env, secrets, log_file) -> object:  # noqa: ARG002 - self unused
             captured.append(list(cmd))
-            return object()
+            return SimpleNamespace(pid=4321)
 
         monkeypatch.setattr(TunnelManager, "_spawn", fake_spawn)
         mgr = TunnelManager(port=8787, cloudflared_exe="cloudflared", log_dir=tmp_path)
@@ -113,6 +117,108 @@ class TestLifecycle:
         )
         assert captured == [["cloudflared", "tunnel", "run", "--token", "tok-secret-123"]]
         assert mgr.public_hostname == "mcp.shiningsugar.shop"
+
+
+    def test_wait_ready_can_be_cancelled_without_waiting_for_full_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        mgr = TunnelManager(
+            port=8787,
+            cloudflared_exe="cloudflared",
+            log_dir=tmp_path,
+            timeout_seconds=90.0,
+        )
+        mgr.kind = ConnectionMethod.CLOUDFLARE
+        mgr.public_hostname = "mcp.example.com"
+        mgr._proc = cast(
+            Any,
+            SimpleNamespace(
+                is_running=True,
+                log=SimpleNamespace(tail=lambda _limit: "starting tunnel"),
+            ),
+        )
+        results: list[bool] = []
+        waiter = threading.Thread(target=lambda: results.append(mgr.wait_ready()), daemon=True)
+        waiter.start()
+        time.sleep(0.05)
+
+        started = time.monotonic()
+        mgr.cancel_wait_ready()
+        waiter.join(timeout=0.5)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5
+        assert not waiter.is_alive()
+        assert results == [False]
+        assert mgr.error is None
+
+
+    def test_cloudflare_auto_precheck_requests_http2_fallback_without_waiting_full_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        stopped: list[float] = []
+        proc = SimpleNamespace(
+            pid=9001,
+            is_running=True,
+            returncode=None,
+            log=SimpleNamespace(
+                tail=lambda _limit: (
+                    "precheck complete hard_fail=false "
+                    "suggested_protocol=http2\n"
+                )
+            ),
+            stop=lambda timeout_seconds=5.0: stopped.append(timeout_seconds),
+        )
+        mgr = TunnelManager(
+            port=8787,
+            cloudflared_exe="cloudflared",
+            log_dir=tmp_path,
+            timeout_seconds=90.0,
+        )
+        mgr.kind = ConnectionMethod.CLOUDFLARE
+        mgr.public_hostname = "mcp.example.com"
+        mgr._proc = cast(Any, proc)
+        mgr._cloudflare_protocol = "auto"  # type: ignore[attr-defined]
+
+        started = time.monotonic()
+        assert mgr.wait_ready(timeout_seconds=0.2) is False
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.15
+        assert mgr.recommended_protocol == "http2"
+        assert "cloudflare_protocol_fallback:http2" in str(mgr.error)
+        assert stopped
+
+    def test_cloudflare_http2_override_is_explicit_in_command(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[list[str]] = []
+
+        def fake_spawn(self, cmd, env, secrets, log_file):  # noqa: ANN001, ANN202, ARG002
+            captured.append(list(cmd))
+            return SimpleNamespace(pid=4321)
+
+        monkeypatch.setattr(TunnelManager, "_spawn", fake_spawn)
+        mgr = TunnelManager(port=8787, cloudflared_exe="cloudflared", log_dir=tmp_path)
+        mgr.start(
+            kind=ConnectionMethod.CLOUDFLARE,
+            hostname="mcp.example.com",
+            tunnel_token="dummy-token",
+            cloudflare_protocol="http2",
+        )
+
+        assert mgr.current_protocol == "http2"
+        assert captured == [
+            [
+                "cloudflared",
+                "tunnel",
+                "--protocol",
+                "http2",
+                "run",
+                "--token",
+                "dummy-token",
+            ]
+        ]
 
 
 class TestDefaults:

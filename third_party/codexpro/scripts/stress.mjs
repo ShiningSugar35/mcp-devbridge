@@ -27,6 +27,7 @@ class McpStdioClient {
         ...env,
         CODEXPRO_ROOT: root,
         CODEXPRO_ALLOWED_ROOTS: root,
+        CODEXPRO_SYSTEM_ACCESS: env.CODEXPRO_SYSTEM_ACCESS ?? '0',
         CODEXPRO_TOOL_MODE: env.CODEXPRO_TOOL_MODE ?? 'full',
         CODEXPRO_BASH_MODE: env.CODEXPRO_BASH_MODE ?? 'safe',
         CODEXPRO_MAX_SEARCH_RESULTS: '2000',

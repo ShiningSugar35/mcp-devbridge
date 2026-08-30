@@ -142,6 +142,147 @@ def test_diagnostics_gives_conclusion_and_next_action(tmp_path: Path, monkeypatc
         _close(app, window)
 
 
+def test_ready_diagnostics_are_project_bound_and_show_connection_layers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, project = _window(tmp_path, monkeypatch)
+    calls: list[dict[str, Any]] = []
+
+    def fake_selftest(url: str, _access: str | None = None, **kwargs: Any):
+        calls.append({"url": url, **kwargs})
+        result = dm.SelftestResult(
+            ok=True,
+            tool_count=50,
+            schema_fingerprint="a" * 64,
+            hub_contract_match=True,
+        )
+        for step in ("initialize", "streamable_http", "list_tools", "server_config"):
+            result.add(step, True, step)
+        return result
+
+    try:
+        project.connection = dm.ConnectionMethod.LOCAL.value
+        window.pm.update(project)
+        monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+        monkeypatch.setattr(dm, "_hub_access_token", lambda **_kwargs: "diagnostic-access")
+        monkeypatch.setattr(dm, "run_selftest", fake_selftest)
+        monkeypatch.setattr(window, "_project_state", lambda _project: dm.EngineState.READY)
+        monkeypatch.setattr(
+            window.coord,
+            "recovery_snapshot",
+            lambda: {"gateway_restart_seconds_ago": None, "public_restart_seconds_ago": None},
+        )
+
+        window._run_diagnostics()
+        output = window.diag_output.toPlainText()
+
+        assert len(calls) == 1
+        assert calls[0]["route_workspace_id"] == project.id
+        assert calls[0]["expect_hub_contract"] is True
+        assert calls[0]["timeout"] == 15.0
+        assert "分层连接状态" in output
+        assert "公开工具数量：正常" in output
+        assert "Schema 指纹：正常" in output
+        assert "工作区连续性：正常" in output
+        assert "ChatGPT 会话边界：边界清晰" in output
+    finally:
+        _close(app, window)
+
+
+def test_public_diagnostics_checks_both_legs_before_session_blame(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, project = _window(tmp_path, monkeypatch)
+    calls: list[dict[str, Any]] = []
+
+    def fake_selftest(url: str, _access: str | None = None, **kwargs: Any):
+        calls.append({"url": url, **kwargs})
+        if url.startswith("http://127.0.0.1"):
+            result = dm.SelftestResult(
+                ok=True,
+                tool_count=50,
+                schema_fingerprint="a" * 64,
+                hub_contract_match=True,
+            )
+            for step in ("initialize", "streamable_http", "list_tools", "server_config"):
+                result.add(step, True, step)
+            return result
+        result = dm.SelftestResult(
+            ok=False,
+            tool_count=25,
+            schema_fingerprint="b" * 64,
+            hub_contract_match=False,
+            error="public contract mismatch",
+        )
+        for step in ("initialize", "streamable_http", "list_tools"):
+            result.add(step, True, step)
+        result.add("hub_contract", False, "contract mismatch")
+        return result
+
+    try:
+        project.connection = dm.ConnectionMethod.QUICK.value
+        window.pm.update(project)
+        window.coord._public_url = "https://mcp.example.test/mcp"
+        monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+        monkeypatch.setattr(dm, "_hub_access_token", lambda **_kwargs: "diagnostic-access")
+        monkeypatch.setattr(dm, "run_selftest", fake_selftest)
+        monkeypatch.setattr(window, "_project_state", lambda _project: dm.EngineState.READY)
+        monkeypatch.setattr(
+            window.coord,
+            "recovery_snapshot",
+            lambda: {"gateway_restart_seconds_ago": None, "public_restart_seconds_ago": None},
+        )
+
+        window._run_diagnostics()
+        output = window.diag_output.toPlainText()
+
+        assert len(calls) == 2
+        assert all(call["route_workspace_id"] == project.id for call in calls)
+        assert "本机连接服务：正常" in output
+        assert "公网入口：异常" in output
+        assert "公开工具数量：异常" in output
+        assert "ChatGPT 会话边界：未判定" in output
+    finally:
+        _close(app, window)
+
+
+def test_ready_diagnostics_surface_missing_access_authorization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, project = _window(tmp_path, monkeypatch)
+
+    def fake_selftest(_url: str, _access: str | None = None, **_kwargs: Any):
+        result = dm.SelftestResult(
+            ok=True,
+            tool_count=50,
+            schema_fingerprint="a" * 64,
+            hub_contract_match=True,
+        )
+        for step in ("initialize", "streamable_http", "list_tools", "server_config"):
+            result.add(step, True, step)
+        return result
+
+    try:
+        project.connection = dm.ConnectionMethod.LOCAL.value
+        window.pm.update(project)
+        monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+        monkeypatch.setattr(dm, "_hub_access_token", lambda **_kwargs: "")
+        monkeypatch.setattr(dm, "run_selftest", fake_selftest)
+        monkeypatch.setattr(window, "_project_state", lambda _project: dm.EngineState.READY)
+        monkeypatch.setattr(
+            window.coord,
+            "recovery_snapshot",
+            lambda: {"gateway_restart_seconds_ago": None, "public_restart_seconds_ago": None},
+        )
+
+        window._run_diagnostics()
+        output = window.diag_output.toPlainText()
+
+        assert "还没有连接访问码" in output
+        assert "访问授权：异常" in output
+    finally:
+        _close(app, window)
+
 
 def test_v081_run_async_keeps_completion_signal_alive() -> None:
     import time
@@ -150,11 +291,14 @@ def test_v081_run_async_keeps_completion_signal_alive() -> None:
     if not isinstance(app, QApplication):
         app = QApplication([])
     received: list[str] = []
+    guards_before = set(dm._ASYNC_SIGNAL_GUARDS)
     dm._run_async(lambda: "ready", lambda result: received.append(str(result)))
+    created_guards = dm._ASYNC_SIGNAL_GUARDS - guards_before
+    assert len(created_guards) == 1
     deadline = time.monotonic() + 3.0
     while not received and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(0.01)
     assert received == ["ready"]
     app.processEvents()
-    assert not dm._ASYNC_SIGNAL_GUARDS
+    assert created_guards.isdisjoint(dm._ASYNC_SIGNAL_GUARDS)

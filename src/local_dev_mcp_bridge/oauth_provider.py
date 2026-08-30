@@ -17,6 +17,7 @@ No secret is ever logged or stored in plaintext.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
@@ -84,6 +85,8 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         refresh_ttl: int = constants.OAUTH_REFRESH_TOKEN_TTL_SECONDS,
         code_ttl: int = constants.OAUTH_AUTHORIZATION_CODE_TTL_SECONDS,
         consent_ttl: int = constants.OAUTH_CONSENT_TTL_SECONDS,
+        max_access_entries: int = 256,
+        max_ephemeral_entries: int = 256,
     ) -> None:
         self.issuer_url = issuer_url.rstrip("/")
         self.resource_url = resource_url.rstrip("/")
@@ -94,22 +97,47 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         self.refresh_ttl = refresh_ttl
         self.code_ttl = code_ttl
         self.consent_ttl = consent_ttl
+        self.max_access_entries = max(1, int(max_access_entries))
+        self.max_ephemeral_entries = max(1, int(max_ephemeral_entries))
         self._codes: dict[str, AuthorizationCode] = {}
         self._consents: dict[str, dict[str, Any]] = {}
         self._access_tokens: dict[str, AccessToken] = {}
+
+    def _prune_ephemeral(self) -> None:
+        """Expire and bound short-lived authorization/consent state."""
+        now = float(self._now())
+        for consent_id, record in list(self._consents.items()):
+            if now > float(record.get("expires_at") or 0):
+                self._consents.pop(consent_id, None)
+        for code_value, record in list(self._codes.items()):
+            if now > float(getattr(record, "expires_at", 0) or 0):
+                self._codes.pop(code_value, None)
+        if len(self._consents) > self.max_ephemeral_entries:
+            ordered = sorted(self._consents.items(), key=lambda item: float(item[1].get("expires_at") or 0))
+            for consent_id, _ in ordered[: len(ordered) - self.max_ephemeral_entries]:
+                self._consents.pop(consent_id, None)
+        if len(self._codes) > self.max_ephemeral_entries:
+            ordered_codes = sorted(self._codes.items(), key=lambda item: float(getattr(item[1], "expires_at", 0) or 0))
+            for code_value, _ in ordered_codes[: len(ordered_codes) - self.max_ephemeral_entries]:
+                self._codes.pop(code_value, None)
 
     # ------------------------------------------------------------ scopes
     @staticmethod
     def _check_scope(
         scopes: list[str] | None, error_factory: Callable[..., Exception]
     ) -> list[str]:
-        result = scopes if scopes is not None else [constants.OAUTH_SCOPE]
-        if set(result) != {constants.OAUTH_SCOPE}:
+        result = list(scopes) if scopes is not None else [constants.OAUTH_SCOPE]
+        allowed = {constants.OAUTH_SCOPE, constants.OAUTH_OFFLINE_SCOPE}
+        requested = set(result)
+        if constants.OAUTH_SCOPE not in requested or not requested.issubset(allowed):
             raise error_factory(
                 error="invalid_scope",
-                error_description=f"仅支持 scope：{constants.OAUTH_SCOPE}",
+                error_description=(
+                    f"必须包含 scope：{constants.OAUTH_SCOPE}；"
+                    f"可选：{constants.OAUTH_OFFLINE_SCOPE}"
+                ),
             )
-        return result
+        return list(dict.fromkeys(result))
 
     # -------------------------------------------------------------- DCR
     @staticmethod
@@ -137,22 +165,25 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
 
     # ---------------------------------------------------------- consent
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+        requested_scopes = self._check_scope(params.scopes, AuthorizeError)
         if params.resource and params.resource.rstrip("/") != self.resource_url:
             raise AuthorizeError(
                 error="invalid_target",
                 error_description="resource 必须指向当前 MCP 服务器",
             )
         consent_id = _random_token()
+        self._prune_ephemeral()
         self._consents[consent_id] = {
             "client_id": client.client_id,
             "state": params.state,
-            "scopes": params.scopes if params.scopes is not None else [constants.OAUTH_SCOPE],
+            "scopes": requested_scopes,
             "code_challenge": params.code_challenge,
             "redirect_uri": str(params.redirect_uri) if params.redirect_uri else None,
             "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
             "resource": params.resource,
             "expires_at": float(self._now()) + self.consent_ttl,
         }
+        self._prune_ephemeral()
         return f"/consent?id={consent_id}"
 
     def bind_workspace(self, consent_id: str, workspace_id: str) -> None:
@@ -162,6 +193,7 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
             record["workspace_id"] = workspace_id
 
     def get_consent(self, consent_id: str) -> dict[str, Any] | None:
+        self._prune_ephemeral()
         record = self._consents.get(consent_id)
         if record is None:
             return None
@@ -190,6 +222,7 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
             subject=subject,
         )
         self._codes[code.code] = code
+        self._prune_ephemeral()
         return _redirect_uri(record["redirect_uri"], code=code.code, state=record.get("state"))
 
     def deny(self, consent_id: str) -> str:
@@ -208,6 +241,7 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
+        self._prune_ephemeral()
         auth_code = self._codes.pop(authorization_code, None)  # single-use: removed on read
         if auth_code is None or self._now() > auth_code.expires_at:
             return None
@@ -224,6 +258,76 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
     @staticmethod
     def _refresh_key(refresh: str) -> str:
         return f"{constants.OAUTH_REFRESH_CRED_PREFIX}{_hash(refresh)}"
+
+    @staticmethod
+    def _access_key(access: str) -> str:
+        return f"{constants.OAUTH_REFRESH_CRED_PREFIX}Access:{_hash(access)}"
+
+    @staticmethod
+    def _access_index_key() -> str:
+        return f"{constants.OAUTH_REFRESH_CRED_PREFIX}AccessIndex"
+
+    def _persist_access_record(self, access: str, record: AccessToken) -> None:
+        key = self._access_key(access)
+        payload = {
+            "client_id": record.client_id,
+            "scopes": list(record.scopes),
+            "expires_at": record.expires_at,
+            "resource": record.resource,
+            "subject": record.subject,
+        }
+        self.store.set(key, json.dumps(payload, separators=(",", ":")))
+        index_key = self._access_index_key()
+        try:
+            raw_index = self.store.get(index_key)
+            index = json.loads(raw_index) if raw_index else []
+            if not isinstance(index, list):
+                index = []
+        except Exception:
+            index = []
+        now = float(self._now())
+        live: list[dict[str, Any]] = []
+        for item in index:
+            if not isinstance(item, dict):
+                continue
+            item_key = str(item.get("key") or "")
+            expires_at = item.get("expires_at")
+            if not item_key or item_key == key:
+                continue
+            if expires_at is not None and now > float(expires_at):
+                self.store.delete(item_key)
+                if "Access:" in item_key:
+                    self._access_tokens.pop(item_key.rsplit("Access:", 1)[-1], None)
+                continue
+            live.append({"key": item_key, "expires_at": expires_at})
+        live.append({"key": key, "expires_at": record.expires_at})
+        while len(live) > self.max_access_entries:
+            evicted = live.pop(0)
+            evicted_key = str(evicted.get("key") or "")
+            if evicted_key:
+                self.store.delete(evicted_key)
+                if "Access:" in evicted_key:
+                    self._access_tokens.pop(evicted_key.rsplit("Access:", 1)[-1], None)
+        self.store.set(index_key, json.dumps(live, separators=(",", ":")))
+
+    def _delete_access_record(self, access: str) -> None:
+        key = self._access_key(access)
+        self._access_tokens.pop(_hash(access), None)
+        self.store.delete(key)
+        index_key = self._access_index_key()
+        try:
+            raw_index = self.store.get(index_key)
+            index = json.loads(raw_index) if raw_index else []
+            if not isinstance(index, list):
+                index = []
+        except Exception:
+            index = []
+        live = [
+            item
+            for item in index
+            if isinstance(item, dict) and str(item.get("key") or "") != key
+        ]
+        self.store.set(index_key, json.dumps(live, separators=(",", ":")))
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
@@ -258,24 +362,48 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
 
     # ----------------------------------------------------------- access
     async def load_access_token(self, token: str) -> AccessToken | None:
-        return self._load_access_token_impl(token)
+        # Freshly issued OAuth access records are memory-only fast-path reads. After
+        # Gateway recreation the encrypted/native store lookup can block, so perform
+        # only that cache-miss path off the uvicorn event loop.
+        if _hash(token) in self._access_tokens:
+            return self._load_access_token_impl(token)
+        return await asyncio.to_thread(self._load_access_token_impl, token)
 
     def load_access_token_sync(self, token: str) -> AccessToken | None:
         """Synchronous alias for tests."""
         return self._load_access_token_impl(token)
 
     def _load_access_token_impl(self, token: str) -> AccessToken | None:
-        key = _hash(token)
-        record = self._access_tokens.get(key)
+        key_hash = _hash(token)
+        record = self._access_tokens.get(key_hash)
+        if record is None:
+            raw = self.store.get(self._access_key(token))
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    record = AccessToken(
+                        token=token,
+                        client_id=str(data["client_id"]),
+                        scopes=list(data.get("scopes") or [constants.OAUTH_SCOPE]),
+                        expires_at=data.get("expires_at"),
+                        resource=data.get("resource"),
+                        subject=data.get("subject"),
+                    )
+                    self._access_tokens[key_hash] = record
+                except Exception:
+                    self.store.delete(self._access_key(token))
+                    return None
         if record is None:
             return None
         if record.expires_at is not None and self._now() > record.expires_at:
-            self._access_tokens.pop(key, None)
+            self._delete_access_record(token)
+            return None
+        if record.resource and str(record.resource).rstrip("/") != self.resource_url:
             return None
         return record
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        self._access_tokens.pop(_hash(token.token), None)
+        self._delete_access_record(token.token)
         self.store.delete(self._refresh_key(token.token))
 
     # ---------------------------------------------------------- helpers
@@ -284,7 +412,7 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         refresh = _random_token()
         now = float(self._now())
         subject = f"local-user:{workspace_id}" if workspace_id else "local-user"
-        self._access_tokens[_hash(access)] = AccessToken(
+        access_record = AccessToken(
             token=access,
             client_id=client_id,
             scopes=list(scopes),
@@ -292,6 +420,8 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
             resource=self.resource_url,
             subject=subject,
         )
+        self._access_tokens[_hash(access)] = access_record
+        self._persist_access_record(access, access_record)
         self.store.set(
             self._refresh_key(refresh),
             json.dumps({
@@ -306,7 +436,7 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
             token_type="Bearer",
             expires_in=self.access_ttl,
             refresh_token=refresh,
-            scope=scopes[0] if scopes else None,
+            scope=" ".join(scopes) if scopes else None,
         )
 
 

@@ -265,9 +265,49 @@ function assertBashSession(config: CodexProConfig, sessionId?: string): string |
   return config.bashSessionId;
 }
 
+const WINDOWS_ENV_CANONICAL_KEYS = new Map<string, string>([
+  ["path", "PATH"],
+  ["systemroot", "SystemRoot"],
+  ["windir", "WINDIR"],
+  ["comspec", "ComSpec"],
+  ["pathext", "PATHEXT"],
+  ["programfiles", "ProgramFiles"],
+  ["programfiles(x86)", "ProgramFiles(x86)"],
+  ["programdata", "ProgramData"],
+  ["temp", "TEMP"],
+  ["tmp", "TMP"],
+  ["userprofile", "USERPROFILE"],
+  ["appdata", "APPDATA"],
+  ["localappdata", "LOCALAPPDATA"]
+]);
+
+export function normalizeWindowsEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const grouped = new Map<string, Array<[string, string]>>();
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    const lower = key.toLowerCase();
+    const candidates = grouped.get(lower) ?? [];
+    candidates.push([key, value]);
+    grouped.set(lower, candidates);
+  }
+
+  const normalized: NodeJS.ProcessEnv = {};
+  for (const lower of [...grouped.keys()].sort()) {
+    const candidates = grouped.get(lower) ?? [];
+    const canonical = WINDOWS_ENV_CANONICAL_KEYS.get(lower);
+    const selected =
+      (canonical ? candidates.find(([key]) => key === canonical) : undefined) ??
+      [...candidates].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))[0];
+    if (!selected) continue;
+    normalized[canonical ?? selected[0]] = selected[1];
+  }
+  return normalized;
+}
+
 function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   if (config.inheritEnv || process.platform === "win32") {
-    return { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" };
+    const inherited = { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" };
+    return process.platform === "win32" ? normalizeWindowsEnvironment(inherited) : inherited;
   }
   return {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -281,24 +321,136 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   };
 }
 
-function shellInfo(config: CodexProConfig): { executable: string; shellArgs: string[] } {
-  const customShell = config.shell?.trim().toLowerCase();
+function envValue(env: NodeJS.ProcessEnv, ...names: string[]): string {
+  for (const name of names) {
+    const exact = env[name]?.trim();
+    if (exact) return exact;
+  }
+  const lowered = new Map(
+    Object.entries(env)
+      .filter((entry): entry is [string, string] => entry[1] !== undefined)
+      .map(([key, value]) => [key.toLowerCase(), value.trim()])
+  );
+  for (const name of names) {
+    const value = lowered.get(name.toLowerCase());
+    if (value) return value;
+  }
+  return "";
+}
+
+function windowsSystemCandidate(env: NodeJS.ProcessEnv, ...segments: string[]): string | undefined {
+  const systemRoot = envValue(env, "SystemRoot", "WINDIR");
+  return systemRoot ? path.join(systemRoot, ...segments) : undefined;
+}
+
+function existingWindowsExecutable(fallback: string, ...segments: string[]): string {
+  const candidate = windowsSystemCandidate(process.env, ...segments);
+  return candidate && fs.existsSync(candidate) ? candidate : fallback;
+}
+
+function windowsPowerShellExecutable(env: NodeJS.ProcessEnv): string {
+  return (
+    windowsSystemCandidate(env, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") ??
+    "powershell.exe"
+  );
+}
+
+function windowsCmdExecutable(env: NodeJS.ProcessEnv): string {
+  const comSpec = envValue(env, "ComSpec");
+  if (comSpec) return comSpec;
+  return windowsSystemCandidate(env, "System32", "cmd.exe") ?? "cmd.exe";
+}
+
+function windowsPwshExecutable(env: NodeJS.ProcessEnv): string {
+  const programFiles = envValue(env, "ProgramFiles");
+  if (programFiles) {
+    const candidate = path.join(programFiles, "PowerShell", "7", "pwsh.exe");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return "pwsh.exe";
+}
+
+function shellInfo(config: CodexProConfig, env: NodeJS.ProcessEnv): { executable: string; shellArgs: string[] } {
+  const configuredShell = config.shell?.trim();
+  const customShell = configuredShell?.toLowerCase();
   if (customShell) {
-    if (customShell === "powershell" || customShell === "pwsh" || customShell === "windows_powershell") {
-      return { executable: "powershell.exe", shellArgs: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"] };
+    if (customShell === "powershell" || customShell === "windows_powershell") {
+      return {
+        executable: windowsPowerShellExecutable(env),
+        shellArgs: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+      };
+    }
+    if (customShell === "pwsh") {
+      return {
+        executable: windowsPwshExecutable(env),
+        shellArgs: ["-NoProfile", "-NonInteractive", "-Command"]
+      };
     }
     if (customShell === "cmd") {
-      return { executable: "cmd.exe", shellArgs: ["/c"] };
+      return { executable: windowsCmdExecutable(env), shellArgs: ["/c"] };
     }
     if (customShell === "bash" || customShell === "git-bash") {
       return { executable: "bash", shellArgs: ["-lc"] };
     }
-    return { executable: customShell, shellArgs: ["-c"] };
+    return { executable: configuredShell ?? customShell, shellArgs: ["-c"] };
   }
   if (process.platform === "win32") {
-    return { executable: "powershell.exe", shellArgs: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"] };
+    return {
+      executable: windowsPowerShellExecutable(env),
+      shellArgs: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+    };
   }
   return { executable: fs.existsSync("/bin/bash") ? "/bin/bash" : "bash", shellArgs: ["-lc"] };
+}
+
+function resolveWindowsExecutable(executable: string, env: NodeJS.ProcessEnv): string | undefined {
+  if (path.isAbsolute(executable)) return fs.existsSync(executable) ? executable : undefined;
+  if (executable.includes("/") || executable.includes("\\")) {
+    const resolved = path.resolve(executable);
+    return fs.existsSync(resolved) ? resolved : undefined;
+  }
+
+  const pathValue = envValue(env, "PATH");
+  if (!pathValue) return undefined;
+  const extensions = path.extname(executable)
+    ? [""]
+    : (envValue(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  for (const rawDirectory of pathValue.split(";")) {
+    const directory = rawDirectory.trim().replace(/^"|"$/g, "");
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${executable}${extension}`);
+      if (fs.existsSync(candidate)) return path.resolve(candidate);
+    }
+  }
+  return undefined;
+}
+
+function shellDisplayName(config: CodexProConfig): string {
+  const customShell = config.shell?.trim().toLowerCase();
+  if (!customShell || customShell === "powershell" || customShell === "windows_powershell") {
+    return "Windows PowerShell";
+  }
+  if (customShell === "pwsh") return "PowerShell 7";
+  if (customShell === "cmd") return "Windows Command Prompt";
+  return config.shell?.trim() || "configured shell";
+}
+
+export function resolveBashShell(
+  config: CodexProConfig,
+  sourceEnv: NodeJS.ProcessEnv = process.env
+): { executable: string; shellArgs: string[] } {
+  const env = process.platform === "win32" ? normalizeWindowsEnvironment(sourceEnv) : sourceEnv;
+  const info = shellInfo(config, env);
+  if (process.platform !== "win32") return info;
+  const executable = resolveWindowsExecutable(info.executable, env);
+  if (!executable) {
+    throw new CodexProError(
+      `shell executable not found for ${shellDisplayName(config)}: ${info.executable}. ` +
+        "Check SystemRoot/PATH or configure a valid CODEXPRO_SHELL."
+    );
+  }
+  return { ...info, executable };
 }
 
 function trimOutput(value: string, maxBytes: number): { value: string; truncated: boolean } {
@@ -315,7 +467,11 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void
     // Force the full tree while the parent PID still identifies its descendants;
     // otherwise the shell can exit first and orphan an output-heavy grandchild.
     const args = ["/pid", String(child.pid), "/t", "/f"];
-    const result = spawnSync("taskkill", args, { stdio: "ignore", windowsHide: true });
+    const result = spawnSync(
+      existingWindowsExecutable("taskkill.exe", "System32", "taskkill.exe"),
+      args,
+      { stdio: "ignore", windowsHide: true }
+    );
     if (result.status !== 0) child.kill(signal);
     return;
   }
@@ -345,7 +501,10 @@ export class BashTaskManager {
   private readonly retentionMs = 24 * 60 * 60 * 1_000;
   private readonly maxTasks = 100;
 
-  constructor(private readonly orchestrationStaleMs = BASH_ORCHESTRATION_STALE_MS) {}
+  constructor(
+    private readonly orchestrationStaleMs = BASH_ORCHESTRATION_STALE_MS,
+    private readonly maxActiveTasks = 16
+  ) {}
 
   private prune(): void {
     const now = Date.now();
@@ -419,12 +578,30 @@ export class BashTaskManager {
     if (!command?.trim()) throw new CodexProError("command is required.");
     const bashSessionId = assertBashSession(config, options.sessionId);
     assertSafeCommand(config, command);
+    this.prune();
+    const activeTasks = [...this.tasks.values()].filter((task) => !taskTerminal(task.status)).length;
+    if (activeTasks >= Math.max(1, this.maxActiveTasks)) {
+      throw new CodexProError(
+        `Active async task limit reached (${Math.max(1, this.maxActiveTasks)}). ` +
+          "Observe, cancel, or wait for an existing task before starting another."
+      );
+    }
     const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
     const cwd = cwdResolved.absPath;
-    const { executable, shellArgs } = shellInfo(config);
+    try {
+      if (!fs.statSync(cwd).isDirectory()) {
+        throw new Error("not a directory");
+      }
+    } catch {
+      throw new CodexProError(
+        `working directory does not exist or is not a directory: ${options.cwd ?? "."}`
+      );
+    }
+    const env = makeEnv(config);
+    const { executable, shellArgs } = resolveBashShell(config, env);
     const child = spawn(executable, [...shellArgs, command], {
       cwd,
-      env: makeEnv(config),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true
@@ -528,14 +705,22 @@ export async function runBash(
   assertSafeCommand(config, command);
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
+  try {
+    if (!fs.statSync(cwd).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new CodexProError(
+      `working directory does not exist or is not a directory: ${options.cwd ?? "."}`
+    );
+  }
   const timeoutMs = Math.max(1_000, options.timeoutMs ?? 30_000);
   const start = Date.now();
+  const env = makeEnv(config);
+  const { executable, shellArgs } = resolveBashShell(config, env);
 
   return new Promise((resolve, reject) => {
-    const { executable, shellArgs } = shellInfo(config);
     const child = spawn(executable, [...shellArgs, command], {
       cwd,
-      env: makeEnv(config),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true

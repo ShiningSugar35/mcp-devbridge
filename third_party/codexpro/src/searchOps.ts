@@ -31,7 +31,7 @@ export interface SearchResult {
 function commandExists(command: string): Promise<boolean> {
   return new Promise((resolve) => {
     const child = process.platform === "win32"
-      ? spawn("where", [command], { stdio: "ignore", shell: false })
+      ? spawn("where", [command], { stdio: "ignore", shell: false, windowsHide: true })
       : spawn("/bin/sh", ["-lc", `command -v ${command} >/dev/null 2>&1`], { stdio: "ignore" });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", () => resolve(false));
@@ -55,7 +55,7 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
   args.push("-e", options.query, "--", target.absPath);
 
   return new Promise((resolve, reject) => {
-    const child = spawn("rg", args, { cwd: workspace.root, env: { ...process.env, NO_COLOR: "1" } });
+    const child = spawn("rg", args, { cwd: workspace.root, env: { ...process.env, NO_COLOR: "1" }, windowsHide: true });
     let stdout = "";
     let stderr = "";
     let outputLimited = false;

@@ -444,6 +444,7 @@ class CodexProManager(EngineManager):
         self.log_dir = Path(log_dir or constants.process_log_dir())
         self.port = port
         self.timeout = timeout_seconds
+        self._probe_token = ""
 
     def _candidate_dist_dirs(self, root: str | None = None) -> list[Path]:
         """Candidate CodexPro build dirs across runtime layouts (dedup'd).
@@ -532,28 +533,60 @@ class CodexProManager(EngineManager):
             extra=extra_env,
         )
         cmd = build_codex_cmd(self.executable, http_js, root, self.port)
+        self._probe_token = token
         self._set_state(EngineState.STARTING)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._spawn(cmd, env, (token, windows_token or ""), self.log_dir / "codexpro.log")
 
+    def _mcp_ready_probe(self) -> tuple[bool, str]:
+        if not self._probe_token:
+            return False, "MCP probe credential is unavailable"
+        from .selftest import run_selftest
+
+        try:
+            result = run_selftest(
+                f"http://127.0.0.1:{self.port}/mcp",
+                self._probe_token,
+                timeout=3.0,
+            )
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        if result.ok:
+            return True, "ok"
+        return False, result.error or "initialize/tools-list/read-only canary failed"
+
     def wait_ready(self, timeout_seconds: float | None = None) -> bool:
         deadline = time.monotonic() + (timeout_seconds or self.timeout)
+        last_detail = "listener not ready"
         while time.monotonic() < deadline:
             proc = self._proc
             if proc is None:
+                self._probe_token = ""
                 return False
             if not proc.is_running:
-                self._fail("CodexPro 进程提前退出。")
+                self._probe_token = ""
+                self._fail("CodexPro process exited before MCP readiness.")
                 return False
-            if CODEXPRO_READY_RE.search(proc.log.tail(50)):
-                self._set_state(EngineState.READY)
-                return True
-            if port_listening(self.port):
-                self._set_state(EngineState.READY)
-                return True
+            listener_ready = bool(CODEXPRO_READY_RE.search(proc.log.tail(50))) or port_listening(self.port)
+            if listener_ready:
+                ok, detail = self._mcp_ready_probe()
+                last_detail = detail
+                if ok:
+                    self._probe_token = ""
+                    self._set_state(EngineState.READY)
+                    return True
             time.sleep(READY_POLL_INTERVAL_SECONDS)
-        self._fail(f"CodexPro 启动超时（{timeout_seconds or self.timeout} 秒）。")
+        self._probe_token = ""
+        self._fail(
+            f"CodexPro MCP readiness timed out after {timeout_seconds or self.timeout} seconds: {last_detail}"
+        )
         return False
+
+    def stop(self, timeout_seconds: float = 8.0) -> None:
+        try:
+            super().stop(timeout_seconds=timeout_seconds)
+        finally:
+            self._probe_token = ""
 
 
 class WindowsBridgeManager(EngineManager):

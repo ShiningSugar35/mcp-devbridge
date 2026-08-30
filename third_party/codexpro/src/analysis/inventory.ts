@@ -6,24 +6,36 @@ import type { PathGuard, Workspace } from "../guard.js";
 import { classifyFileRole, classifyLanguage, isEntrypoint, isGeneratedFile } from "./classify.js";
 import type { InventoryFile, InventoryResult } from "./types.js";
 
-export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace): Promise<InventoryResult> {
+export async function inventoryWorkspace(
+  config: CodexProConfig,
+  guard: PathGuard,
+  workspace: Workspace,
+  root = ".",
+  signal?: AbortSignal
+): Promise<InventoryResult> {
+  signal?.throwIfAborted();
   const maxFiles = config.analysisLimits.maxInventoryFiles;
   const scanWarnings: string[] = [];
   const candidates = await listFiles(guard, workspace, {
-    root: ".",
+    root: root.trim() || ".",
     includeHidden: true,
     maxFiles: maxFiles + 1,
-    warnings: scanWarnings
+    warnings: scanWarnings,
+    signal
   });
+  signal?.throwIfAborted();
   const truncated = candidates.length > maxFiles;
   const files: InventoryFile[] = [];
 
   for (const candidate of candidates.slice(0, maxFiles)) {
+    signal?.throwIfAborted();
     try {
       const resolved = guard.resolve(workspace, candidate);
       const stat = await fsp.stat(resolved.absPath);
+      signal?.throwIfAborted();
       if (!stat.isFile()) continue;
       await guard.assertTextFile(resolved.absPath, textScanByteLimit(config));
+      signal?.throwIfAborted();
       const language = classifyLanguage(resolved.relPath);
       files.push({
         path: resolved.relPath,
@@ -35,10 +47,12 @@ export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuar
         entrypoint: isEntrypoint(resolved.relPath)
       });
     } catch {
+      if (signal?.aborted) signal.throwIfAborted();
       // Blocked, escaping, unreadable, binary, and oversized files are absent by design.
     }
   }
 
+  signal?.throwIfAborted();
   files.sort((a, b) => a.path.localeCompare(b.path));
   const fingerprint = createHash("sha256")
     .update(files.map((file) => `${file.path}:${file.bytes}:${file.modifiedMs}`).join("\n"))

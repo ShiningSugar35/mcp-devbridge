@@ -47,13 +47,38 @@ Write-Host "Building version: $script:version"
 Write-Host "Staging output: $script:distDir"
 
 if (-not $SkipVersionCheck) {
-    $spec = Get-Content (Join-Path $script:root "packaging\local-dev-mcp-bridge.spec") -Raw
-    if ($spec -notmatch ('PROJECT_VERSION\s*=\s*"' + [regex]::Escape($script:version) + '"')) {
-        Write-Warning "packaging\local-dev-mcp-bridge.spec PROJECT_VERSION does not match $script:version"
-    }
-    $iss = Get-Content (Join-Path $script:root "scripts\installer.iss") -Raw
-    if ($iss -notmatch ('#define\s+MyAppVersion\s+"' + [regex]::Escape($script:version) + '"')) {
-        Write-Warning "scripts\installer.iss MyAppVersion does not match $script:version"
+    $versionChecks = @(
+        @{
+            Path = "pyproject.toml"
+            Pattern = '(?m)^version\s*=\s*"' + [regex]::Escape($script:version) + '"'
+            Label = "project.version"
+        },
+        @{
+            Path = "src\local_dev_mcp_bridge\__init__.py"
+            Pattern = '__version__\s*=\s*"' + [regex]::Escape($script:version) + '"'
+            Label = "package __version__"
+        },
+        @{
+            Path = "packaging\local-dev-mcp-bridge.spec"
+            Pattern = 'PROJECT_VERSION\s*=\s*"' + [regex]::Escape($script:version) + '"'
+            Label = "PyInstaller PROJECT_VERSION"
+        },
+        @{
+            Path = "scripts\installer.iss"
+            Pattern = '#define\s+MyAppVersion\s+"' + [regex]::Escape($script:version) + '"'
+            Label = "Inno MyAppVersion"
+        },
+        @{
+            Path = "uv.lock"
+            Pattern = '(?ms)\[\[package\]\]\s*name\s*=\s*"local-dev-mcp-bridge"\s*version\s*=\s*"' + [regex]::Escape($script:version) + '"'
+            Label = "uv lock project version"
+        }
+    )
+    foreach ($check in $versionChecks) {
+        $content = Get-Content (Join-Path $script:root $check.Path) -Raw
+        if ($content -notmatch $check.Pattern) {
+            throw "Version mismatch: $($check.Label) in $($check.Path) does not equal $script:version"
+        }
     }
 }
 
@@ -132,7 +157,8 @@ if (-not $SkipInstaller) {
     $script:setupExe = Join-Path $script:root "release\MCPDevBridge-Setup-$script:version.exe"
     if (Test-Path $script:setupExe) { Remove-Item -LiteralPath $script:setupExe -Force }
     $sourceDefine = "/DMySourceDir=$script:distDir"
-    & $script:iscc (Join-Path $script:root "scripts\installer.iss") $sourceDefine /Qp
+    $versionDefine = "/DMyAppVersion=$script:version"
+    & $script:iscc (Join-Path $script:root "scripts\installer.iss") $sourceDefine $versionDefine /Qp
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
     if (-not (Test-Path $script:setupExe)) { throw "Installer artifact missing: $script:setupExe" }
 }

@@ -89,8 +89,10 @@ export async function extractWorkspaceFiles(
   config: CodexProConfig,
   guard: PathGuard,
   workspace: Workspace,
-  inventoryFiles: InventoryFile[]
+  inventoryFiles: InventoryFile[],
+  signal?: AbortSignal
 ): Promise<{ files: ExtractedFile[]; analyzedFiles: number; scannedBytes: number; truncated: boolean; warnings: string[] }> {
+  signal?.throwIfAborted();
   const fileSet = new Set(inventoryFiles.map((file) => file.path));
   const extracted: ExtractedFile[] = [];
   let scannedBytes = 0;
@@ -99,6 +101,7 @@ export async function extractWorkspaceFiles(
   let symbolBudgetReached = false;
   let skippedFiles = 0;
   for (const file of inventoryFiles) {
+    signal?.throwIfAborted();
     if (!SOURCE_LANGUAGES.has(file.language) || file.generated) continue;
     if (extracted.length >= config.analysisLimits.maxAnalyzedFiles || scannedBytes + file.bytes > config.analysisLimits.maxScannedBytes) {
       sourceBudgetReached = true;
@@ -107,11 +110,13 @@ export async function extractWorkspaceFiles(
     let text: string;
     try {
       const resolved = guard.resolve(workspace, file.path);
-      text = await fsp.readFile(resolved.absPath, "utf8");
+      text = await fsp.readFile(resolved.absPath, { encoding: "utf8", signal });
     } catch {
+      if (signal?.aborted) signal.throwIfAborted();
       skippedFiles += 1;
       continue;
     }
+    signal?.throwIfAborted();
     const actualBytes = Buffer.byteLength(text, "utf8");
     if (scannedBytes + actualBytes > config.analysisLimits.maxScannedBytes) {
       sourceBudgetReached = true;
@@ -122,6 +127,7 @@ export async function extractWorkspaceFiles(
     const imports: string[] = [];
     const lines = text.split(/\r?\n/);
     for (let index = 0; index < lines.length; index += 1) {
+      if ((index & 0xff) === 0) signal?.throwIfAborted();
       const line = lines[index];
       for (const pattern of DECLARATIONS[file.language] ?? []) {
         const match = line.match(pattern.regex);
@@ -140,6 +146,7 @@ export async function extractWorkspaceFiles(
     }
     extracted.push({ path: file.path, text, symbols, imports });
   }
+  signal?.throwIfAborted();
   const warnings = [
     ...(sourceBudgetReached ? ["Source analysis reached its file or byte limit."] : []),
     ...(symbolBudgetReached ? ["Symbol extraction reached its configured limit."] : []),

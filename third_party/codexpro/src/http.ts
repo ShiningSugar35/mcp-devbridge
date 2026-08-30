@@ -7,6 +7,7 @@ import { z } from "zod";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { expandHome, loadConfig, type CodexProConfig } from "./config.js";
+import { createGracefulShutdownController } from "./httpLifecycle.js";
 import {
   profilePathForRoot,
   readRuntimeConnection,
@@ -1671,7 +1672,7 @@ async function main(): Promise<void> {
     next(error);
   });
 
-  app.listen(config.port, config.host, () => {
+  const httpServer = app.listen(config.port, config.host, () => {
     console.error(`[CodexPro] HTTP MCP listening on http://${config.host}:${config.port}/mcp`);
     console.error(`[CodexPro] defaultRoot=${config.defaultRoot}`);
     console.error(`[CodexPro] allowedRoots=${config.allowedRoots.join(", ")}`);
@@ -1679,6 +1680,28 @@ async function main(): Promise<void> {
     console.error(`[CodexPro] writeMode=${config.writeMode}`);
     console.error(`[CodexPro] widgetDomain=${config.widgetDomain}`);
   });
+
+  const lifecycle = createGracefulShutdownController({
+    server: httpServer,
+    cleanup: async () => {
+      const closeable = mcpHandler as unknown as {
+        close?: () => Promise<void> | void;
+        dispose?: () => Promise<void> | void;
+      };
+      if (typeof closeable.close === "function") {
+        await closeable.close();
+      } else if (typeof closeable.dispose === "function") {
+        await closeable.dispose();
+      }
+    },
+    timeoutMs: 5_000,
+    logger: (message) => console.error(`[CodexPro] ${message}`)
+  });
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, () => {
+      void lifecycle.shutdown(signal);
+    });
+  }
 }
 
 main().catch((error) => {

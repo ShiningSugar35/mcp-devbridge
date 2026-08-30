@@ -256,7 +256,7 @@ export async function readCodexContext(
     ? { text: "Skipped by request.", files: [] }
     : await readAiBridgeContext(config, guard, workspace);
   const status = options.includeGit === false ? undefined : gitStatus(config, workspace);
-  const diff = options.includeDiff ? gitDiff(config, guard, workspace) : undefined;
+  const diff = options.includeDiff ? await gitDiff(config, guard, workspace) : undefined;
 
   const text = [
     "# Codex Context",

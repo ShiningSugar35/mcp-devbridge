@@ -43,10 +43,12 @@ from .engines import (
 )
 from .models import ProjectConfig
 from .platform_support import IS_WINDOWS
+from .selftest import run_selftest
 
 WINDOWS_START_TIMEOUT_SECONDS = 240
 PROJECT_HEALTH_INTERVAL_SECONDS = 10.0
 PROJECT_HEALTH_TIMEOUT_SECONDS = 2.0
+PROJECT_MCP_PROBE_INTERVAL_SECONDS = 60.0
 PROJECT_HEALTH_FAILURE_THRESHOLD = 2
 PROJECT_RESTART_COOLDOWN_SECONDS = 30.0
 
@@ -92,6 +94,8 @@ class ProjectUnit:
             log_dir=self.log_dir,
             port=project.windows_bridge_port or constants.DEFAULT_WINDOWS_MCP_PORT,
         )
+        self._last_mcp_probe_at = 0.0
+        self._last_mcp_probe_ok = False
 
     # ------------------------------------------------------------ state
     @property
@@ -164,6 +168,8 @@ class ProjectUnit:
                     f"http://127.0.0.1:{self.project.windows_bridge_port or self.windows.port}/mcp"
                 )
             }
+        self._last_mcp_probe_at = 0.0
+        self._last_mcp_probe_ok = False
         self.codex.start(
             root,
             codex_token,
@@ -213,8 +219,6 @@ class ProjectUnit:
         timeout_seconds: float = PROJECT_HEALTH_TIMEOUT_SECONDS,
     ) -> tuple[bool, str]:
         """Verify that the CodexPro process and its authenticated HTTP data plane are alive."""
-        if self.codex.state != EngineState.READY or not self.codex.is_running:
-            return False, self.codex.error or "CodexPro process is not ready"
         url = f"http://127.0.0.1:{self.project.codexpro_port or self.codex.port}/healthz"
         try:
             req = urllib_request.Request(
@@ -241,6 +245,23 @@ class ProjectUnit:
         actual_root = str(Path(str(payload.get("defaultRoot") or "")).expanduser().resolve())
         if actual_root.casefold() != expected_root.casefold():
             return False, f"healthz root mismatch: {actual_root!r} != {expected_root!r}"
+
+        now = time.monotonic()
+        if (
+            self._last_mcp_probe_ok
+            and now - self._last_mcp_probe_at < PROJECT_MCP_PROBE_INTERVAL_SECONDS
+        ):
+            return True, "ok"
+        result = run_selftest(
+            f"http://127.0.0.1:{self.project.codexpro_port or self.codex.port}/mcp",
+            token,
+            timeout=max(2.0, float(timeout_seconds)),
+        )
+        self._last_mcp_probe_at = now
+        self._last_mcp_probe_ok = bool(result.ok)
+        if not result.ok:
+            detail = result.error or "initialize/tools-list/read-only canary failed"
+            return False, f"MCP canary failed: {detail}"
         return True, "ok"
 
 

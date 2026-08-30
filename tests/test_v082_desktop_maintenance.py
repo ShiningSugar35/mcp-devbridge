@@ -211,3 +211,105 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
         assert window.all_projects_btn.text() == "启动所有项目"
     finally:
         _close(app, window)
+
+
+
+def test_shared_tunnel_failure_does_not_roll_back_started_projects(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, project_a, project_b = _window(tmp_path, monkeypatch)
+    started: list[str] = []
+    stopped: list[str] = []
+    logs: list[str] = []
+    monkeypatch.setattr(dm, "ensure_project_access_token", lambda _project_id: "x" * 32)
+    monkeypatch.setattr(dm, "_bridge_token", lambda ensure=False: "y" * 32)
+    monkeypatch.setattr(window, "_save_project_settings", lambda *args, **kwargs: True)
+    monkeypatch.setattr(window, "_ports_conflict", lambda _options: None)
+    monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+    monkeypatch.setattr(window.pm, "start", lambda project_id, **_kwargs: started.append(project_id))
+    monkeypatch.setattr(window.pm, "stop", lambda project_id: stopped.append(project_id))
+    monkeypatch.setattr(window, "_append_log", logs.append)
+    if IS_WINDOWS:
+        import local_dev_mcp_bridge.elevation as elevation
+
+        class FakeElevationController:
+            def ensure_registered(self, *, interactive: bool) -> bool:
+                return True
+
+            def ensure_running(self, *, interactive_registration: bool = False):
+                return {"ok": True, "elevated": True}
+
+        monkeypatch.setattr(
+            elevation, "get_elevation_controller", lambda: FakeElevationController()
+        )
+    window._app_config.first_system_risk_accepted = True
+    window._app_config.full_system_risk_accepted = True
+
+    def failed_coord_start(_options) -> None:
+        window.coord._state = EngineState.ERROR
+        window.coord._message = "tunnel unavailable"
+
+    monkeypatch.setattr(window.coord, "start", failed_coord_start)
+    try:
+        window._select_root(project_a.root_path)
+        window._apply_selected_project()
+        window._start_all_projects()
+
+        assert set(started) == {project_a.id, project_b.id}
+        assert stopped == []
+        assert any("tunnel unavailable" in line for line in logs)
+    finally:
+        _close(app, window)
+
+
+def test_degraded_public_transport_is_not_reported_as_fully_available(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, project_a, project_b = _window(tmp_path, monkeypatch)
+    started: list[str] = []
+    stopped: list[str] = []
+    logs: list[str] = []
+    monkeypatch.setattr(dm, "ensure_project_access_token", lambda _project_id: "x" * 32)
+    monkeypatch.setattr(dm, "_bridge_token", lambda ensure=False: "y" * 32)
+    monkeypatch.setattr(window, "_save_project_settings", lambda *args, **kwargs: True)
+    monkeypatch.setattr(window, "_ports_conflict", lambda _options: None)
+    monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+    monkeypatch.setattr(window.pm, "start", lambda project_id, **_kwargs: started.append(project_id))
+    monkeypatch.setattr(window.pm, "stop", lambda project_id: stopped.append(project_id))
+    monkeypatch.setattr(window, "_append_log", logs.append)
+    if IS_WINDOWS:
+        import local_dev_mcp_bridge.elevation as elevation
+
+        class FakeElevationController:
+            def ensure_registered(self, *, interactive: bool) -> bool:
+                return True
+
+            def ensure_running(self, *, interactive_registration: bool = False):
+                return {"ok": True, "elevated": True}
+
+        monkeypatch.setattr(
+            elevation, "get_elevation_controller", lambda: FakeElevationController()
+        )
+    window._app_config.first_system_risk_accepted = True
+    window._app_config.full_system_risk_accepted = True
+
+    def degraded_coord_start(_options) -> None:
+        window.coord._state = EngineState.READY
+        window.coord._message = "公网隧道暂时不可用；本地项目引擎保持可用"
+
+    monkeypatch.setattr(window.coord, "start", degraded_coord_start)
+    try:
+        window._select_root(project_a.root_path)
+        window._apply_selected_project()
+        window.connection_combo.setCurrentIndex(
+            window.connection_combo.findData(dm.ConnectionMethod.CLOUDFLARE.value)
+        )
+        window.hostname_edit.setText("mcp.example.com")
+        window._start_all_projects()
+
+        assert set(started) == {project_a.id, project_b.id}
+        assert stopped == []
+        assert any("公网隧道暂时不可用" in line for line in logs)
+        assert not any("全部可用" in line for line in logs)
+    finally:
+        _close(app, window)

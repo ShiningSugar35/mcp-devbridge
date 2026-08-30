@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,35 @@ def test_linux_distribution_scripts_and_workflow_exist() -> None:
     assert "CURRENT_INSTALL" in live_upgrade
     assert "EXPECTED_PORT" in live_upgrade
     assert "--no-autostart" in live_upgrade
+
+
+def test_linux_build_version_gate_is_fail_closed_and_precedes_side_effects() -> None:
+    root = Path(__file__).resolve().parents[1]
+    helper = root / "scripts" / "check_release_version.py"
+    build_linux = (root / "scripts" / "build_linux.sh").read_text(encoding="utf-8")
+    gate = 'python3 scripts/check_release_version.py --root "$ROOT" --expected "$VERSION"'
+
+    assert helper.is_file()
+    assert gate in build_linux
+    assert build_linux.index(gate) < build_linux.index('PY="$ROOT/.venv/bin/python"')
+    assert build_linux.index(gate) < build_linux.index("prepare_runtime_linux.sh")
+
+    matching = subprocess.run(
+        [sys.executable, str(helper), "--expected", "0.8.9", "--root", str(root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert matching.returncode == 0, matching.stderr or matching.stdout
+
+    mismatched = subprocess.run(
+        [sys.executable, str(helper), "--expected", "9.9.9", "--root", str(root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert mismatched.returncode != 0
+    assert "version mismatch" in (mismatched.stderr or mismatched.stdout).casefold()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="validated with Git Bash on Windows; CI uses POSIX bash")

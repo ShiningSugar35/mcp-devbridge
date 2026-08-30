@@ -107,6 +107,7 @@ CLOUDFLARE_TOKEN_CRED_NAME = "LocalDevMCPBridge/CloudflareToken"
 # OAuth (Phase 8): shared OAuth/MCP Hub gateway + single-user authorization server.
 GATEWAY_HOST = "127.0.0.1"
 OAUTH_SCOPE = "ACCESS_VIEW_MANAGE_MCP_CONTENT"
+OAUTH_OFFLINE_SCOPE = "offline_access"
 OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600  # short-lived per MCP spec recs
 OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 3600
 OAUTH_AUTHORIZATION_CODE_TTL_SECONDS = 900

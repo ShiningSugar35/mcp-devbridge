@@ -92,7 +92,7 @@ from .project_manager import ProjectManager
 from .project_secrets import (
     clear_project_tunnel_token,
     ensure_project_access_token,
-    get_project_access_token,
+    get_project_access_token,  # noqa: F401  # pyright: ignore[reportUnusedImport] - compatibility hook
     get_project_tunnel_token,
     remember_project_tunnel_token,
 )
@@ -256,9 +256,12 @@ class MainWindow(QMainWindow):
             local_device_name=self._app_config.device_name,
         )
         self.pm = ProjectManager()
+        self._workspace_credentials: dict[str, str] = {}
         self.coord = ServiceCoordinator(
             workspace_registry=self._lookup_workspace,
+            workspace_project_registry=self._lookup_configured_workspace,
             workspace_credential_registry=self._lookup_workspace_credential,
+            project_runtime_registry=self._project_runtime_snapshot,
             device_registry=self.device_registry,
             local_device_id=self._app_config.device_id,
         )
@@ -738,6 +741,21 @@ class MainWindow(QMainWindow):
             problems: list[tuple[str, str]] = []
             ok_items: list[str] = []
             details: list[str] = []
+            layer_titles = [
+                "项目引擎", "本机连接服务", "公网入口", "MCP 初始化",
+                "公开工具数量", "Schema 指纹", "只读调用", "流式连接",
+                "访问授权", "工作区连续性", "最近自动恢复", "ChatGPT 会话边界",
+            ]
+            layer_values: list[tuple[str, str]] = [("未检查", "") for _ in layer_titles]
+
+            def set_layer(index: int, status: str, detail: str = "") -> None:
+                layer_values[index - 1] = (status, detail)
+
+            def step_ok(result: SelftestResult | None, *names: str) -> bool:
+                return bool(result) and any(
+                    str(step.get("step") or "") in names and bool(step.get("ok"))
+                    for step in result.steps
+                )
             root_path = Path(project.root_path)
 
             if root_path.is_dir():
@@ -875,27 +893,128 @@ class MainWindow(QMainWindow):
             state = self._project_state(project)
             if state == EngineState.READY:
                 ok_items.append("项目服务正在运行")
-                url = self.coord.public_url if self.coord.public_url else self._local_url()
+                set_layer(1, "正常", "当前项目服务处于可用状态")
+                local_result: SelftestResult | None = None
+                public_result: SelftestResult | None = None
                 try:
-                    result = run_selftest(url, access_value or None)
+                    local_result = run_selftest(
+                        self._local_url(),
+                        access_value or None,
+                        timeout=15.0,
+                        route_workspace_id=project.id,
+                        expect_hub_contract=True,
+                    )
+                    if method != ConnectionMethod.LOCAL and self.coord.public_url:
+                        public_result = run_selftest(
+                            self.coord.public_url,
+                            access_value or None,
+                            timeout=15.0,
+                            route_workspace_id=project.id,
+                            expect_hub_contract=True,
+                        )
                 except Exception as exc:  # noqa: BLE001
-                    result = None
                     problems.append(
                         (
                             "连接测试没有完成",
-                            f"服务已经启动，但自测时出现异常：{exc}。先尝试停止再启动；仍失败时查看“日志 → 运行情况”。",
+                            f"服务已经启动，但分层自测时出现异常：{exc}。先尝试停止再启动；仍失败时查看“日志 → 运行情况”。",
                         )
                     )
-                if result is not None:
-                    if result.ok:
-                        ok_items.append("实际连接测试通过")
-                    else:
-                        problems.append(
-                            (
-                                "实际连接测试没有完全通过",
-                                "先停止并重新启动当前项目，再运行诊断。如果仍失败，查看“日志 → 运行情况”和“网络连接”。",
-                            )
+
+                active_result = public_result if public_result is not None else local_result
+                set_layer(
+                    2,
+                    "正常" if local_result and local_result.ok else "异常",
+                    "本机真实 MCP 调用" if local_result else "本机检查未完成",
+                )
+                if method == ConnectionMethod.LOCAL:
+                    set_layer(3, "不适用", "当前为仅本机模式")
+                else:
+                    set_layer(
+                        3,
+                        "正常" if public_result and public_result.ok else "异常",
+                        "公网真实 MCP 调用" if public_result else "公网检查未完成",
+                    )
+                set_layer(
+                    4,
+                    "正常" if step_ok(active_result, "initialize") else "异常",
+                    "initialize",
+                )
+                set_layer(
+                    5,
+                    "正常" if active_result and active_result.tool_count == 50 else "异常",
+                    f"实际 {active_result.tool_count if active_result else 0} 个",
+                )
+                set_layer(
+                    6,
+                    "正常" if active_result and active_result.hub_contract_match else "异常",
+                    active_result.schema_fingerprint if active_result else "未取得",
+                )
+                set_layer(
+                    7,
+                    "正常"
+                    if step_ok(active_result, "server_config", "open_current_workspace")
+                    else "异常",
+                    "只读生产调用",
+                )
+                set_layer(
+                    8,
+                    "正常" if step_ok(active_result, "streamable_http") else "异常",
+                    "Streamable HTTP / SSE 通道",
+                )
+                set_layer(
+                    9,
+                    "正常" if access_value and active_result and active_result.ok else "异常",
+                    "同一访问授权完成连续调用" if access_value else "没有可用访问授权",
+                )
+                set_layer(
+                    10,
+                    "正常" if active_result and active_result.ok else "异常",
+                    "诊断调用显式绑定当前项目，没有使用默认项目",
+                )
+
+                recovery = self.coord.recovery_snapshot()
+                gateway_age = recovery.get("gateway_restart_seconds_ago")
+                public_age = recovery.get("public_restart_seconds_ago")
+                if gateway_age is None and public_age is None:
+                    set_layer(11, "正常", "本次运行尚无自动恢复记录")
+                elif public_age is None or (
+                    gateway_age is not None and gateway_age <= public_age
+                ):
+                    set_layer(
+                        11,
+                        "已恢复",
+                        f"最近恢复了本机连接服务，约 {int(float(gateway_age or 0))} 秒前",
+                    )
+                else:
+                    set_layer(
+                        11,
+                        "已恢复",
+                        f"最近恢复了公网连接，约 {int(float(public_age))} 秒前",
+                    )
+
+                all_transport_ok = bool(local_result and local_result.ok) and (
+                    method == ConnectionMethod.LOCAL
+                    or bool(public_result and public_result.ok)
+                )
+                if all_transport_ok:
+                    set_layer(
+                        12,
+                        "边界清晰",
+                        "本机和公网连接均正常；若当前 ChatGPT 仍整体失效，应改用新会话继续，已保存的授权和工作区不会因此丢失",
+                    )
+                    ok_items.append("分层实际连接测试通过")
+                else:
+                    set_layer(
+                        12,
+                        "未判定",
+                        "本机或公网链路仍有异常，暂不能把问题归到 ChatGPT 会话对象",
+                    )
+                    problems.append(
+                        (
+                            "实际连接测试没有完全通过",
+                            "按下方分层结果定位失败层；修复后重新运行诊断，不要通过反复重连 ChatGPT 掩盖本机故障。",
                         )
+                    )
             elif state == EngineState.STARTING:
                 problems.append(
                     (
@@ -925,6 +1044,16 @@ class MainWindow(QMainWindow):
                         "回到工作台点击“启动服务”。状态变成“可以使用”后再运行诊断。",
                     )
                 )
+
+            if state != EngineState.READY:
+                if state == EngineState.STARTING:
+                    set_layer(1, "等待", "项目仍在启动")
+                elif state == EngineState.STOPPING:
+                    set_layer(1, "等待", "项目正在停止")
+                elif state == EngineState.ERROR:
+                    set_layer(1, "异常", "项目上一次启动失败")
+                else:
+                    set_layer(1, "未启动", "项目尚未启动")
 
             peer = SecretsStore().get(HUB_PEER_SECRET_KEY)
             if self._app_config.hub_url and peer:
@@ -961,6 +1090,18 @@ class MainWindow(QMainWindow):
                         "",
                     ]
                 )
+
+            lines.append("分层连接状态")
+            healthy_states = {"正常", "已恢复", "边界清晰", "不适用"}
+            neutral_states = {"未检查", "等待", "未启动", "未判定"}
+            for index, (title, value) in enumerate(zip(layer_titles, layer_values, strict=True), 1):
+                status, detail = value
+                marker = "✓" if status in healthy_states else "•" if status in neutral_states else "!"
+                line = f"{index}. {marker} {title}：{status}"
+                if detail:
+                    line += f" — {detail}"
+                lines.append(line)
+            lines.append("")
 
             if ok_items:
                 lines.append("已经正常的项目")
@@ -2171,7 +2312,7 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------- project engine control
     def _start_project_engine_for(self, project: ProjectConfig) -> None:
-        access = ensure_project_access_token(project.id)
+        access = self._ensure_workspace_credential(project.id)
         bridge = _bridge_token(ensure=project.windows_enabled)
         self._set_project_busy(project.id, True)
         self._append_log(f"正在启动项目（{project.display_name}）…")
@@ -2252,6 +2393,7 @@ class MainWindow(QMainWindow):
 
         def run() -> str:
             self.pm.remove(project.id)
+            self._workspace_credentials.pop(project.id, None)
             if _same_root(project.root_path, self._app_config.active_workspace or ""):
                 self._app_config.active_workspace = ""
                 save_app_config(self._app_config)
@@ -2329,7 +2471,7 @@ class MainWindow(QMainWindow):
         if conflict:
             QMessageBox.warning(self, "端口被占用", conflict)
             return
-        access = {project.id: ensure_project_access_token(project.id) for project in projects}
+        access = {project.id: self._ensure_workspace_credential(project.id) for project in projects}
         bridge = _bridge_token(ensure=any(project.windows_enabled for project in projects))
         project_ids = {project.id for project in projects}
         self._bulk_project_action = "start"
@@ -2369,12 +2511,33 @@ class MainWindow(QMainWindow):
                 raise RuntimeError(
                     "没有任何项目成功启动。" + (f" {failures[0]}" if failures else "")
                 )
+            connection_issue = ""
             if not self.coord.running:
-                self.coord.start(options)
-                if self.coord.state != EngineState.READY:
-                    for project_id in started_ids:
-                        self.pm.stop(project_id)
-                    raise RuntimeError(self.coord.message or "连接服务未进入可用状态。")
+                try:
+                    self.coord.start(options)
+                except Exception as exc:  # noqa: BLE001
+                    connection_issue = str(exc) or type(exc).__name__
+            if self.coord.state != EngineState.READY and not connection_issue:
+                connection_issue = self.coord.message or "连接服务未进入可用状态。"
+            if (
+                self.coord.state == EngineState.READY
+                and options.connection != ConnectionMethod.LOCAL
+                and not self.coord.tunnel.is_running
+                and not connection_issue
+            ):
+                connection_issue = self.coord.message or (
+                    "公网连接尚未就绪；本机项目引擎和连接服务保持可用。"
+                )
+            if connection_issue:
+                failure_note = ""
+                if failures:
+                    preview = "；".join(failures[:3])
+                    failure_note = f"；另有项目启动失败：{preview}"
+                return (
+                    f"项目引擎已启动：{len(started_ids)}/{len(projects)} 个平等运行根可用；"
+                    f"共享连接未就绪：{connection_issue}。项目引擎保持运行，"
+                    f"网络恢复或修正配置后可再次启动连接{failure_note}"
+                )
             if failures:
                 preview = "；".join(failures[:3])
                 if len(failures) > 3:
@@ -2451,8 +2614,37 @@ class MainWindow(QMainWindow):
             return (port, project.root_path)
         return None
 
+    def _lookup_configured_workspace(self, project_id: str) -> str | None:
+        """Return a configured root even while its engine is restarting."""
+        project = self.pm.get(project_id)
+        return project.root_path if project is not None else None
+
+    def _project_runtime_snapshot(self) -> list[dict[str, object]]:
+        """Cheap, bounded component snapshot for the on-disk flight recorder."""
+        rows: list[dict[str, object]] = []
+        for project in self.pm.list()[:32]:
+            unit = self.pm.unit(project.id)
+            rows.append(
+                {
+                    "project_id": project.id,
+                    "state": str(unit.state if unit is not None else EngineState.IDLE),
+                    "engine_pid": unit.engine_pid if unit is not None else None,
+                    "engine_port": project.codexpro_port or constants.DEFAULT_CODEXPRO_PORT,
+                    "windows_enabled": bool(project.windows_enabled),
+                }
+            )
+        return rows
+
+    def _ensure_workspace_credential(self, project_id: str) -> str:
+        value = self._workspace_credentials.get(project_id)
+        if value:
+            return value
+        value = ensure_project_access_token(project_id)
+        self._workspace_credentials[project_id] = value
+        return value
+
     def _lookup_workspace_credential(self, project_id: str) -> str | None:
-        return get_project_access_token(project_id)
+        return self._workspace_credentials.get(project_id)
 
     # -------------------------------------------------- service control
     def _toggle_service_for(self, project_root: str) -> None:

@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 
 import local_dev_mcp_bridge.gateway as gateway_module
 from local_dev_mcp_bridge.config_store import save_projects
-from local_dev_mcp_bridge.constants import OAUTH_SCOPE
+from local_dev_mcp_bridge.constants import OAUTH_OFFLINE_SCOPE, OAUTH_SCOPE
 from local_dev_mcp_bridge.gateway import OAuthGateway
 from local_dev_mcp_bridge.models import ProjectConfig
 from local_dev_mcp_bridge.oauth_provider import LocalOAuthProvider, _workspace_from_subject
@@ -168,6 +168,7 @@ def test_metadata_authorization_server(env: _Env) -> None:
     assert data["registration_endpoint"].endswith("/register")
     assert data["code_challenge_methods_supported"] == ["S256"]
     assert OAUTH_SCOPE in data["scopes_supported"]
+    assert OAUTH_OFFLINE_SCOPE in data["scopes_supported"]
     assert "refresh_token" in data["grant_types_supported"]
     assert "authorization_code" in data["grant_types_supported"]
 
@@ -179,6 +180,7 @@ def test_metadata_protected_resource(env: _Env) -> None:
     assert data["resource"] == "https://mcp.example.test/mcp"
     assert any(s.rstrip("/") == "https://mcp.example.test" for s in data["authorization_servers"])
     assert OAUTH_SCOPE in data["scopes_supported"]
+    assert OAUTH_OFFLINE_SCOPE in data["scopes_supported"]
 
 
 def test_health(env: _Env) -> None:
@@ -291,6 +293,26 @@ def test_authorize_invalid_scope(env: _Env) -> None:
     loc = r.headers["location"]
     assert "error=invalid_scope" in loc
     assert "state=st-123" in loc
+
+
+def test_authorize_rejects_offline_access_without_business_scope(env: _Env) -> None:
+    cid = env.register_client(scope=f"{OAUTH_SCOPE} {OAUTH_OFFLINE_SCOPE}")
+    r = env.authorize(cid, scope_override=OAUTH_OFFLINE_SCOPE)
+    loc = r.headers["location"]
+    assert "error=invalid_scope" in loc
+    assert "state=st-123" in loc
+
+
+def test_authorize_business_scope_with_offline_access(env: _Env) -> None:
+    cid = env.register_client(scope=f"{OAUTH_SCOPE} {OAUTH_OFFLINE_SCOPE}")
+    r = env.authorize(cid, scope_override=f"{OAUTH_SCOPE} {OAUTH_OFFLINE_SCOPE}")
+    assert r.status_code == 302
+    consent = env.consent_allow(r.headers["location"])
+    assert consent.status_code == 302
+    code = consent.headers["location"].split("code=", 1)[1].split("&", 1)[0]
+    token = env.token(cid, "authorization_code", code=code)
+    assert token.status_code == 200, token.text
+    assert set(token.json()["scope"].split()) == {OAUTH_SCOPE, OAUTH_OFFLINE_SCOPE}
 
 
 def test_authorize_wrong_resource(env: _Env) -> None:
@@ -1133,7 +1155,7 @@ def test_v081_stateless_route_hint_survives_transport_recreation(
 
     mw_env.gateway._http = httpx.AsyncClient(transport=_Router())
 
-    def call(session_id: str, *, route: str | None) -> None:
+    def call(session_id: str, *, route: str | None):
         arguments: dict[str, str] = {"path": "README.md"}
         if route:
             arguments["devbridge_workspace_id"] = route
@@ -1155,14 +1177,16 @@ def test_v081_stateless_route_hint_survives_transport_recreation(
             },
         )
         assert response.status_code == 200, response.text
+        return response
 
     call("transport-session-one", route=WORKSPACE_B_ID)
     call("transport-session-two", route=WORKSPACE_B_ID)
     assert routed_to[-2:] == [18788, 18788]
     assert all(b"devbridge_workspace_id" not in body for body in forwarded_bodies[-2:])
 
-    call("transport-session-three", route=None)
-    assert routed_to[-1] == 18787
+    unrouted = call("transport-session-three", route=None)
+    assert unrouted.json()["error"]["code"] == -32006
+    assert routed_to == [18788, 18788]
 
 
 def test_v081_injected_tool_schema_exposes_optional_route_hints() -> None:
@@ -1253,6 +1277,58 @@ def test_v081_gateway_local_tool_reads_mcp_arguments(
     data = json.loads(bytes(response.body))
     assert "error" not in data
     assert seen["timeout_seconds"] == 20
+
+
+def test_v089_gateway_local_tool_requires_strong_route_in_multi_root(
+    mw_env: _MultiWorkspaceEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    seen_cwds: list[Path] = []
+
+    def fake_run(command: str, *, cwd: Path, timeout_seconds: int):
+        seen_cwds.append(cwd)
+        return SimpleNamespace(
+            shell="powershell",
+            exit_code=0,
+            duration_seconds=0.01,
+            timed_out=False,
+            stdout=command,
+            stderr="",
+        )
+
+    monkeypatch.setattr("local_dev_mcp_bridge.gateway.run_command", fake_run)
+    monkeypatch.setattr(mw_env.gateway, "_workspace_permission_mode", lambda _wid: "workspace")
+    access_token, _, _client_id = mw_env.register_and_authorize()
+
+    def call(route: str | None):
+        arguments: dict[str, object] = {
+            "command": "Write-Output route",
+            "cwd": ".",
+            "timeout_seconds": 5,
+        }
+        if route:
+            arguments["devbridge_workspace_id"] = route
+        return mw_env.client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 190,
+                "method": "tools/call",
+                "params": {"name": "run_command", "arguments": arguments},
+            },
+            headers={"authorization": "Bearer " + access_token},
+        )
+
+    explicit = call(WORKSPACE_B_ID)
+    assert explicit.status_code == 200
+    assert "error" not in explicit.json()
+    assert seen_cwds == [Path(WORKSPACE_B_ROOT).resolve()]
+
+    unrouted = call(None)
+    assert unrouted.status_code == 200
+    assert unrouted.json()["error"]["code"] == -32006
+    assert seen_cwds == [Path(WORKSPACE_B_ROOT).resolve()]
 
 
 def test_v081_switch_workspace_returns_route_without_transport_session(

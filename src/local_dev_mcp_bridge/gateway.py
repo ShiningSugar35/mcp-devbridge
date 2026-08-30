@@ -30,7 +30,7 @@ import shlex
 import threading
 import time
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from email.utils import formatdate
 from pathlib import Path
 from typing import Any, cast
@@ -54,8 +54,16 @@ from . import constants
 from .audit import AuditLogger
 from .constants import LOG_DIR as _LOG_DIR
 from .device_hub import DeviceRegistry
+from .flight_recorder import FlightRecorder
+from .hub_tool_contract import (
+    HUB_TOOL_CONTRACT_FINGERPRINT,
+    HUB_TOOL_CONTRACT_VERSION,
+    HUB_TOOL_COUNT,
+    load_codexpro_full_tool_contract,
+)
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
 from .platform_support import run_platform_kwargs
+from .routing_state import load_workspace_routes, save_workspace_routes
 from .secrets import SecretsStore
 from .shell import detect_binaries, get_shell_info, run_command, run_program
 
@@ -78,6 +86,90 @@ _LOCAL_TOOL_NAMES = (
         }
     )
     | _DEVICE_TOOL_NAMES
+)
+
+_WORKSPACE_CONTEXT_FREE_TOOLS = frozenset(
+    {
+        "shell_self_test",
+        "devbridge_list_workspaces",
+        "devbridge_get_current_workspace",
+        "devbridge_switch_workspace",
+    }
+) | _DEVICE_TOOL_NAMES
+
+_CODEXPRO_MINIMAL_TOOLS = frozenset(
+    {
+        "codexpro",
+        "server_config",
+        "codexpro_self_test",
+        "open_current_workspace",
+        "open_workspace",
+        "read",
+        "write",
+        "edit",
+        "apply_patch",
+        "bash",
+        "get_task",
+        "wait_task",
+        "list_tasks",
+        "cancel_task",
+        "show_changes",
+        "long_run_start",
+        "long_run_status",
+        "long_run_update",
+        "long_run_review",
+        "long_run_complete",
+        "long_run_list",
+        "long_run_cancel",
+    }
+)
+_READ_ONLY_DISABLED_TOOLS = frozenset(
+    {
+        "write",
+        "edit",
+        "apply_patch",
+        "bash",
+        "cancel_task",
+        "long_run_start",
+        "long_run_update",
+        "long_run_review",
+        "long_run_complete",
+        "long_run_cancel",
+        "run_command",
+        "run_program",
+        "windows_call",
+    }
+)
+_READ_ONLY_FEATURE_UNAVAILABLE_TOOLS = frozenset(
+    {
+        "get_task",
+        "wait_task",
+        "list_tasks",
+    }
+)
+_FULL_MODE_ONLY_TOOLS = frozenset(
+    {
+        "codexpro_inventory",
+        "list_workspaces",
+        "workspace_snapshot",
+        "git_status",
+        "git_diff",
+        "codex_context",
+        "handoff_to_codex",
+    }
+)
+_READ_ONLY_EXTRA_SAFE_TOOLS = frozenset(
+    {
+        "shell_self_test",
+        "devbridge_list_workspaces",
+        "devbridge_get_current_workspace",
+        "devbridge_switch_workspace",
+        "devbridge_list_devices",
+        "devbridge_get_current_device",
+        "devbridge_switch_device",
+        "windows_backend_status",
+        "windows_list_tools",
+    }
 )
 
 _ROUTE_WORKSPACE_ARG = "devbridge_workspace_id"
@@ -245,6 +337,8 @@ _HOP_HEADERS = frozenset(
 )
 _SSE_KEEPALIVE_SECONDS = 12.0
 _MAX_AFFINITY_ENTRIES = 16_384
+_MAX_WORKSPACE_ROUTE_ENTRIES = 512
+_MAX_WORKSPACE_REHYDRATE_INFLIGHT = 64
 
 
 def _remember_bounded_affinity(mapping: dict[str, str], key: str, value: str) -> None:
@@ -323,24 +417,74 @@ def _write_diag_entry(**fields: Any) -> None:
         pass
 
 
-async def _read_and_close_upstream(response: httpx.Response) -> bytes:
+class UpstreamResponseTooLarge(RuntimeError):
+    pass
+
+
+async def _read_and_close_upstream(
+    response: httpx.Response,
+    *,
+    deadline_at: float | None = None,
+    max_bytes: int | None = None,
+) -> bytes:
+    async def consume() -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        stream = cast(httpx.AsyncByteStream, response.stream)
+        async for chunk in stream:
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise UpstreamResponseTooLarge(
+                    f"upstream response exceeded {max_bytes} bytes"
+                )
+            chunks.append(chunk)
+        return b"".join(chunks)
+
     try:
-        return await response.aread()
+        if deadline_at is None:
+            return await consume()
+        async with asyncio.timeout_at(deadline_at):
+            return await consume()
     finally:
         await response.aclose()
 
 
-async def _stream_and_close_upstream(response: httpx.Response):
+async def _stream_and_close_upstream(
+    response: httpx.Response,
+    *,
+    deadline_at: float | None = None,
+    on_terminal: Callable[[str], None] | None = None,
+):
+    terminal = "completed"
     try:
         # Iterate the leased transport stream directly instead of Response.aiter_raw().
         # The latter raises StreamConsumed when a cancellation/reconnect marks the
         # response consumed before Starlette begins forwarding it.  This stream has
         # exactly one owner and is always closed when the downstream disconnects.
         stream = cast(httpx.AsyncByteStream, response.stream)
-        async for chunk in stream:
-            yield chunk
+        if deadline_at is None:
+            async for chunk in stream:
+                yield chunk
+        else:
+            async with asyncio.timeout_at(deadline_at):
+                async for chunk in stream:
+                    yield chunk
+    except TimeoutError:
+        terminal = "deadline_exceeded"
+        raise
+    except (asyncio.CancelledError, GeneratorExit):
+        terminal = "downstream_cancelled"
+        raise
+    except BaseException as exc:
+        terminal = type(exc).__name__
+        raise
     finally:
-        await response.aclose()
+        try:
+            await response.aclose()
+        finally:
+            if on_terminal is not None:
+                with suppress(Exception):
+                    on_terminal(terminal)
 
 
 def _sse_event_boundary_at_end(suffix: bytes) -> bool:
@@ -351,6 +495,9 @@ async def _stream_sse_with_keepalive_and_close_upstream(
     response: httpx.Response,
     *,
     keepalive_seconds: float = _SSE_KEEPALIVE_SECONDS,
+    deadline_at: float | None = None,
+    timeout_event: bytes = b"",
+    on_terminal: Callable[[str], None] | None = None,
 ):
     """Forward one SSE stream while keeping an otherwise-idle HTTP leg alive.
 
@@ -378,11 +525,26 @@ async def _stream_sse_with_keepalive_and_close_upstream(
     interval = max(0.05, float(keepalive_seconds))
     at_event_boundary = True
     suffix = b""
+    terminal = "completed"
     try:
         while True:
+            remaining: float | None = None
+            if deadline_at is not None:
+                remaining = deadline_at - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    terminal = "deadline_exceeded"
+                    if at_event_boundary and timeout_event:
+                        yield timeout_event
+                    return
+            wait_seconds = interval if remaining is None else min(interval, remaining)
             try:
-                kind, payload = await asyncio.wait_for(queue.get(), timeout=interval)
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
             except TimeoutError:
+                if deadline_at is not None and asyncio.get_running_loop().time() >= deadline_at:
+                    terminal = "deadline_exceeded"
+                    if at_event_boundary and timeout_event:
+                        yield timeout_event
+                    return
                 # A colon-prefixed SSE line is a protocol comment. It is useful
                 # purely as transport liveness and is invisible to JSON-RPC. Never
                 # insert it into the middle of an upstream event split across chunks.
@@ -393,17 +555,34 @@ async def _stream_sse_with_keepalive_and_close_upstream(
                 return
             if kind == "error":
                 assert isinstance(payload, BaseException)
+                terminal = (
+                    "deadline_exceeded"
+                    if isinstance(payload, (TimeoutError, httpx.TimeoutException))
+                    else type(payload).__name__
+                )
                 raise payload
             assert isinstance(payload, bytes)
             suffix = (suffix + payload)[-4:]
             at_event_boundary = _sse_event_boundary_at_end(suffix)
             yield payload
+    except (asyncio.CancelledError, GeneratorExit):
+        terminal = "downstream_cancelled"
+        raise
+    except BaseException as exc:
+        if terminal == "completed":
+            terminal = type(exc).__name__
+        raise
     finally:
         if not producer.done():
             producer.cancel()
         with suppress(asyncio.CancelledError):
             await producer
-        await response.aclose()
+        try:
+            await response.aclose()
+        finally:
+            if on_terminal is not None:
+                with suppress(Exception):
+                    on_terminal(terminal)
 
 
 def _upstream_is_sse(response: httpx.Response) -> bool:
@@ -480,26 +659,96 @@ def _rewrite_server_identity(payload: bytes) -> bytes:
     return payload
 
 
-def _analyze_tools(payload: bytes) -> tuple[int, list[str]]:
-    """Return (total_tool_count, list_of_duplicate_names) from a tools/list response."""
-    count = 0
-    dupes: list[str] = []
+def _tools_payload_objects(payload: bytes) -> list[dict[str, Any]]:
+    """Decode JSON or SSE-wrapped JSON-RPC responses without logging raw bodies."""
     try:
         text = payload.decode("utf-8")
-        data = json.loads(text)
-        if isinstance(data, dict) and isinstance(data.get("result"), dict):
-            tools = data["result"].get("tools") or []
-            if isinstance(tools, list):
-                names = [t.get("name", "") for t in tools if isinstance(t, dict)]
-                count = len(names)
-                seen: set[str] = set()
-                for n in names:
-                    if n in seen:
-                        dupes.append(n)
-                    seen.add(n)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        pass
-    return count, dupes
+    except UnicodeDecodeError:
+        return []
+    objects: list[dict[str, Any]] = []
+    if text.lstrip().startswith("data:") or "\ndata:" in text:
+        for line in text.splitlines():
+            if not line.startswith("data:"):
+                continue
+            body = line[5:].strip()
+            if not body or body == "[DONE]":
+                continue
+            try:
+                value = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                objects.append(value)
+        return objects
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    return [value] if isinstance(value, dict) else []
+
+
+def _tools_response_summary(payload: bytes) -> dict[str, Any]:
+    """Return safe outcome/count/duplicates/schema fingerprint telemetry."""
+    for data in _tools_payload_objects(payload):
+        if isinstance(data.get("error"), dict):
+            error = data["error"]
+            return {
+                "outcome": "jsonrpc_error",
+                "count": 0,
+                "duplicates": [],
+                "schema_fingerprint": "",
+                "error_code": error.get("code"),
+            }
+        result = data.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+            continue
+        tools = [tool for tool in result["tools"] if isinstance(tool, dict)]
+        names = [str(tool.get("name") or "") for tool in tools]
+        seen: set[str] = set()
+        dupes: list[str] = []
+        for name in names:
+            if name in seen:
+                dupes.append(name)
+            seen.add(name)
+        canonical = [
+            {
+                "name": str(tool.get("name") or ""),
+                "description": str(tool.get("description") or ""),
+                "inputSchema": tool.get("inputSchema")
+                if isinstance(tool.get("inputSchema"), dict)
+                else {},
+            }
+            for tool in tools
+        ]
+        canonical.sort(key=lambda item: item["name"])
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                canonical,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "outcome": "tools_result",
+            "count": len(names),
+            "duplicates": dupes,
+            "schema_fingerprint": fingerprint,
+            "error_code": None,
+        }
+    return {
+        "outcome": "malformed_or_empty",
+        "count": 0,
+        "duplicates": [],
+        "schema_fingerprint": "",
+        "error_code": None,
+    }
+
+
+def _analyze_tools(payload: bytes) -> tuple[int, list[str]]:
+    """Compatibility wrapper returning count + duplicates for tools/list."""
+    summary = _tools_response_summary(payload)
+    return int(summary["count"]), list(summary["duplicates"])
 
 
 def _inject_tools(payload: bytes) -> bytes:
@@ -582,12 +831,109 @@ def _inject_tools(payload: bytes) -> bytes:
     return payload
 
 
+def _build_stable_hub_tools() -> tuple[dict[str, Any], ...]:
+    """Build the versioned public Hub schema from embedded CodexPro + Gateway tools."""
+    seed = {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {"tools": load_codexpro_full_tool_contract()},
+    }
+    patched = _inject_tools(json.dumps(seed, ensure_ascii=False).encode("utf-8"))
+    value = json.loads(patched.decode("utf-8"))
+    tools = value.get("result", {}).get("tools") if isinstance(value, dict) else None
+    if not isinstance(tools, list):
+        raise RuntimeError("failed to construct stable Hub tool contract")
+    clean = tuple(dict(tool) for tool in tools if isinstance(tool, dict))
+    names = [str(tool.get("name") or "") for tool in clean]
+    if len(clean) != HUB_TOOL_COUNT or len(names) != len(set(names)):
+        raise RuntimeError(
+            f"Hub tool contract v{HUB_TOOL_CONTRACT_VERSION} must contain "
+            f"{HUB_TOOL_COUNT} unique tools; got {len(clean)}"
+        )
+    summary = _tools_response_summary(
+        json.dumps(
+            {"jsonrpc": "2.0", "id": 0, "result": {"tools": clean}},
+            ensure_ascii=False,
+        ).encode("utf-8")
+    )
+    fingerprint = str(summary.get("schema_fingerprint") or "")
+    if fingerprint != HUB_TOOL_CONTRACT_FINGERPRINT:
+        raise RuntimeError(
+            f"Hub tool contract v{HUB_TOOL_CONTRACT_VERSION} fingerprint mismatch: {fingerprint}"
+        )
+    return clean
+
+
+_STABLE_HUB_TOOLS = _build_stable_hub_tools()
+_STABLE_HUB_READ_ONLY_TOOLS = frozenset(
+    str(tool.get("name") or "")
+    for tool in _STABLE_HUB_TOOLS
+    if isinstance(tool.get("annotations"), dict)
+    and bool(tool["annotations"].get("readOnlyHint"))
+)
+_WORKSPACE_ERROR_INSPECT_MAX_BYTES = 64 * 1024
+_UPSTREAM_CONTROL_DEADLINE_SECONDS = 15.0
+_UPSTREAM_ORDINARY_DEADLINE_SECONDS = 45.0
+_UPSTREAM_WAIT_GRACE_SECONDS = 10.0
+_UPSTREAM_WAIT_TASK_MAX_SECONDS = 120
+_UPSTREAM_LONG_RUN_STATUS_MAX_SECONDS = 60
+_UPSTREAM_BUFFER_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _stable_tools_list_payload(rpc_id: Any) -> bytes:
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": _STABLE_HUB_TOOLS}},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
 def _jsonrpc_result(rpc_id: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
 
 def _jsonrpc_error(rpc_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _upstream_deadline_seconds(
+    request_method: str, jsonrpc_method: str, tool_name: str, arguments: dict[str, Any]
+) -> float | None:
+    if request_method.upper() != "POST":
+        return None
+    if jsonrpc_method in {"initialize", "ping", "tools/list"}:
+        return float(_UPSTREAM_CONTROL_DEADLINE_SECONDS)
+    if jsonrpc_method == "tools/call" and tool_name == "wait_task":
+        requested = _bounded_int(
+            arguments.get("wait_seconds"), 30, 1, _UPSTREAM_WAIT_TASK_MAX_SECONDS
+        )
+        return float(requested) + float(_UPSTREAM_WAIT_GRACE_SECONDS)
+    if jsonrpc_method == "tools/call" and tool_name == "long_run_status":
+        requested = _bounded_int(
+            arguments.get("max_wait_seconds"), 20, 1, _UPSTREAM_LONG_RUN_STATUS_MAX_SECONDS
+        )
+        return float(requested) + float(_UPSTREAM_WAIT_GRACE_SECONDS)
+    return float(_UPSTREAM_ORDINARY_DEADLINE_SECONDS)
+
+
+def _sse_deadline_event(rpc_id: Any, deadline_seconds: float) -> bytes:
+    payload = _jsonrpc_error(
+        rpc_id,
+        -32008,
+        f"upstream call exceeded the bounded {deadline_seconds:g}s deadline; "
+        "the request was cancelled and its connection released. "
+        "Use bash plus wait_task/get_task for long-running work.",
+    )
+    return (
+        "data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+    ).encode("utf-8")
 
 
 def _tool_arguments(params: Any) -> dict[str, Any]:
@@ -658,13 +1004,11 @@ def _is_loopback(request: Request) -> bool:
 
 
 class _DiagnosticMiddleware:
-    """Pure ASGI middleware that logs every request/response to gateway JSONL.
+    """Pure ASGI lifecycle recorder safe for ordinary and streaming responses."""
 
-    Uses pure ASGI (not BaseHTTPMiddleware) to safely wrap SSE streaming responses.
-    """
-
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, recorder: FlightRecorder | None = None) -> None:
         self.app = app
+        self.recorder = recorder
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -674,6 +1018,19 @@ class _DiagnosticMiddleware:
         start_ns = time.monotonic_ns()
         method: str = scope.get("method", "")
         path: str = scope.get("path", "")
+        if path == constants.DEFAULT_MCP_PATH:
+            component = "mcp"
+        elif path.startswith(("/authorize", "/token", "/register", "/revoke", "/consent", "/.well-known/")):
+            component = "oauth"
+        else:
+            component = "http"
+        trace_id = (
+            self.recorder.start_request(method=method, path=path, component=component)
+            if self.recorder is not None
+            else ""
+        )
+        if trace_id:
+            scope["devbridge_trace_id"] = trace_id
         status: list[int] = [0]
         resp_content_type: list[str] = [""]
         resp_bytes: list[int] = [0]
@@ -684,6 +1041,15 @@ class _DiagnosticMiddleware:
                 for h in message.get("headers") or []:
                     if h[0].decode("latin-1").lower() == "content-type":
                         resp_content_type[0] = h[1].decode("latin-1")
+                if self.recorder is not None and trace_id:
+                    self.recorder.stage(
+                        trace_id,
+                        "response_started",
+                        status=status[0],
+                        component=component,
+                        content_type=resp_content_type[0],
+                        streaming="text/event-stream" in resp_content_type[0].casefold(),
+                    )
             elif message["type"] == "http.response.body":
                 body = message.get("body") or b""
                 resp_bytes[0] += len(body)
@@ -691,14 +1057,31 @@ class _DiagnosticMiddleware:
 
         exc_type: str = ""
         exc_msg: str = ""
+        outcome = "completed"
         try:
             await self.app(scope, receive, _send)
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            exc_type = "CancelledError"
+            raise
         except Exception as exc:
+            outcome = "error"
             exc_type = type(exc).__name__
             exc_msg = _diag_redact_body(str(exc)[:500])
             raise
         finally:
             duration_ms = int((time.monotonic_ns() - start_ns) / 1_000_000)
+            if self.recorder is not None and trace_id:
+                self.recorder.finish_request(
+                    trace_id,
+                    outcome=outcome,
+                    status=status[0],
+                    response_bytes=resp_bytes[0],
+                    exception_type=exc_type,
+                    component=component,
+                    content_type=resp_content_type[0],
+                    streaming="text/event-stream" in resp_content_type[0].casefold(),
+                )
             _write_diag_entry(
                 path=path,
                 method=method,
@@ -726,8 +1109,10 @@ class OAuthGateway:
         provider: LocalOAuthProvider | None = None,
         transport: Any | None = None,
         workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
+        workspace_project_registry: Callable[[str], str | None] | None = None,
         workspace_credential_registry: Callable[[str], str | None] | None = None,
         device_registry: DeviceRegistry | None = None,
+        flight_recorder: FlightRecorder | None = None,
         local_device_id: str = "",
     ) -> None:
         hostname = (public_hostname or "").strip().rstrip("/")
@@ -752,8 +1137,10 @@ class OAuthGateway:
         self.allow_local_anonymous = allow_local_anonymous
         self._workspace = Path(workspace) if workspace else None
         self._workspace_registry = workspace_registry
+        self._workspace_project_registry = workspace_project_registry
         self._workspace_credential_registry = workspace_credential_registry
         self._device_registry = device_registry
+        self._flight_recorder = flight_recorder
         self._local_device_id = local_device_id or (
             device_registry.local_device_id if device_registry else ""
         )
@@ -764,13 +1151,18 @@ class OAuthGateway:
             workspace=workspace,
             store=store or SecretsStore(),
         )
+        self._http = httpx.AsyncClient(
+            timeout=httpx.Timeout(900.0, connect=15.0, write=30.0, pool=5.0),
+            limits=httpx.Limits(
+                max_connections=64,
+                max_keepalive_connections=16,
+                keepalive_expiry=30.0,
+            ),
+            transport=transport,
+        )
         self.app = self._build_app()
         self._server: Any | None = None
         self._thread: threading.Thread | None = None
-        self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(900.0, connect=30.0),
-            transport=transport,
-        )
         # Per-client-session routing plus per-upstream MCP transport sessions.
         # One ChatGPT-facing session can switch among several independent CodexPro
         # servers, but every CodexPro server owns a different mcp-session-id.
@@ -781,7 +1173,12 @@ class OAuthGateway:
         # may have no path/cwd argument. Keep affinity so those follow-up calls
         # stay on the root that created the handle without any DevBridge switch.
         self._workspace_handle_roots: dict[str, str] = {}
+        self._workspace_handle_paths: dict[str, str] = {}
+        self._workspace_route_records: dict[str, dict[str, Any]] = {}
+        self._workspace_hydrated_handles: set[str] = set()
+        self._workspace_rehydrate_inflight: dict[tuple[str, str], asyncio.Task[str]] = {}
         self._session_lock = threading.Lock()
+        self._load_persistent_workspace_routes()
         # Hot-path routing snapshot. Project config is disk-backed; avoid re-reading
         # it for every MCP call while keeping start/stop/config changes fresh.
         self._workspace_snapshot_lock = threading.Lock()
@@ -796,7 +1193,7 @@ class OAuthGateway:
     def _build_app(self) -> Any:
         registration = ClientRegistrationOptions(
             enabled=True,
-            valid_scopes=[constants.OAUTH_SCOPE],
+            valid_scopes=[constants.OAUTH_SCOPE, constants.OAUTH_OFFLINE_SCOPE],
             default_scopes=[constants.OAUTH_SCOPE],
         )
         routes: list[Route] = create_auth_routes(
@@ -808,7 +1205,7 @@ class OAuthGateway:
         resource = create_protected_resource_routes(
             AnyHttpUrl(self.resource_url),
             [AnyHttpUrl(self.public_base)],
-            scopes_supported=[constants.OAUTH_SCOPE],
+            scopes_supported=[constants.OAUTH_SCOPE, constants.OAUTH_OFFLINE_SCOPE],
             resource_name="MCP DevBridge",
         )
         routes.extend(resource)
@@ -827,8 +1224,16 @@ class OAuthGateway:
         routes.append(Route("/device/register", self._device_register, methods=["POST"]))
         routes.append(Route("/device/heartbeat", self._device_heartbeat, methods=["POST"]))
         routes.append(Route("/health", self._health))
-        app = Starlette(routes=routes)
-        return _DiagnosticMiddleware(app)
+        @asynccontextmanager
+        async def lifespan(_app: Starlette):
+            try:
+                yield
+            finally:
+                if not self._http.is_closed:
+                    await self._http.aclose()
+
+        app = Starlette(routes=routes, lifespan=lifespan)
+        return _DiagnosticMiddleware(app, self._flight_recorder)
 
     # ---------------------------------------------------------- consent
     async def _consent_page(self, request: Request) -> Response:
@@ -936,32 +1341,70 @@ class OAuthGateway:
         call_arguments = _tool_arguments(rpc.get("params") if rpc is not None else {})
         route_workspace_id = str(call_arguments.get(_ROUTE_WORKSPACE_ARG) or "").strip()
         route_device_id = str(call_arguments.get(_ROUTE_DEVICE_ARG) or "").strip()
+        trace_id = str(request.scope.get("devbridge_trace_id") or "")
+        if self._flight_recorder is not None and trace_id:
+            self._flight_recorder.enrich_request(
+                trace_id,
+                jsonrpc_method=jsonrpc_method,
+                tool_name=tool_name,
+                session_id=session_id,
+                project_id=route_workspace_id,
+                device_id=route_device_id,
+            )
 
         proxy_token: str | None = None
         workspace_id = ""
         authenticated_workspace = ""
         upstream_target: str | None = None
         if bearer:
-            authenticated_workspace = self._workspace_for_credential(bearer)
-            if _constant_time_eq(bearer, engine_credential) or authenticated_workspace:
-                # A project bearer remains a backward-compatible fallback, but path/task routing
-                # may override it for tools/call so the credential never becomes a routing fence.
-                workspace_id = authenticated_workspace
+            if _constant_time_eq(bearer, engine_credential):
                 proxy_token = engine_credential or bearer
             else:
+                # OAuth is the normal public-connector credential. Resolve it before the
+                # backward-compatible per-project bearer scan so a slow native credential
+                # store cannot stall every OAuth request on the Gateway event loop.
                 record = await self._provider.load_access_token(bearer)
-                if record is None:
-                    return self._unauthorized()
-                if record.resource and record.resource.rstrip("/") != self.resource_url:
-                    return self._unauthorized()
-                workspace_id = _workspace_from_subject(record.subject or "")
-                proxy_token = engine_credential
-                if not proxy_token and self._workspace_registry is None:
-                    return self._unauthorized()
+                if record is not None:
+                    if record.resource and record.resource.rstrip("/") != self.resource_url:
+                        return self._unauthorized()
+                    workspace_id = _workspace_from_subject(record.subject or "")
+                    proxy_token = engine_credential
+                    if not proxy_token and self._workspace_registry is None:
+                        return self._unauthorized()
+                else:
+                    authenticated_workspace = await asyncio.to_thread(
+                        self._workspace_for_credential, bearer
+                    )
+                    if not authenticated_workspace:
+                        return self._unauthorized()
+                    # A project bearer remains a backward-compatible fallback, but path/task
+                    # routing may override it so the credential never becomes a routing fence.
+                    workspace_id = authenticated_workspace
+                    proxy_token = engine_credential or bearer
         elif self.allow_local_anonymous and _is_loopback(request):
             proxy_token = None
         else:
             return self._unauthorized()
+
+        if rpc is not None and jsonrpc_method == "tools/list":
+            payload = _stable_tools_list_payload(rpc.get("id"))
+            tools_summary = _tools_response_summary(payload)
+            _write_diag_entry(
+                path=request.url.path,
+                method=request.method,
+                jsonrpc_method="tools/list",
+                contract_version=HUB_TOOL_CONTRACT_VERSION,
+                tools_outcome=tools_summary["outcome"],
+                total_tool_count=tools_summary["count"],
+                duplicate_tools=tools_summary["duplicates"],
+                schema_fingerprint=tools_summary["schema_fingerprint"],
+                source="stable_hub_contract",
+            )
+            return Response(
+                content=payload,
+                media_type="application/json",
+                headers={"Cache-Control": "no-store"},
+            )
 
         if route_device_id:
             views = (
@@ -1022,6 +1465,24 @@ class OAuthGateway:
                 elif authenticated_workspace:
                     workspace_id = authenticated_workspace
 
+            if (
+                rpc is not None
+                and jsonrpc_method == "tools/call"
+                and tool_name not in _WORKSPACE_CONTEXT_FREE_TOOLS
+                and not workspace_id
+                and len(self._running_workspace_ids()) > 1
+            ):
+                return JSONResponse(
+                    _jsonrpc_error(
+                        rpc.get("id"),
+                        -32006,
+                        "当前有多个运行中的工作区，但本次调用缺少可验证的 "
+                        "path/cwd/task/workspace 路由；已拒绝静默使用 bootstrap 根目录。"
+                        "请传入绝对路径、有效 workspace_id/task_id，或 "
+                        "devbridge_workspace_id。",
+                    )
+                )
+
             workspace_id = self._effective_workspace(
                 workspace_id,
                 session_id,
@@ -1038,11 +1499,42 @@ class OAuthGateway:
                         ),
                         status_code=502,
                     )
-                proxy_token = self._credential_for_workspace(
+                proxy_token = await self._credential_for_workspace(
                     workspace_id, engine_credential or proxy_token
                 )
 
         if rpc is not None and jsonrpc_method == "tools/call":
+            if remote is None:
+                policy_error = self._workspace_tool_policy_error(
+                    tool_name, call_arguments, workspace_id
+                )
+                if policy_error is not None:
+                    error_type, error_code, message = policy_error
+                    effective_tool, _ = self._unwrap_codexpro_call(
+                        tool_name, call_arguments
+                    )
+                    self._audit_gateway_tool(
+                        request,
+                        rpc,
+                        tool_name,
+                        workspace_id,
+                        device_id,
+                        False,
+                        duration_ms=0,
+                        error_type=error_type,
+                    )
+                    _write_diag_entry(
+                        path=request.url.path,
+                        method=request.method,
+                        jsonrpc_method=jsonrpc_method,
+                        event="tool_policy_blocked",
+                        tool_name=effective_tool,
+                        policy=error_type,
+                        workspace_hash=_diag_short_hash(workspace_id),
+                    )
+                    return JSONResponse(
+                        _jsonrpc_error(rpc.get("id"), error_code, message)
+                    )
             params = rpc.get("params") or {}
             if tool_name in _DEVICE_TOOL_NAMES:
                 result = await self._exec_local_tool(
@@ -1056,6 +1548,28 @@ class OAuthGateway:
                 )
                 self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
                 return result
+
+        if remote is None and rpc is not None and jsonrpc_method == "tools/call" and workspace_id:
+            _effective_tool, effective_arguments = self._unwrap_codexpro_call(
+                tool_name, call_arguments
+            )
+            workspace_handle = str(effective_arguments.get("workspace_id") or "").strip()
+            if (
+                workspace_handle.startswith("ws_")
+                and not self._workspace_handle_targets_other_root(
+                    tool_name, call_arguments, workspace_id
+                )
+            ):
+                rehydrate_error = await self._ensure_workspace_handle_hydrated(
+                    workspace_handle,
+                    workspace_id,
+                    upstream_target or self.upstream_url,
+                    proxy_token,
+                )
+                if rehydrate_error:
+                    return JSONResponse(
+                        _jsonrpc_error(rpc.get("id"), -32002, rehydrate_error)
+                    )
 
         drop_workspace_handle = bool(
             remote is None
@@ -1120,34 +1634,214 @@ class OAuthGateway:
             headers["authorization"] = f"Bearer {authorization}"
         headers.pop("mcp-session-id", None)
         started = time.monotonic()
-        try:
-            upstream = await self._http.send(
+        affinity_tool = tool_name
+        affinity_arguments: dict[str, Any] = {}
+        workspace_handle = ""
+        if jsonrpc_method == "tools/call" and rpc is not None:
+            affinity_tool, affinity_arguments = self._unwrap_codexpro_call(
+                tool_name, _tool_arguments(rpc.get("params") or {})
+            )
+            workspace_handle = str(affinity_arguments.get("workspace_id") or "").strip()
+        deadline_seconds = _upstream_deadline_seconds(
+            request.method, jsonrpc_method, affinity_tool, affinity_arguments
+        )
+        deadline_at = (
+            asyncio.get_running_loop().time() + deadline_seconds
+            if deadline_seconds is not None
+            else None
+        )
+        audited = False
+
+        def audit_terminal(success: bool, error_type: str = "") -> None:
+            nonlocal audited
+            if audited or not tool_name:
+                return
+            audited = True
+            with suppress(Exception):
+                self._audit_gateway_tool(
+                    request, rpc, tool_name, workspace_id, device_id, success,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    error_type=error_type,
+                )
+
+        def deadline_response(stage: str) -> JSONResponse:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            trace_id = str(request.scope.get("devbridge_trace_id") or "")
+            if self._flight_recorder is not None and trace_id:
+                self._flight_recorder.stage(
+                    trace_id,
+                    "upstream_deadline",
+                    deadline_stage=stage,
+                    deadline_seconds=deadline_seconds,
+                    elapsed_ms=duration_ms,
+                )
+            _write_diag_entry(
+                path=request.url.path,
+                method=request.method,
+                jsonrpc_method=jsonrpc_method,
+                tool_name=affinity_tool,
+                event="upstream_deadline_exceeded",
+                stage=stage,
+                deadline_seconds=deadline_seconds,
+                duration_ms=duration_ms,
+                upstream_target=target,
+                workspace_hash=_diag_short_hash(workspace_id),
+            )
+            audit_terminal(False, "deadline_exceeded")
+            return JSONResponse(
+                _jsonrpc_error(
+                    rpc.get("id") if rpc else None,
+                    -32008,
+                    f"upstream call exceeded the bounded {deadline_seconds:g}s deadline; "
+                    "the request was cancelled and its connection released. "
+                    "Use bash plus wait_task/get_task for long-running work.",
+                ),
+                status_code=504,
+            )
+
+        def too_large_response(stage: str) -> JSONResponse:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            _write_diag_entry(
+                path=request.url.path, method=request.method,
+                jsonrpc_method=jsonrpc_method, tool_name=affinity_tool,
+                event="upstream_response_too_large", stage=stage,
+                max_bytes=_UPSTREAM_BUFFER_MAX_BYTES, duration_ms=duration_ms,
+                upstream_target=target, workspace_hash=_diag_short_hash(workspace_id),
+            )
+            audit_terminal(False, "response_too_large")
+            return JSONResponse(
+                _jsonrpc_error(
+                    rpc.get("id") if rpc else None, -32009,
+                    f"upstream response exceeded the bounded "
+                    f"{_UPSTREAM_BUFFER_MAX_BYTES} byte limit; narrow the request.",
+                ), status_code=502,
+            )
+
+        async def send_once() -> httpx.Response:
+            pending = self._http.send(
                 self._http.build_request(request.method, target, content=body, headers=headers),
                 stream=True,
             )
-        except httpx.HTTPError:
-            if tool_name:
-                self._audit_gateway_tool(
-                    request,
-                    rpc,
-                    tool_name,
-                    workspace_id,
-                    device_id,
-                    False,
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                    error_type="upstream_unreachable",
+            if deadline_at is None:
+                return await pending
+            async with asyncio.timeout_at(deadline_at):
+                return await pending
+
+        trace_id = str(request.scope.get("devbridge_trace_id") or "")
+        if self._flight_recorder is not None and trace_id:
+            self._flight_recorder.stage(
+                trace_id,
+                "upstream_request",
+                jsonrpc_method=jsonrpc_method,
+                tool_name=affinity_tool,
+                project_id=workspace_id,
+                deadline_seconds=deadline_seconds,
+            )
+        try:
+            upstream = await send_once()
+            if self._flight_recorder is not None and trace_id:
+                self._flight_recorder.stage(
+                    trace_id,
+                    "upstream_headers",
+                    upstream_status=upstream.status_code,
+                    content_type=upstream.headers.get("content-type", "")[:120],
                 )
-            return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
-        if tool_name:
-            self._audit_gateway_tool(
-                request,
-                rpc,
-                tool_name,
-                workspace_id,
-                device_id,
+        except (TimeoutError, httpx.TimeoutException):
+            return deadline_response("response_headers")
+        except httpx.HTTPError as first_error:
+            safe_retry = request.method == "POST" and jsonrpc_method in {"initialize", "ping"}
+            if safe_retry:
+                _write_diag_entry(
+                    path=request.url.path,
+                    method=request.method,
+                    jsonrpc_method=jsonrpc_method,
+                    event="safe_upstream_retry",
+                    error_type=type(first_error).__name__,
+                    upstream_target=target,
+                )
+                try:
+                    upstream = await send_once()
+                except (TimeoutError, httpx.TimeoutException):
+                    return deadline_response("safe_retry_headers")
+                except httpx.HTTPError:
+                    return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
+            else:
+                audit_terminal(False, "upstream_unreachable")
+                return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
+        buffered_payload: bytes | None = None
+        content_type = upstream.headers.get("content-type", "").lower()
+        if request.method == "POST" and "application/json" in content_type:
+            try:
+                buffered_payload = await _read_and_close_upstream(
+                    upstream, deadline_at=deadline_at, max_bytes=_UPSTREAM_BUFFER_MAX_BYTES
+                )
+            except (TimeoutError, httpx.TimeoutException):
+                return deadline_response("response_body")
+            except UpstreamResponseTooLarge:
+                return too_large_response("response_body")
+        if workspace_handle.startswith("ws_") and upstream.status_code < 400:
+            try:
+                content_length = int(upstream.headers.get("content-length") or "-1")
+            except ValueError:
+                content_length = -1
+            if buffered_payload is not None or (
+                0 <= content_length <= _WORKSPACE_ERROR_INSPECT_MAX_BYTES
+                and ("json" in content_type or "text/event-stream" in content_type)
+            ):
+                if buffered_payload is None:
+                    try:
+                        buffered_payload = await _read_and_close_upstream(
+                            upstream, deadline_at=deadline_at,
+                            max_bytes=_WORKSPACE_ERROR_INSPECT_MAX_BYTES,
+                        )
+                    except (TimeoutError, httpx.TimeoutException):
+                        return deadline_response("workspace_error_inspection")
+                    except UpstreamResponseTooLarge:
+                        return too_large_response("workspace_error_inspection")
+                workspace_error = self._extract_structured_field(buffered_payload, "error")
+                unknown_marker = f"Unknown workspace_id: {workspace_handle}"
+                if unknown_marker in workspace_error:
+                    with self._session_lock:
+                        self._workspace_hydrated_handles.discard(workspace_handle)
+                    rehydrate_error = await self._ensure_workspace_handle_hydrated(
+                        workspace_handle,
+                        workspace_id,
+                        base,
+                        authorization,
+                        force=True,
+                    )
+                    if rehydrate_error:
+                        return JSONResponse(
+                            _jsonrpc_error(rpc.get("id") if rpc else None, -32002, rehydrate_error)
+                        )
+                    if affinity_tool not in _STABLE_HUB_READ_ONLY_TOOLS:
+                        return JSONResponse(
+                            _jsonrpc_error(
+                                rpc.get("id") if rpc else None,
+                                -32003,
+                                "workspace 上下文已恢复；为避免副作用重复执行，原调用未自动重放，请确认后重试一次。",
+                            )
+                        )
+                    _write_diag_entry(
+                        path=request.url.path,
+                        method=request.method,
+                        jsonrpc_method=jsonrpc_method,
+                        event="safe_workspace_rehydrate_retry",
+                        tool_name=affinity_tool,
+                        workspace_hash=_diag_short_hash(workspace_id),
+                        handle_hash=_diag_short_hash(workspace_handle),
+                    )
+                    try:
+                        upstream = await send_once()
+                    except (TimeoutError, httpx.TimeoutException):
+                        return deadline_response("workspace_retry_headers")
+                    except httpx.HTTPError:
+                        return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
+                    buffered_payload = None
+        if buffered_payload is not None:
+            audit_terminal(
                 upstream.status_code < 400,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                error_type="" if upstream.status_code < 400 else f"http_{upstream.status_code}",
+                "" if upstream.status_code < 400 else f"http_{upstream.status_code}",
             )
         filtered = {
             key: value
@@ -1157,7 +1851,7 @@ class OAuthGateway:
         if request.method == "POST":
             affinity_tool = tool_name
             if jsonrpc_method == "tools/call" and rpc is not None:
-                affinity_tool, _ = self._unwrap_codexpro_call(
+                affinity_tool, affinity_arguments = self._unwrap_codexpro_call(
                     tool_name, _tool_arguments(rpc.get("params") or {})
                 )
             if (
@@ -1165,13 +1859,32 @@ class OAuthGateway:
                 and affinity_tool in {"open_workspace", "open_current_workspace"}
                 and workspace_id
             ):
-                payload = await _read_and_close_upstream(upstream)
+                if buffered_payload is not None:
+                    payload = buffered_payload
+                else:
+                    try:
+                        payload = await _read_and_close_upstream(
+                            upstream,
+                            deadline_at=deadline_at,
+                            max_bytes=_UPSTREAM_BUFFER_MAX_BYTES,
+                        )
+                    except (TimeoutError, httpx.TimeoutException):
+                        return deadline_response("open_workspace_body")
+                    except UpstreamResponseTooLarge:
+                        return too_large_response("open_workspace_body")
+                    audit_terminal(
+                        upstream.status_code < 400,
+                        "" if upstream.status_code < 400 else f"http_{upstream.status_code}",
+                    )
                 handle = self._extract_structured_field(payload, "workspace_id")
                 if handle:
+                    root_hint = str(
+                        affinity_arguments.get("root")
+                        or affinity_arguments.get("path")
+                        or ""
+                    )
+                    self._remember_persistent_workspace_handle(handle, workspace_id, root_hint)
                     with self._session_lock:
-                        _remember_bounded_affinity(
-                            self._workspace_handle_roots, handle, workspace_id
-                        )
                         if session_id:
                             _remember_bounded_affinity(
                                 self._session_workspaces, session_id, workspace_id
@@ -1181,16 +1894,36 @@ class OAuthGateway:
                     )
                 return Response(content=payload, status_code=upstream.status_code, headers=filtered)
             if jsonrpc_method == "tools/call" and affinity_tool == "bash" and workspace_id:
-                payload = await _read_and_close_upstream(upstream)
+                if buffered_payload is not None:
+                    payload = buffered_payload
+                else:
+                    try:
+                        payload = await _read_and_close_upstream(
+                            upstream,
+                            deadline_at=deadline_at,
+                            max_bytes=_UPSTREAM_BUFFER_MAX_BYTES,
+                        )
+                    except (TimeoutError, httpx.TimeoutException):
+                        return deadline_response("bash_body")
+                    except UpstreamResponseTooLarge:
+                        return too_large_response("bash_body")
+                    audit_terminal(
+                        upstream.status_code < 400,
+                        "" if upstream.status_code < 400 else f"http_{upstream.status_code}",
+                    )
                 task_id = self._extract_task_id(payload)
                 if task_id:
                     with self._session_lock:
                         _remember_bounded_affinity(self._task_workspaces, task_id, workspace_id)
                 return Response(content=payload, status_code=upstream.status_code, headers=filtered)
             if b'"tools/list"' in body:
-                payload = await _read_and_close_upstream(upstream)
+                payload = (
+                    buffered_payload
+                    if buffered_payload is not None
+                    else await _read_and_close_upstream(upstream, deadline_at=deadline_at)
+                )
                 rewritten = _inject_tools(payload)
-                tool_count, dupes = _analyze_tools(rewritten)
+                tools_summary = _tools_response_summary(rewritten)
                 _write_diag_entry(
                     path=request.url.path,
                     method=request.method,
@@ -1198,15 +1931,22 @@ class OAuthGateway:
                     upstream_status=upstream.status_code,
                     upstream_target=target,
                     injected_tool_count=len(_PYTHON_TOOL_DEFS),
-                    total_tool_count=tool_count,
-                    duplicate_tools=dupes,
+                    tools_outcome=tools_summary["outcome"],
+                    total_tool_count=tools_summary["count"],
+                    duplicate_tools=tools_summary["duplicates"],
+                    schema_fingerprint=tools_summary["schema_fingerprint"],
+                    jsonrpc_error_code=tools_summary["error_code"],
                     workspace_hash=_diag_short_hash(workspace_id),
                 )
                 return Response(
                     content=rewritten, status_code=upstream.status_code, headers=filtered
                 )
             if b"initialize" in body:
-                payload = await _read_and_close_upstream(upstream)
+                payload = (
+                    buffered_payload
+                    if buffered_payload is not None
+                    else await _read_and_close_upstream(upstream, deadline_at=deadline_at)
+                )
                 rewritten = _rewrite_server_identity(payload)
                 _write_diag_entry(
                     path=request.url.path,
@@ -1218,11 +1958,60 @@ class OAuthGateway:
                 return Response(
                     content=rewritten, status_code=upstream.status_code, headers=filtered
                 )
-        stream_body = (
-            _stream_sse_with_keepalive_and_close_upstream(upstream)
-            if _upstream_is_sse(upstream)
-            else _stream_and_close_upstream(upstream)
+        if buffered_payload is not None:
+            return Response(
+                content=buffered_payload,
+                status_code=upstream.status_code,
+                headers=filtered,
+            )
+        timeout_event = (
+            _sse_deadline_event(rpc.get("id") if rpc else None, deadline_seconds)
+            if deadline_at is not None and deadline_seconds is not None
+            else b""
         )
+
+        def stream_terminal(reason: str) -> None:
+            if self._flight_recorder is not None and trace_id:
+                self._flight_recorder.stage(
+                    trace_id,
+                    "upstream_stream_terminal",
+                    terminal_reason=reason,
+                    upstream_status=upstream.status_code,
+                )
+            success = reason == "completed" and upstream.status_code < 400
+            error_type = (
+                ""
+                if success
+                else (f"http_{upstream.status_code}" if reason == "completed" else reason)
+            )
+            if not success:
+                _write_diag_entry(
+                    path=request.url.path, method=request.method,
+                    jsonrpc_method=jsonrpc_method, tool_name=affinity_tool,
+                    event="upstream_stream_terminal_failure",
+                    terminal_reason=reason, upstream_status=upstream.status_code,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    workspace_hash=_diag_short_hash(workspace_id),
+                )
+            audit_terminal(success, error_type)
+
+        stream_body = (
+            _stream_sse_with_keepalive_and_close_upstream(
+                upstream, deadline_at=deadline_at, timeout_event=timeout_event,
+                on_terminal=stream_terminal,
+            )
+            if _upstream_is_sse(upstream)
+            else _stream_and_close_upstream(
+                upstream, deadline_at=deadline_at, on_terminal=stream_terminal
+            )
+        )
+        if self._flight_recorder is not None and trace_id:
+            self._flight_recorder.stage(
+                trace_id,
+                "response_streaming",
+                upstream_status=upstream.status_code,
+                stream_kind="sse" if _upstream_is_sse(upstream) else "bytes",
+            )
         return StreamingResponse(
             stream_body,
             status_code=upstream.status_code,
@@ -1535,9 +2324,9 @@ class OAuthGateway:
         )
 
     # -------------------------------------------------------- workspace helpers
-    def _credential_for_workspace(self, workspace_id: str, fallback: str | None) -> str | None:
+    async def _credential_for_workspace(self, workspace_id: str, fallback: str | None) -> str | None:
         if workspace_id and self._workspace_credential_registry is not None:
-            value = self._workspace_credential_registry(workspace_id)
+            value = await asyncio.to_thread(self._workspace_credential_registry, workspace_id)
             if value:
                 return value
         return fallback
@@ -1650,6 +2439,81 @@ class OAuthGateway:
             if project_id == workspace_id:
                 return mode
         return ""
+
+    def _workspace_tool_policy_error(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        workspace_id: str,
+    ) -> tuple[str, int, str] | None:
+        """Enforce the selected local project's fixed-contract call policy.
+
+        The public Hub schema is deliberately stable across project modes. A
+        local call is therefore checked here before either a Gateway-local tool
+        or CodexPro sees it. Remote devices are checked by their own Gateway and
+        must not inherit the local project's permission mode.
+        """
+
+        if tool_name in _DEVICE_TOOL_NAMES:
+            return None
+        # Legacy/single-upstream deployments have no DevBridge project registry
+        # to supply a project permission mode. Preserve their pass-through
+        # behavior and rely on CodexPro's own enforcement layer.
+        if self._workspace_registry is None:
+            return None
+
+        effective_tool, _effective_arguments = self._unwrap_codexpro_call(
+            tool_name, arguments
+        )
+        mode = self._workspace_permission_mode(workspace_id)
+        if not mode:
+            return (
+                "permission_context_unavailable",
+                -32004,
+                "无法确认目标工作区的权限模式，已拒绝调用；请先启动并明确选择该工作区。",
+            )
+        if mode == "system":
+            return None
+        if mode == "workspace":
+            if effective_tool in _FULL_MODE_ONLY_TOOLS:
+                return (
+                    "feature_unavailable",
+                    -32005,
+                    f"工具 {effective_tool!r} 仅在完全访问模式下可用；当前项目为工作区权限。",
+                )
+            return None
+        if mode == "read_only":
+            if effective_tool in _READ_ONLY_DISABLED_TOOLS:
+                return (
+                    "permission_denied",
+                    -32004,
+                    f"permission denied：当前项目为只读模式，工具 {effective_tool!r} 会写入内容、执行命令或改变任务状态。",
+                )
+            if effective_tool in _READ_ONLY_FEATURE_UNAVAILABLE_TOOLS:
+                return (
+                    "feature_unavailable",
+                    -32005,
+                    f"工具 {effective_tool!r} 依赖当前只读项目未启用的后台任务能力。",
+                )
+            if (
+                effective_tool in _CODEXPRO_MINIMAL_TOOLS
+                or effective_tool in _READ_ONLY_EXTRA_SAFE_TOOLS
+                or effective_tool == "list_actions"
+            ):
+                return None
+            required_mode = (
+                "完全访问" if effective_tool in _FULL_MODE_ONLY_TOOLS else "项目工作区"
+            )
+            return (
+                "feature_unavailable",
+                -32005,
+                f"工具 {effective_tool!r} 未在只读项目中启用；请将项目切换到{required_mode}模式后再调用。",
+            )
+        return (
+            "permission_context_unavailable",
+            -32004,
+            f"不支持的项目权限模式 {mode!r}，已拒绝调用。",
+        )
 
     def _stable_system_workspace_id(self) -> str:
         candidates = [
@@ -1770,6 +2634,291 @@ class OAuthGateway:
             return tool_name, arguments
         return action, child_arguments
 
+    def _configured_project_root(self, project_id: str) -> str:
+        project_id = str(project_id or "").strip()
+        if not project_id:
+            return ""
+        if self._workspace_project_registry is not None:
+            try:
+                return str(self._workspace_project_registry(project_id) or "").strip()
+            except Exception:
+                return ""
+        try:
+            from .config_store import load_projects
+
+            for project in load_projects():
+                if str(getattr(project, "id", "") or "").strip() == project_id:
+                    return str(getattr(project, "root_path", "") or "").strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _validated_route_root(self, project_id: str, root: str) -> str:
+        configured_root = self._configured_project_root(project_id)
+        if not configured_root:
+            return ""
+        try:
+            base = Path(configured_root).expanduser().resolve()
+            candidate = Path(root or configured_root).expanduser().resolve()
+            candidate.relative_to(base)
+            if not base.is_dir() or not candidate.is_dir():
+                return ""
+        except (OSError, ValueError):
+            return ""
+        return str(candidate)
+
+    def _load_persistent_workspace_routes(self) -> None:
+        invalid_handles: set[str] = set()
+        for record in load_workspace_routes():
+            handle = str(record.get("handle") or "").strip()
+            project_id = str(record.get("project_id") or "").strip()
+            root = self._validated_route_root(project_id, str(record.get("root") or ""))
+            if not handle.startswith("ws_") or not root:
+                if handle:
+                    invalid_handles.add(handle)
+                continue
+            self._workspace_handle_roots[handle] = project_id
+            self._workspace_handle_paths[handle] = root
+            self._workspace_route_records[handle] = {
+                "handle": handle,
+                "project_id": project_id,
+                "root": root,
+                "last_used": float(record.get("last_used") or 0.0),
+            }
+        if invalid_handles:
+            save_workspace_routes([], removed_handles=invalid_handles)
+
+    def _forget_workspace_handle(
+        self, handle: str, *, expected_project_id: str = ""
+    ) -> None:
+        handle = str(handle or "").strip()
+        expected_project_id = str(expected_project_id or "").strip()
+        if not handle:
+            return
+        with self._session_lock:
+            current_project = self._workspace_handle_roots.get(handle, "")
+            if (
+                expected_project_id
+                and current_project
+                and current_project != expected_project_id
+            ):
+                return
+            self._workspace_handle_roots.pop(handle, None)
+            self._workspace_handle_paths.pop(handle, None)
+            self._workspace_route_records.pop(handle, None)
+            self._workspace_hydrated_handles.discard(handle)
+        if handle.startswith("ws_"):
+            save_workspace_routes([], removed_handles={handle})
+
+    def _remember_persistent_workspace_handle(
+        self, handle: str, project_id: str, root: str = ""
+    ) -> None:
+        handle = str(handle or "").strip()
+        project_id = str(project_id or "").strip()
+        persistent = handle.startswith("ws_")
+        legacy = handle.startswith("ws-")
+        if not project_id or not (persistent or legacy):
+            return
+
+        canonical_root = self._validated_route_root(project_id, root)
+        if persistent and not canonical_root:
+            # Deterministic handles are restart-safe only when their canonical
+            # root remains contained by an active project and exists locally.
+            return
+        if legacy and (
+            not self._workspace_registry or not self._workspace_registry(project_id)
+        ):
+            return
+        now = time.time()
+        routes_changed = False
+        removed_handles: set[str] = set()
+        persisted_records: list[dict[str, Any]] = []
+        with self._session_lock:
+            self._workspace_handle_roots.pop(handle, None)
+            self._workspace_handle_roots[handle] = project_id
+            self._workspace_handle_paths.pop(handle, None)
+            if canonical_root:
+                self._workspace_handle_paths[handle] = canonical_root
+            # Pre-deterministic CodexPro handles (for example ``ws-...``) retain
+            # bounded in-process project affinity even when their opaque child
+            # root cannot be revalidated locally. They are never persisted or
+            # replayed across a process restart because reopening may yield a
+            # different handle. Deterministic ``ws_`` handles retain the stricter
+            # canonical-root requirement above.
+            if persistent:
+                self._workspace_hydrated_handles.add(handle)
+                self._workspace_route_records.pop(handle, None)
+                self._workspace_route_records[handle] = {
+                    "handle": handle,
+                    "project_id": project_id,
+                    "root": canonical_root,
+                    "last_used": now,
+                }
+                routes_changed = True
+            while len(self._workspace_handle_roots) > _MAX_WORKSPACE_ROUTE_ENTRIES:
+                oldest = next(iter(self._workspace_handle_roots), None)
+                if oldest is None:
+                    break
+                self._workspace_handle_roots.pop(oldest, None)
+                self._workspace_handle_paths.pop(oldest, None)
+                if self._workspace_route_records.pop(oldest, None) is not None:
+                    removed_handles.add(oldest)
+                    routes_changed = True
+                self._workspace_hydrated_handles.discard(oldest)
+            while len(self._workspace_route_records) > _MAX_WORKSPACE_ROUTE_ENTRIES:
+                oldest = next(iter(self._workspace_route_records), None)
+                if oldest is None:
+                    break
+                self._workspace_route_records.pop(oldest, None)
+                self._workspace_handle_roots.pop(oldest, None)
+                self._workspace_handle_paths.pop(oldest, None)
+                self._workspace_hydrated_handles.discard(oldest)
+                removed_handles.add(oldest)
+                routes_changed = True
+            self._workspace_hydrated_handles.intersection_update(
+                self._workspace_route_records
+            )
+            if routes_changed:
+                persisted_records = list(self._workspace_route_records.values())
+        if routes_changed:
+            save_workspace_routes(
+                persisted_records, removed_handles=removed_handles
+            )
+
+    async def _ensure_workspace_handle_hydrated(
+        self,
+        handle: str,
+        project_id: str,
+        upstream_target: str,
+        authorization: str | None,
+        *,
+        force: bool = False,
+    ) -> str:
+        """Single-flight wrapper for bounded workspace rehydration."""
+        handle = str(handle or "").strip()
+        project_id = str(project_id or "").strip()
+        if not handle.startswith("ws_") or not project_id:
+            return "workspace 上下文无效，无法恢复。"
+        key = (handle, project_id)
+        with self._session_lock:
+            if not force and handle in self._workspace_hydrated_handles:
+                return ""
+            task = self._workspace_rehydrate_inflight.get(key)
+            if task is None:
+                if (
+                    len(self._workspace_rehydrate_inflight)
+                    >= _MAX_WORKSPACE_REHYDRATE_INFLIGHT
+                ):
+                    return "workspace 自动恢复并发已达上限，请稍后重试。"
+                task = asyncio.create_task(
+                    self._rehydrate_workspace_handle(
+                        handle,
+                        project_id,
+                        upstream_target,
+                        authorization,
+                        force=force,
+                    ),
+                    name=f"workspace-rehydrate-{_diag_short_hash(handle)}",
+                )
+                self._workspace_rehydrate_inflight[key] = task
+
+                def clear_inflight(
+                    done: asyncio.Task[str],
+                    route_key: tuple[str, str] = key,
+                ) -> None:
+                    with suppress(asyncio.CancelledError, Exception):
+                        done.exception()
+                    with self._session_lock:
+                        if self._workspace_rehydrate_inflight.get(route_key) is done:
+                            self._workspace_rehydrate_inflight.pop(route_key, None)
+
+                task.add_done_callback(clear_inflight)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return f"workspace 自动恢复失败：{type(exc).__name__}"
+
+    async def _rehydrate_workspace_handle(
+        self,
+        handle: str,
+        project_id: str,
+        upstream_target: str,
+        authorization: str | None,
+        *,
+        force: bool = False,
+    ) -> str:
+        """Re-register a persisted opaque workspace before forwarding a dependent call.
+
+        ``open_workspace`` is deliberately issued *before* the caller's operation, so a
+        Gateway/CodexPro restart never requires speculative replay of a write. The
+        deterministic handle returned by CodexPro must match the persisted handle;
+        otherwise the route fails closed instead of silently selecting another root.
+        """
+        handle = str(handle or "").strip()
+        project_id = str(project_id or "").strip()
+        if not handle.startswith("ws_") or not project_id:
+            return "workspace 上下文无效，无法恢复。"
+        with self._session_lock:
+            if not force and handle in self._workspace_hydrated_handles:
+                return ""
+            record = dict(self._workspace_route_records.get(handle) or {})
+        if str(record.get("project_id") or "") != project_id:
+            return "workspace 上下文与目标项目不一致，已拒绝自动恢复。"
+        root = self._validated_route_root(project_id, str(record.get("root") or ""))
+        if not root:
+            self._forget_workspace_handle(
+                handle, expected_project_id=project_id
+            )
+            return "workspace 根目录已失效，无法安全恢复；请重新打开该工作区。"
+        target = str(upstream_target or "").rstrip("/")
+        if not target:
+            return "目标项目当前没有可用的 MCP 数据面。"
+        headers = {
+            "accept": "application/json, text/event-stream",
+            "content-type": "application/json",
+        }
+        if authorization:
+            headers["authorization"] = f"Bearer {authorization}"
+        request_body = {
+            "jsonrpc": "2.0",
+            "id": f"devbridge-rehydrate-{hashlib.sha256(handle.encode()).hexdigest()[:12]}",
+            "method": "tools/call",
+            "params": {
+                "name": "open_workspace",
+                "arguments": {
+                    "root": root,
+                    "include_tree": False,
+                    "include_skills": False,
+                },
+            },
+        }
+        try:
+            async with asyncio.timeout(8.0):
+                response = await self._http.post(
+                    f"{target}{constants.DEFAULT_MCP_PATH}",
+                    headers=headers,
+                    json=request_body,
+                )
+        except (TimeoutError, httpx.HTTPError) as exc:
+            return f"workspace 自动恢复失败：{type(exc).__name__}"
+        if response.status_code >= 400:
+            return f"workspace 自动恢复失败：上游 HTTP {response.status_code}"
+        recovered = self._extract_structured_field(response.content, "workspace_id")
+        if recovered != handle:
+            return "workspace 自动恢复返回了不匹配的上下文标识，已拒绝继续调用。"
+        self._remember_persistent_workspace_handle(handle, project_id, root)
+        _write_diag_entry(
+            path=constants.DEFAULT_MCP_PATH,
+            method="POST",
+            event="workspace_rehydrated",
+            workspace_hash=_diag_short_hash(project_id),
+            handle_hash=_diag_short_hash(handle),
+            root_hash=_diag_short_hash(root),
+        )
+        return ""
+
     def _workspace_handle_targets_other_root(
         self, tool_name: str, arguments: dict[str, Any], target_workspace: str
     ) -> bool:
@@ -1853,6 +3002,26 @@ class OAuthGateway:
                 and self._workspace_registry(handle_workspace)
             ):
                 return handle_workspace
+            if (
+                handle_workspace
+                and workspace_handle.startswith("ws_")
+                and self._configured_project_root(handle_workspace)
+            ):
+                # A configured project may be between STOPPING/STARTING and READY.
+                # Preserve its durable route; the caller will receive a temporary
+                # data-plane-unavailable response until the engine is ready, then
+                # the deterministic handle is rehydrated before the original call.
+                return handle_workspace
+            if handle_workspace:
+                self._forget_workspace_handle(
+                    workspace_handle, expected_project_id=handle_workspace
+                )
+            if workspace_handle.startswith(("ws_", "ws-")):
+                self._forget_workspace_handle(workspace_handle)
+                raise ValueError(
+                    "workspace 上下文已失效且没有可恢复的路由记录；"
+                    "请重新打开该工作区后再重试，系统不会静默切换到磁盘根目录。"
+                )
 
         # Legacy transport affinity is only a soft context. Absolute paths above
         # still override it, while relative paths stay in the selected context.
@@ -2115,7 +3284,16 @@ class OAuthGateway:
         )
 
     async def _health(self, request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok", "app": "oauth-gateway", "resource": self.resource_url})
+        return JSONResponse(
+            {
+                "status": "ok",
+                "app": "oauth-gateway",
+                "resource": self.resource_url,
+                "hub_tool_contract_version": HUB_TOOL_CONTRACT_VERSION,
+                "hub_tool_count": HUB_TOOL_COUNT,
+                "hub_tool_schema_fingerprint": HUB_TOOL_CONTRACT_FINGERPRINT,
+            }
+        )
 
     @property
     def is_running(self) -> bool:
@@ -2142,11 +3320,44 @@ class OAuthGateway:
         self._thread = threading.Thread(target=self._server.run, daemon=True)
         self._thread.start()
 
+    def _close_owned_http_client(self) -> None:
+        if self._http.is_closed:
+            return
+
+        async def close_client() -> None:
+            if not self._http.is_closed:
+                await self._http.aclose()
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(close_client())
+            return
+
+        failures: list[BaseException] = []
+
+        def close_on_worker_loop() -> None:
+            try:
+                asyncio.run(close_client())
+            except BaseException as exc:  # noqa: BLE001 - bounded shutdown fallback
+                failures.append(exc)
+
+        worker = threading.Thread(target=close_on_worker_loop, name="gateway-http-close", daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        if worker.is_alive():
+            _write_diag_entry(event="gateway_http_close_timeout", timeout_seconds=5)
+        elif failures:
+            _write_diag_entry(event="gateway_http_close_failed", failure_type=type(failures[0]).__name__)
+
     def stop(self) -> None:
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
             self._thread.join(timeout=5)
+        thread_alive = bool(self._thread is not None and self._thread.is_alive())
+        if not thread_alive:
+            self._close_owned_http_client()
 
 
 __all__ = ["OAuthGateway"]

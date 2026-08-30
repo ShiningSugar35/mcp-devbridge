@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import shutil
 import sys
+import threading
 import time
 from enum import StrEnum
 from pathlib import Path
@@ -25,6 +26,7 @@ QUICK_TUNNEL_URL_RE = re.compile(r"https://[a-z0-9][a-z0-9\-]*\.trycloudflare\.c
 NGROK_URL_RE = re.compile(
     r"https://[a-z0-9][a-z0-9.-]*\.(?:ngrok\.(?:app|io)|ngrok-free\.app)(?:/[a-z0-9/_-]*)?"
 )
+_CLOUDFLARE_PROTOCOLS = frozenset({"auto", "quic", "http2"})
 
 
 class ConnectionMethod(StrEnum):
@@ -82,6 +84,30 @@ class TunnelManager(EngineManager):
         self.public_url: str = ""
         self.public_hostname: str = ""
         self.kind: ConnectionMethod = ConnectionMethod.LOCAL
+        self._ready_cancel = threading.Event()
+        self._last_pid: int | None = None
+        self._last_exit_code: int | None = None
+        self._cloudflare_protocol = "auto"
+        self._recommended_protocol = ""
+
+    @property
+    def last_pid(self) -> int | None:
+        return self.pid or self._last_pid
+
+    @property
+    def last_exit_code(self) -> int | None:
+        proc = self._proc
+        if proc is not None and not proc.is_running:
+            return proc.returncode
+        return self._last_exit_code
+
+    @property
+    def current_protocol(self) -> str:
+        return self._cloudflare_protocol if self.kind == ConnectionMethod.CLOUDFLARE else ""
+
+    @property
+    def recommended_protocol(self) -> str:
+        return self._recommended_protocol
 
     def _apply_executable(self) -> None:
         if self.kind == ConnectionMethod.NGROK:
@@ -100,9 +126,11 @@ class TunnelManager(EngineManager):
         hostname: str = "",
         cloudflare_config: Path | None = None,
         tunnel_token: str | None = None,
+        cloudflare_protocol: str = "auto",
     ) -> None:
         if self.is_running:
             return
+        self._ready_cancel.clear()
         self.kind = kind
         self.public_hostname = hostname.strip().rstrip("/")
         self._set_state(EngineState.STARTING)
@@ -117,17 +145,32 @@ class TunnelManager(EngineManager):
 
         self._apply_executable()
         if kind == ConnectionMethod.CLOUDFLARE:
+            protocol = str(cloudflare_protocol or "auto").strip().casefold()
+            if protocol not in _CLOUDFLARE_PROTOCOLS:
+                self._fail(f"不支持的 Cloudflare 传输协议：{protocol}")
+                raise SpawnError("Cloudflare 传输协议配置无效。")
+            self._cloudflare_protocol = protocol
+            self._recommended_protocol = ""
+            protocol_args = [] if protocol == "auto" else ["--protocol", protocol]
             if tunnel_token:
-                # 注意：`--no-autoupdate` 不可放在 `run` 子命令后（2026.7.3 解析失败会直接打印 help），故不带。
+                # 默认 auto 保持历史命令；只有显式 fallback/override 才追加 protocol 参数。
                 cmd = [
                     self.executable,
                     "tunnel",
+                    *protocol_args,
                     "run",
                     "--token",
                     tunnel_token,
                 ]
             elif cloudflare_config and cloudflare_config.is_file():
-                cmd = [self.executable, "tunnel", "--config", str(cloudflare_config), "run"]
+                cmd = [
+                    self.executable,
+                    "tunnel",
+                    *protocol_args,
+                    "--config",
+                    str(cloudflare_config),
+                    "run",
+                ]
             else:
                 self._fail("未配置 Cloudflare 隧道（需要隧道令牌或配置文件）。")
                 raise SpawnError("未配置 Cloudflare 隧道。")
@@ -141,7 +184,14 @@ class TunnelManager(EngineManager):
         else:
             self._fail(f"未知连接方式：{kind}")
             raise SpawnError(f"未知连接方式：{kind}")
-        self._spawn(cmd, {}, secrets, self.log_dir / "tunnel.log")
+        proc = self._spawn(cmd, {}, secrets, self.log_dir / "tunnel.log")
+        self._last_pid = proc.pid
+        self._last_exit_code = None
+
+    def cancel_wait_ready(self) -> None:
+        """Interrupt an in-progress readiness wait without marking failure."""
+
+        self._ready_cancel.set()
 
     def wait_ready(self, timeout_seconds: float | None = None) -> bool:
         if self.kind == ConnectionMethod.LOCAL:
@@ -149,10 +199,14 @@ class TunnelManager(EngineManager):
             return True
         deadline = time.monotonic() + (timeout_seconds or self.timeout)
         while time.monotonic() < deadline:
+            if self._ready_cancel.is_set():
+                return False
             proc = self._proc
             if proc is None:
                 return False
             if not proc.is_running:
+                self._last_pid = proc.pid
+                self._last_exit_code = proc.returncode
                 self._fail("隧道进程提前退出。")
                 return False
             tail = proc.log.tail(200)
@@ -161,9 +215,42 @@ class TunnelManager(EngineManager):
                 self.public_url = url
                 self._set_state(EngineState.READY)
                 return True
-            time.sleep(READY_POLL_INTERVAL_SECONDS)
+            if (
+                self.kind == ConnectionMethod.CLOUDFLARE
+                and self._cloudflare_protocol == "auto"
+            ):
+                protocol_hint = self._parse_cloudflare_protocol_hint(tail)
+                if protocol_hint:
+                    self._recommended_protocol = protocol_hint
+                    self._last_pid = proc.pid
+                    self._fail(
+                        "Cloudflare QUIC 暂不可用，切换 HTTP/2 重试。 "
+                        f"[cloudflare_protocol_fallback:{protocol_hint}]"
+                    )
+                    self._last_exit_code = proc.returncode
+                    return False
+            if self._ready_cancel.wait(READY_POLL_INTERVAL_SECONDS):
+                return False
+        if self._ready_cancel.is_set():
+            return False
+        proc = self._proc
+        if proc is not None:
+            self._last_pid = proc.pid
         self._fail(f"隧道建立超时（{timeout_seconds or self.timeout} 秒）。")
+        if proc is not None:
+            self._last_exit_code = proc.returncode
         return False
+
+    @staticmethod
+    def _parse_cloudflare_protocol_hint(tail: str) -> str:
+        lowered = tail.casefold()
+        if (
+            "suggested_protocol=http2" in lowered
+            or "proceed using 'http2'" in lowered
+            or 'proceed using "http2"' in lowered
+        ):
+            return "http2"
+        return ""
 
     def _parse_public_url(self, tail: str) -> str:
         if self.kind == ConnectionMethod.QUICK:
@@ -182,7 +269,13 @@ class TunnelManager(EngineManager):
         return ""
 
     def stop(self, timeout_seconds: float = 8.0) -> None:
+        self._ready_cancel.set()
+        proc = self._proc
+        if proc is not None:
+            self._last_pid = proc.pid
         super().stop(timeout_seconds=timeout_seconds)
+        if proc is not None:
+            self._last_exit_code = proc.returncode
         self.public_url = ""
 
 

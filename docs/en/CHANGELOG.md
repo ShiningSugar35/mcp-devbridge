@@ -2,6 +2,18 @@
 
 All dates are local development dates.
 
+## 0.8.9 (2026-08-29) — long-running connection governance and forensic recovery
+
+- Harden shared Gateway/Tunnel startup and runtime recovery with bounded retry/backoff, transient DNS/network classification, cancellation-aware waits, responsibility-local restart, and Cloudflare auto→HTTP/2 fallback when connectivity evidence requires it; temporary public-path failure no longer tears down healthy local projects.
+- Add a bounded, fail-open flight recorder for HTTP/MCP/SSE/OAuth lifecycle evidence: wall/monotonic time, request stages/terminal outcome, PIDs, listeners, exit codes, latency/failure counters, last-success timestamps and recent redacted Tunnel output, with strict bearer/cookie/token/password redaction and bounded disk rotation.
+- Stabilize the public Hub contract at 50 tools with deterministic schema fingerprinting and call-stage permission enforcement, eliminating tools/list drift when projects start/stop or switch permission modes.
+- Persist deterministic workspace-handle routing across Gateway recreation, validate canonical roots, rehydrate known read-only contexts with bounded single-flight `open_workspace`, fail closed for unknown/stale handles, and never automatically replay mutating calls.
+- Preserve OAuth DCR/refresh/access-token continuity across Gateway restarts while keeping stored access validation hash-only; move slow credential-store access off the Gateway event loop so credential lookups cannot freeze `/health`, `tools/list` or other concurrent requests.
+- Give Gateway upstream responses a single owner, bound HTTPX pools/deadlines/body sizes, tighten SSE keepalive/timeout/downstream-cancel cleanup, and make CodexPro shutdown stop accepting, drain/force-close active HTTP/SSE, then perform bounded handler cleanup.
+- Strengthen project supervision with authenticated data-plane MCP canaries so control-plane/broker hiccups cannot restart a healthy project; project, Gateway and Tunnel recovery remain isolated by failure thresholds and cooldowns.
+- Improve CodexPro analysis/search scoping and bounded single-flight/cache behavior, background task lifecycle/cancellation, nested Git handling, Windows PATH-less runtime behavior, and long-running request observability.
+- Add fail-closed Windows/Linux release-version consistency checks plus expanded regression, fault-injection, lifecycle, security, resource-bound and formal soak coverage.
+
 ## 0.8.8 (2026-08-26) — explicit workspace context and authorized Windows elevation
 
 - Make the shared Gateway a true multi-root dispatcher instead of a hidden current-workspace owner. `open_workspace` keeps the opaque CodexPro workspace handle and also returns the DevBridge route id; explicit task/path/handle evidence wins over legacy soft affinity, and bootstrap fallback is never reported as the current workspace.

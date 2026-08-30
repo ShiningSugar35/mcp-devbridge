@@ -10,7 +10,7 @@ import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, wi
 import { viewWorkspaceImage } from "./imageOps.js";
 import { searchWorkspace } from "./searchOps.js";
 import { BashTaskManager, runBash, type BashTaskSnapshot } from "./bashOps.js";
-import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
+import { gitDiff, gitDiffShortStat, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
@@ -708,6 +708,21 @@ function diffStats(diff: string): { additions: number; deletions: number; change
   return { additions, deletions, changed: Boolean(diff.trim()) };
 }
 
+function diffShortStats(summary: string): { additions: number; deletions: number; changed: boolean } {
+  const normalized = summary.trim();
+  if (!normalized || normalized === "(no output)") {
+    return { additions: 0, deletions: 0, changed: false };
+  }
+  const additions = Number(normalized.match(/(\d+)\s+insertions?\(\+\)/)?.[1] ?? 0);
+  const deletions = Number(normalized.match(/(\d+)\s+deletions?\(-\)/)?.[1] ?? 0);
+  const changedFiles = Number(normalized.match(/(\d+)\s+files?\s+changed/)?.[1] ?? 0);
+  return {
+    additions,
+    deletions,
+    changed: changedFiles > 0 || additions > 0 || deletions > 0
+  };
+}
+
 const MAX_REVIEW_CHECKPOINTS = 2048;
 
 function reviewClientAffinity(extra: any): string {
@@ -866,6 +881,7 @@ async function applyWorkspacePatch(
     }
 
     const check = spawnSync("git", ["apply", "--check", "--whitespace=nowarn"], {
+      windowsHide: true,
       cwd: workspace.root,
       input: patch,
       encoding: "utf8",
@@ -877,6 +893,7 @@ async function applyWorkspacePatch(
     }
 
     const applied = spawnSync("git", ["apply", "--whitespace=nowarn"], {
+      windowsHide: true,
       cwd: workspace.root,
       input: patch,
       encoding: "utf8",
@@ -1822,8 +1839,10 @@ export function createCodexProServer(
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      if (args.path) guard.resolve(workspace, args.path);
-      const result = await inspectWorkspace(config, guard, workspace);
+      const analysisRoot = typeof args.path === "string" && args.path.trim()
+        ? guard.resolve(workspace, args.path).relPath
+        : ".";
+      const result = await inspectWorkspace(config, guard, workspace, analysisRoot);
       const prefix = typeof args.path === "string" && args.path.trim()
         ? guard.resolve(workspace, args.path).relPath.replace(/^\.\/?$/, "")
         : "";
@@ -2663,10 +2682,19 @@ export function createCodexProServer(
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
-      const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
-      const stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
+      const staged = parseBool(args.staged, false);
       const includeDiff = parseBool(args.include_diff, true);
+      const rawDiff = normalizeGitOutput(
+        includeDiff
+          ? await gitDiff(config, guard, workspace, args.path, staged)
+          : gitDiffShortStat(config, guard, workspace, args.path, staged)
+      );
+      const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
+      const stats = diffError
+        ? { additions: 0, deletions: 0, changed: false }
+        : includeDiff
+          ? diffStats(rawDiff)
+          : diffShortStats(rawDiff);
       const text = diffError
         ? diffError
         : includeDiff
@@ -2676,7 +2704,7 @@ export function createCodexProServer(
             "",
             `Workspace: ${workspace.root}`,
             `Path: ${args.path ?? "workspace diff"}`,
-            `Staged: ${parseBool(args.staged, false)}`,
+            `Staged: ${staged}`,
             `Diff stats: +${stats.additions} -${stats.deletions}`,
             "",
             "Raw diff omitted by include_diff=false."
@@ -2685,13 +2713,13 @@ export function createCodexProServer(
         workspace_id: workspace.id,
         root: workspace.root,
         path: args.path ?? "workspace diff",
-        staged: parseBool(args.staged, false),
+        staged,
         include_diff: includeDiff,
         diff_error: diffError || undefined,
         additions: stats.additions,
         deletions: stats.deletions,
         changed: !diffError && stats.changed,
-        diff: diffError || includeDiff ? rawDiff : ""
+        diff: diffError ? rawDiff : includeDiff ? rawDiff : ""
       });
     }
   );
@@ -2725,11 +2753,19 @@ export function createCodexProServer(
       const normalizedScopedPath = scopedPath?.trim() ? guard.resolve(workspace, scopedPath).relPath : undefined;
       const status = normalizeGitOutput(gitDiffStatus(config, guard, workspace, normalizedScopedPath, staged));
       const includeDiff = parseBool(args.include_diff, true);
-      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, normalizedScopedPath, staged));
+      const rawDiff = normalizeGitOutput(
+        includeDiff
+          ? await gitDiff(config, guard, workspace, normalizedScopedPath, staged)
+          : gitDiffShortStat(config, guard, workspace, normalizedScopedPath, staged)
+      );
       const statusError = looksLikeGitError(status) ? status : "";
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
-      const diff = diffError ? "" : rawDiff;
-      const stats = diffStats(diff);
+      const diff = includeDiff && !diffError ? rawDiff : "";
+      const stats = diffError
+        ? { additions: 0, deletions: 0, changed: false }
+        : includeDiff
+          ? diffStats(diff)
+          : diffShortStats(rawDiff);
       const changedFiles = statusError ? [] : changedStatusLines(status);
       const untrackedFingerprint = statusError ? "" : await untrackedReviewFingerprint(config, guard, workspace, changedFiles);
       const since = args.since === "workspace" ? "workspace" : "last_shown";
@@ -2739,7 +2775,10 @@ export function createCodexProServer(
         { path: normalizedScopedPath, staged },
         reviewClientAffinity(extra)
       );
-      const fingerprint = reviewFingerprint(status, `${diff}\0${untrackedFingerprint}`);
+      const fingerprint = reviewFingerprint(
+        status,
+        `${includeDiff ? diff : rawDiff}\0${untrackedFingerprint}`
+      );
       const checkpointHit = includeDiff && since === "last_shown" && reviewCheckpoints.get(checkpointKey) === fingerprint;
       const checkpointWritten = markReviewed && includeDiff;
       if (checkpointWritten) rememberReviewCheckpoint(reviewCheckpoints, checkpointKey, fingerprint);
@@ -2747,9 +2786,12 @@ export function createCodexProServer(
       const responseStats = checkpointHit ? { additions: 0, deletions: 0, changed: false } : stats;
       const changedPaths = statusError ? [] : changedPathsFromStatus(changedFiles);
       let analysis: Record<string, unknown> | undefined;
-      if (config.analysisEnabled && changedPaths.length && !checkpointHit) {
+      if (includeDiff && config.analysisEnabled && changedPaths.length && !checkpointHit) {
         try {
-          const impact = await reviewWorkspaceChanges(config, guard, workspace, { changedPaths });
+          const impact = await reviewWorkspaceChanges(config, guard, workspace, {
+            changedPaths,
+            root: normalizedScopedPath ?? "."
+          });
           analysis = {
             schema_version: impact.schemaVersion,
             changed_paths: impact.changedPaths,

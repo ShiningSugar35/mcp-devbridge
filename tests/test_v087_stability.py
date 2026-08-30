@@ -36,6 +36,30 @@ def test_ready_engine_state_detects_exited_child() -> None:
     assert "engine_exit" in dead.message
 
 
+def test_codexpro_ready_requires_real_mcp_canary_not_log_or_tcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ListeningButMcpDead:
+        is_running = True
+        returncode = None
+        pid = 4243
+
+        class Log:
+            @staticmethod
+            def tail(_count: int) -> str:
+                return "[CodexPro] HTTP MCP listening on http://127.0.0.1:8788/mcp"
+
+        log = Log()
+
+    manager = CodexProManager(node_exe="node", timeout_seconds=0.03)
+    cast(Any, manager)._proc = ListeningButMcpDead()
+    cast(Any, manager)._mcp_ready_probe = lambda: (False, "tools/list timed out")
+    monkeypatch.setattr("local_dev_mcp_bridge.engines.port_listening", lambda _port: True)
+
+    assert manager.wait_ready(timeout_seconds=0.03) is False
+    assert manager.state != EngineState.READY
+
+
 def test_windows_awake_guard_uses_system_required_without_display_required() -> None:
     calls: list[int] = []
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,6 +23,7 @@ try {
   await write('src/race.ts', 'export function temporaryFile() { return true; }\n');
   await write('test/auth.test.ts', "import { authenticate } from '../src/auth.js';\nvoid authenticate('test');\n");
   await write('README.md', '# Fixture\n');
+  await write('large-diff.txt', 'baseline\n');
   await write('.env', 'PRIVATE_TOKEN=never-visible\n');
   await write('python/service.py', 'def load_user(user_id):\n    return user_id\n');
   await write('go/service.go', 'package service\nfunc LoadUser(id string) string { return id }\n');
@@ -38,6 +40,19 @@ try {
   await write('packages/core/src/index.ts', 'export function coreValue() { return 1; }\n');
   await write('packages/web/package.json', JSON.stringify({ name: '@fixture/web', dependencies: { '@fixture/core': 'workspace:*' } }, null, 2));
   await write('packages/web/src/index.ts', "import { coreValue } from '../../core/src/index.js';\nexport const webValue = coreValue();\n");
+  await Promise.all(
+    Array.from({ length: 9 }, (_, index) =>
+      write(`parallel/root-${index}/index.ts`, `export const parallelValue${index} = ${index};\n`)
+    )
+  );
+  await Promise.all(
+    Array.from({ length: 160 }, (_, index) =>
+      write(
+        `deadline-scope/file-${String(index).padStart(3, '0')}.ts`,
+        Array.from({ length: 80 }, (__, line) => `export const deadlineMarker${index}_${line} = ${line};`).join('\n') + '\n'
+      )
+    )
+  );
   await fs.writeFile(path.join(outside, 'outside.ts'), 'export const outside = true;\n', 'utf8');
   let symlinkCreated = false;
   try {
@@ -47,13 +62,20 @@ try {
     if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error;
   }
 
-  const [{ loadConfig }, { PathGuard, WorkspaceManager }, { inventoryWorkspace }, { extractWorkspaceFiles }, classification, analysisApi] = await Promise.all([
+  execFileSync('git', ['init', '--quiet'], { cwd: tmp, stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.email', 'codexpro-smoke@example.invalid'], { cwd: tmp, stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.name', 'CodexPro Smoke'], { cwd: tmp, stdio: 'pipe' });
+  execFileSync('git', ['add', '--', 'large-diff.txt'], { cwd: tmp, stdio: 'pipe' });
+  execFileSync('git', ['commit', '--quiet', '-m', 'fixture baseline'], { cwd: tmp, stdio: 'pipe' });
+
+  const [{ loadConfig }, { PathGuard, WorkspaceManager }, { inventoryWorkspace }, { extractWorkspaceFiles }, classification, analysisApi, { gitDiff }] = await Promise.all([
     importBuilt('config.js'),
     importBuilt('guard.js'),
     importBuilt('analysis/inventory.js'),
     importBuilt('analysis/extract.js'),
     importBuilt('analysis/classify.js'),
-    importBuilt('analysis/index.js')
+    importBuilt('analysis/index.js'),
+    importBuilt('gitOps.js')
   ]);
   const config = loadConfig(['--root', tmp, '--bash', 'off', '--write', 'off']);
   const guard = new PathGuard(config);
@@ -154,6 +176,99 @@ try {
     root: 'src'
   });
   assert.equal(scoped.matches.length, 0);
+  assert.equal(
+    scoped.coverage.inventoryFiles,
+    2,
+    `narrow structured search must inventory only src/, got ${scoped.coverage.inventoryFiles} files`
+  );
+
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const scopedInspect = await analysisApi.inspectWorkspace(config, guard, workspace, 'packages/core');
+  assert.equal(
+    scopedInspect.coverage.inventoryFiles,
+    2,
+    `narrow workspace inspection must inventory only packages/core/, got ${scopedInspect.coverage.inventoryFiles} files`
+  );
+  assert(scopedInspect.files.every((file) => file.path.startsWith('packages/core/')));
+
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const scopedReview = await analysisApi.reviewWorkspaceChanges(config, guard, workspace, {
+    changedPaths: ['src/auth.ts'],
+    root: 'src'
+  });
+  assert.equal(
+    scopedReview.coverage.inventoryFiles,
+    2,
+    `scoped change review must inventory only src/, got ${scopedReview.coverage.inventoryFiles} files`
+  );
+  assert(scopedReview.warnings.some((warning) => warning.includes('dependents outside this scope were not evaluated')));
+
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const beforeConcurrent = analysisApi.analysisRuntimeSnapshot();
+  const concurrent = await Promise.all(
+    Array.from({ length: 6 }, () => analysisApi.inspectWorkspace(config, guard, workspace, 'packages/core'))
+  );
+  const afterConcurrent = analysisApi.analysisRuntimeSnapshot();
+  assert.equal(afterConcurrent.buildsStarted - beforeConcurrent.buildsStarted, 1, 'same-scope concurrent analysis must single-flight');
+  assert.equal(afterConcurrent.inflight, 0, 'analysis inflight registry must clean up after completion');
+  assert(concurrent.every((item) => item.coverage.inventoryFiles === concurrent[0].coverage.inventoryFiles));
+
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const beforeWaiterCancel = analysisApi.analysisRuntimeSnapshot();
+  const sharedOwner = analysisApi.inspectWorkspace(config, guard, workspace, 'deadline-scope', { timeoutMs: 5_000 });
+  const waiterController = new AbortController();
+  const cancelledWaiter = analysisApi.inspectWorkspace(config, guard, workspace, 'deadline-scope', {
+    signal: waiterController.signal,
+    timeoutMs: 5_000
+  });
+  waiterController.abort(new Error('shared waiter cancelled'));
+  await assert.rejects(cancelledWaiter, /shared waiter cancelled|cancel/i);
+  const ownerResult = await sharedOwner;
+  const afterWaiterCancel = analysisApi.analysisRuntimeSnapshot();
+  assert(ownerResult.coverage.inventoryFiles >= 100, 'shared owner must finish after another waiter cancels');
+  assert.equal(afterWaiterCancel.buildsStarted - beforeWaiterCancel.buildsStarted, 1, 'cancelled waiter must not start or cancel a second build');
+  assert.equal(afterWaiterCancel.inflight, 0, 'shared build must clean up after owner completion');
+
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const deadlineOwner = analysisApi.inspectWorkspace(config, guard, workspace, 'deadline-scope', { timeoutMs: 5_000 });
+  await assert.rejects(
+    analysisApi.inspectWorkspace(config, guard, workspace, 'deadline-scope', { timeoutMs: 1 }),
+    /exceeded 1ms deadline/i
+  );
+  await deadlineOwner;
+  assert.equal(analysisApi.analysisRuntimeSnapshot().inflight, 0, 'timed-out waiter must not leak or cancel the shared build');
+
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const capped = await Promise.allSettled(
+    Array.from({ length: 9 }, (_, index) =>
+      analysisApi.inspectWorkspace(config, guard, workspace, `parallel/root-${index}`, { timeoutMs: 5_000 })
+    )
+  );
+  assert.equal(capped.filter((item) => item.status === 'rejected' && /busy \(8\/8 active builds\)/i.test(String(item.reason))).length, 1);
+  assert.equal(capped.filter((item) => item.status === 'fulfilled').length, 8);
+  assert.equal(analysisApi.analysisRuntimeSnapshot().inflight, 0, 'capped distinct builds must all clean up');
+
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const searchOwner = analysisApi.inspectWorkspace(config, guard, workspace, 'deadline-scope', { timeoutMs: 5_000 });
+  await assert.rejects(
+    analysisApi.searchWorkspaceStructured(config, guard, workspace, {
+      query: 'deadlineMarker',
+      intent: 'text',
+      root: 'deadline-scope',
+      timeoutMs: 1
+    }),
+    /exceeded 1ms deadline/i
+  );
+  await searchOwner;
+  assert.equal(analysisApi.analysisRuntimeSnapshot().inflight, 0, 'timed-out structured search must leave no inflight state');
+
+  const cancelled = new AbortController();
+  cancelled.abort(new Error('caller cancelled'));
+  await assert.rejects(
+    analysisApi.inspectWorkspace(config, guard, workspace, 'packages/web', { signal: cancelled.signal }),
+    /caller cancelled|cancel/i
+  );
+  assert.equal(analysisApi.analysisRuntimeSnapshot().inflight, 0, 'cancelled waiter must not leak inflight analysis');
 
   const unsupportedRegex = await analysisApi.searchWorkspaceStructured(config, guard, workspace, {
     query: '(?i)authenticate',
@@ -171,6 +286,15 @@ try {
   assert.equal(candidateLimited.matches.length, 2);
   assert.equal(candidateLimited.coverage.truncated, true);
   assert(candidateLimited.warnings.some((warning) => warning.includes('retained the first 8 candidates')));
+
+  await write(
+    'large-diff.txt',
+    Array.from({ length: 8_000 }, (_, index) => `bounded git diff line ${index}: ${'x'.repeat(96)}`).join('\n') + '\n'
+  );
+  const boundedDiff = await gitDiff({ ...config, maxOutputBytes: 16_384 }, guard, workspace);
+  assert(!boundedDiff.includes('ENOBUFS'), 'bounded full diff must not surface spawnSync ENOBUFS');
+  assert.match(boundedDiff, /\[git diff truncated at 16384 bytes;/i);
+  assert(Buffer.byteLength(boundedDiff, 'utf8') <= 17_000, 'bounded full diff response must remain close to its hard cap');
 
   console.log('✓ analysis smoke test passed');
 } finally {

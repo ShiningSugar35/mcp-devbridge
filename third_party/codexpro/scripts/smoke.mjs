@@ -3,6 +3,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+// The broad smoke suite validates workspace-scoped safety. Production launchers
+// may export full-system mode, so clear it for this child-process fixture instead
+// of silently weakening symlink and root-boundary assertions.
+Reflect.deleteProperty(process.env, ['CODEXPRO', 'SYSTEM', 'ACCESS'].join('_'));
+
 function encode(message) {
   return `${JSON.stringify(message)}\n`;
 }
@@ -488,7 +493,7 @@ await expectToolError('long_run_review', {
   summary: 'must not pass while background work is still running',
   evidence: ['review inspected attached background task']
 }, /background work is not terminal|running/i);
-const longRunTaskDone = await waitForTask(client, longRunTask, current.structuredContent.workspace_id, 10);
+const longRunTaskDone = await waitForTask(client, longRunTask, current.structuredContent.workspace_id, 20);
 if (longRunTaskDone.structuredContent.task.status !== 'completed') throw new Error(`attached long-run task did not complete: ${JSON.stringify(longRunTaskDone.structuredContent)}`);
 await client.request('tools/call', {
   name: 'long_run_review',
@@ -617,7 +622,7 @@ const runningTaskId = runningStart.structuredContent?.task?.taskId;
 if (!runningTaskId) throw new Error('bash did not return a task id for running poll smoke');
 const runningWait = await client.request('tools/call', {
   name: 'wait_task',
-  arguments: { workspace_id: ws, task_id: runningTaskId, wait_seconds: 1 },
+  arguments: { workspace_id: ws, task_id: runningTaskId, wait_seconds: 3 },
   _meta: { progressToken: 7 }
 });
 if (runningWait.structuredContent?.task?.status !== 'running') throw new Error('wait_task running smoke unexpectedly finished');
@@ -1858,4 +1863,86 @@ if (!lowerContext.content?.[0]?.text?.includes('Lowercase instruction file loade
   throw new Error('codex_context did not include lowercase agents.md content');
 }
 lowerClient.close();
+
+const largeDiffRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-large-diff-'));
+const largeDiffPath = path.join(largeDiffRoot, 'large-diff.txt');
+const originalLargeDiff = Array.from({ length: 3000 }, (_, index) => `before-${index}`).join('\n') + '\n';
+const changedLargeDiff = Array.from({ length: 3000 }, (_, index) => `after-${index}`).join('\n') + '\n';
+await fs.writeFile(largeDiffPath, originalLargeDiff, 'utf8');
+for (const args of [
+  ['init'],
+  ['config', 'core.autocrlf', 'false'],
+  ['add', 'large-diff.txt']
+]) {
+  const result = spawnSync('git', args, { cwd: largeDiffRoot, encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`large diff fixture git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+  }
+}
+const largeDiffCommit = spawnSync(
+  'git',
+  ['-c', 'user.email=smoke@example.com', '-c', 'user.name=Smoke Test', 'commit', '-m', 'large diff baseline'],
+  { cwd: largeDiffRoot, encoding: 'utf8' }
+);
+if (largeDiffCommit.status !== 0) {
+  throw new Error(`large diff fixture commit failed: ${largeDiffCommit.stderr || largeDiffCommit.stdout}`);
+}
+await fs.writeFile(largeDiffPath, changedLargeDiff, 'utf8');
+const largeDiffClient = new McpStdioClient(
+  'node',
+  ['dist/stdio.js', '--root', largeDiffRoot, '--allow-root', largeDiffRoot, '--tool-mode', 'full'],
+  {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      CODEXPRO_ROOT: largeDiffRoot,
+      CODEXPRO_ALLOWED_ROOTS: largeDiffRoot,
+      CODEXPRO_MAX_OUTPUT_BYTES: '4000'
+    }
+  }
+);
+await largeDiffClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-large-diff-smoke', version: '0.1.0' }
+});
+largeDiffClient.notify('notifications/initialized');
+const largeDiffOpened = await largeDiffClient.request('tools/call', {
+  name: 'open_current_workspace',
+  arguments: { include_tree: false }
+});
+const largeGitStats = await largeDiffClient.request('tools/call', {
+  name: 'git_diff',
+  arguments: { workspace_id: largeDiffOpened.structuredContent.workspace_id, include_diff: false }
+});
+if (
+  largeGitStats.isError ||
+  largeGitStats.structuredContent.diff_error ||
+  largeGitStats.structuredContent.diff !== '' ||
+  largeGitStats.structuredContent.additions !== 3000 ||
+  largeGitStats.structuredContent.deletions !== 3000
+) {
+  throw new Error(`git_diff stats-only path exceeded its bounded buffer: ${JSON.stringify(largeGitStats.structuredContent)}`);
+}
+const largeShowStats = await largeDiffClient.request('tools/call', {
+  name: 'show_changes',
+  arguments: {
+    workspace_id: largeDiffOpened.structuredContent.workspace_id,
+    include_diff: false,
+    since: 'workspace',
+    mark_reviewed: false
+  }
+});
+if (
+  largeShowStats.isError ||
+  largeShowStats.structuredContent.diff_error ||
+  !largeShowStats.structuredContent.changed ||
+  largeShowStats.structuredContent.diff !== '' ||
+  largeShowStats.structuredContent.additions !== 3000 ||
+  largeShowStats.structuredContent.deletions !== 3000 ||
+  'analysis' in largeShowStats.structuredContent
+) {
+  throw new Error(`show_changes stats-only path materialized a full diff or analysis: ${JSON.stringify(largeShowStats.structuredContent)}`);
+}
+largeDiffClient.close();
 console.log('✓ smoke test passed');

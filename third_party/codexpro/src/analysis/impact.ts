@@ -96,7 +96,7 @@ export async function reviewWorkspaceChanges(
   config: CodexProConfig,
   guard: PathGuard,
   workspace: Workspace,
-  options: { changedPaths: string[] }
+  options: { changedPaths: string[]; root?: string; signal?: AbortSignal; timeoutMs?: number }
 ): Promise<ChangeAnalysis> {
   const changedPaths: string[] = [];
   const pathWarnings: string[] = [];
@@ -108,7 +108,11 @@ export async function reviewWorkspaceChanges(
       pathWarnings.push(`Skipped unsafe or unreadable changed path: ${candidate}`);
     }
   }
-  const analysis = await inspectWorkspace(config, guard, workspace);
+  const analysisRoot = options.root?.trim() || ".";
+  const analysis = await inspectWorkspace(config, guard, workspace, analysisRoot, {
+    signal: options.signal,
+    timeoutMs: options.timeoutMs
+  });
   const affectedAreas = [...new Set(changedPaths.map((filePath) => filePath.includes("/") ? filePath.split("/")[0] : "."))].sort();
   const changed = new Set(changedPaths);
   const dependents = new Map<string, Set<string>>();
@@ -167,6 +171,7 @@ export async function reviewWorkspaceChanges(
     warnings: [
       ...analysis.warnings,
       ...pathWarnings,
+      ...(analysisRoot === "." ? [] : [`Change-impact analysis was scoped to ${analysisRoot}; dependents outside this scope were not evaluated.`]),
       ...(impactLimited ? [`Change-impact output was limited to ${resultLimit} dependent files and ${resultLimit} related tests.`] : [])
     ],
     cache: analysis.cache

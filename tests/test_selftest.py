@@ -66,14 +66,18 @@ def backend_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
         proc.kill()
 
 
-def test_selftest_ok(backend_url: str) -> None:
+def test_selftest_legacy_backend_fails_closed_without_current_canary(backend_url: str) -> None:
     result = run_selftest(backend_url)
-    assert result.ok, result.as_dict()
+    assert not result.ok
     step_names = [s["step"] for s in result.steps]
     assert "initialize" in step_names
+    assert "streamable_http" in step_names
     assert "list_tools" in step_names
-    assert "get_workspace_info" in step_names
-    assert all(s["ok"] for s in result.steps)
+    assert "read_only_tool" in step_names
+    assert "get_workspace_info" not in step_names
+    assert "get_capabilities" not in step_names
+    assert "list_directory" not in step_names
+    assert "只读" in result.error
 
 
 def test_selftest_wrong_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

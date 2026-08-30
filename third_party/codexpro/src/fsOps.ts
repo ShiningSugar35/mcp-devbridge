@@ -292,13 +292,23 @@ export async function repoTree(config: CodexProConfig, guard: PathGuard, workspa
 export async function listFiles(
   guard: PathGuard,
   workspace: Workspace,
-  options: { root?: string; glob?: string; includeHidden?: boolean; maxFiles: number; warnings?: string[] }
+  options: {
+    root?: string;
+    glob?: string;
+    includeHidden?: boolean;
+    maxFiles: number;
+    warnings?: string[];
+    signal?: AbortSignal;
+  }
 ): Promise<string[]> {
+  options.signal?.throwIfAborted();
   const target = guard.resolve(workspace, options.root ?? ".");
   const stat = await fsp.stat(target.absPath);
+  options.signal?.throwIfAborted();
   const files: string[] = [];
 
   async function addFile(absFile: string): Promise<void> {
+    options.signal?.throwIfAborted();
     const rel = displayPath(absFile, workspace.root);
     if (guard.isBlockedRelativePath(rel)) return;
     if (!options.includeHidden && rel.split("/").some(isHiddenName)) return;
@@ -307,11 +317,13 @@ export async function listFiles(
   }
 
   async function walk(absDir: string): Promise<void> {
+    options.signal?.throwIfAborted();
     if (files.length >= options.maxFiles) return;
     let entries: fs.Dirent[];
     try {
       entries = await fsp.readdir(absDir, { withFileTypes: true });
     } catch (error) {
+      options.signal?.throwIfAborted();
       if (options.warnings && options.warnings.length < 100) {
         const code =
           error && typeof error === "object" && "code" in error
@@ -323,8 +335,10 @@ export async function listFiles(
       }
       return;
     }
+    options.signal?.throwIfAborted();
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      options.signal?.throwIfAborted();
       if (files.length >= options.maxFiles) return;
       const abs = path.join(absDir, entry.name);
       const rel = displayPath(abs, workspace.root);
@@ -337,6 +351,7 @@ export async function listFiles(
 
   if (stat.isFile()) await addFile(target.absPath);
   else await walk(target.absPath);
+  options.signal?.throwIfAborted();
   return files;
 }
 

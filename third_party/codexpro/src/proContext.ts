@@ -226,7 +226,7 @@ export async function buildProContext(
   appendSection(parts, "Recent Commits", `\`\`\`text\n${gitLog(config, workspace, 8)}\n\`\`\``);
 
   if (options.includeDiff !== false) {
-    const diff = truncateText(gitDiff(config, guard, workspace), maxDiffBytes);
+    const diff = truncateText(await gitDiff(config, guard, workspace), maxDiffBytes);
     truncated ||= diff.truncated;
     appendSection(parts, "Git Diff", `\`\`\`diff\n${diff.text}\n\`\`\``);
   }

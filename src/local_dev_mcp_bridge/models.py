@@ -54,7 +54,7 @@ def validate_port(value: int) -> int:
 def gateway_service_url(port: int) -> str:
     """The Service URL Cloudflare must point at for the given gateway port."""
     validate_port(port)
-    return f"http://localhost:{port}"
+    return f"http://127.0.0.1:{port}"
 
 
 class ProjectConfig(BaseModel):

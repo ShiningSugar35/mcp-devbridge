@@ -1,17 +1,27 @@
-# AGENTS.md — MCP DevBridge v0.8.8 维护指南
+# AGENTS.md — MCP DevBridge v0.8.9 维护指南
 
-本文件是仓库内 AI/Agent 与工程师的最高优先级开发入口。当前维护线目标是 `release/v0.8.8`；v0.9+ 历史保留在远端，不得为了“补功能”把多 Agent runtime 重新混回本维护线。
+本文件是仓库内 AI/Agent 与工程师的最高优先级开发入口。当前维护线目标是 `release/v0.8.9`；v0.9+ 历史保留在远端，不得为了“补功能”把多 Agent runtime 重新混回本维护线。
 
 ## 1. 开工阅读顺序
 
 1. `AGENTS.md`：硬约束、强制研发流程与开发入口。
 2. `项目架构.md`：当前真实运行架构、路由、安全和平台边界。
 3. `开发计划.md`：**仅当前未完成任务**的需求、根因、架构裁决、验收标准与发布门。
-4. `进度验收.md`：当前任务的实际实现/审查/测试/发布证据。
+4. `进度验收.md`：已经完成且通过验收事项的实际实现/审查/测试/性能/发布证据，以及必要的失败返工审计。
 5. `docs/en/LONG_RUNNING_TASKS.md`：数小时任务的 durable plan/checkpoint/review/rework 契约。
 6. `docs/en/` 其它文件：公开英文架构、兼容、安全、开发与变更记录。
 
 若文档与代码冲突，以**当前代码 + 可复现测试/运行证据**为准，并在同一变更中修正文档。不得靠聊天记忆、旧报告数字或上个版本的“已通过”结论替代本轮证据。
+
+### 1.1 持久事实源与开发文档职责
+
+- `开发计划.md` 只保存**当前尚未完成**的工作。任何新开发任务在实施前必须先写入，至少包含需求、已证实根因或待验证根因、方案/实施步骤、验收标准、风险与回滚；未完成、未验收或被阻塞的事项继续留在这里。
+- 每个可独立验收的工作项一旦**实现完成且验收通过**，必须立即从 `开发计划.md` 删除对应已完成内容，并把完成事实、代码修改、测试、review、性能、构建/发布等证据迁入 `进度验收.md`；不得等到整轮发布结束后再批量清理。若后续未完成事项仍依赖该结果，`开发计划.md` 只保留最小依赖引用，不保留已完成施工记录。
+- `进度验收.md` 不得把“计划做”“预计通过”“代码已写但未验收”等事项写成完成。实现中间 checkpoint 由 durable run 保存；完成项迁入时可保留与最终结论直接相关的失败、返工和重测证据，以形成可审计链。
+- `项目架构.md` 只维护**当前代码与正式运行态对应的真实架构**，不保存未来计划、施工过程或已经失效的旧架构；历史变更证据放入 `进度验收.md` / CHANGELOG 等历史记录。
+- 多阶段或预计超过约 2 分钟的长任务除维护上述三份文档外，还必须同步维护唯一 durable run。durable run 负责执行状态、checkpoint、后台 task、review/completion gate，不替代 `开发计划.md`、`项目架构.md` 或 `进度验收.md`。
+- 断连、新会话、Connector 重连、上下文压缩或聊天上下文丢失后，必须按 **`AGENTS.md → 项目架构.md → 开发计划.md → 进度验收.md → durable run`** 的顺序恢复事实和执行状态；随后再用当前代码、worktree 与可复现测试校验冲突。聊天记忆不是事实源，禁止要求用户重新编写/粘贴超长接管提示词来恢复项目状态。
+- 如果上述事实源之间不一致，禁止擅自把未验收事项提升为“已完成”；应保留其未完成/阻塞状态，先通过代码、日志、测试、构建或发布资产重新裁定并修正文档。
 
 ## 2. 所有开发任务必须执行的强制流水线
 
@@ -52,7 +62,7 @@
 - 多阶段或预计超过约 2 分钟的任务必须先 `long_run_start`；每步完成用 `long_run_update` 写证据。
 - 实现必须从 targeted regression 开始：bug 修复优先写能复现旧问题的测试，再修代码。
 - 只做计划覆盖的最小充分改动；发现新根因需要改变架构时，先更新 `开发计划.md` 再继续。
-- `进度验收.md` 记录**本轮真实事实**：修改点、测试命令、输出摘要、失败与返工、构建/发布 SHA；不得复制旧版测试数。
+- 工作项仍在实施或尚未验收时，其状态与中间证据留在 `开发计划.md` + durable run；不得提前写入 `进度验收.md` 冒充完成。工作项验收通过后，按 §1.1 立即迁移：`进度验收.md` 写入真实修改点、测试命令、输出摘要、review/性能、必要的失败返工、构建/发布 SHA，并从 `开发计划.md` 删除对应已完成施工内容；不得复制旧版测试数。
 - 长命令只用后台 `bash`/task 运行；同步 `run_command`/`run_program` 只用于短探针。
 
 ### Phase E — 代码审查：defect-first，发现问题就返工
@@ -81,8 +91,8 @@ P0/P1/P2 或任何会导致验收失败的 finding 一律 `FAIL → 返工 → �
 只有 review + test 全部 PASS 后才允许：
 
 1. 按需更新 `项目架构.md` / README / CHANGELOG；
-2. 把本轮完成事实写入 `进度验收.md`；
-3. **从 `开发计划.md` 删除本轮已经完成的施工计划**，文件只保留尚未完成任务或“当前无待开发任务”；
+2. 把本阶段新增且已经验收的发布/上线事实与证据写入 `进度验收.md`；
+3. 复核 §1.1 的逐项迁移已经执行：**`开发计划.md` 只能保留尚未完成任务**；整轮全部完成时才写“当前无待开发任务”，不得留存已完成施工记录；
 4. `git diff --check` + 最终 worktree 审计；
 5. commit / push release branch；
 6. annotated version tag；
@@ -124,7 +134,7 @@ MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP �
 ### 3.3 Windows 管理员权限语义
 
 - 应用 `full_system` policy **不等于** Windows elevated token。普通进程不能绕过 UAC 自动获得管理员 token。
-- v0.8.8 采用 Microsoft 推荐模型：标准用户 UI/Gateway + 一次用户明确 UAC 授权注册的 elevated task/broker；后续 full-system 引擎通过受控 broker 获得高完整性 token，不逐命令弹 UAC。
+- v0.8.9 采用 Microsoft 推荐模型：标准用户 UI/Gateway + 一次用户明确 UAC 授权注册的 elevated task/broker；后续 full-system 引擎通过受控 broker 获得高完整性 token，不逐命令弹 UAC。
 - 禁止关闭/绕过 UAC，禁止使用 fodhelper/eventvwr/DLL hijack 等 bypass。
 - elevated broker 只能 loopback/本机受控 IPC + 强随机 secret；接口必须最小化、请求/输出有界、可审计，不得成为一个裸露的“任意管理员命令公网 RPC”。
 - 拒绝首次 UAC 授权时，系统必须明确说明 full-system admin capability 未启用；不得静默降级后仍显示“完全访问已生效”。
@@ -142,7 +152,7 @@ MCP DevBridge 是 PySide6 桌面应用，通过 CodexPro、可选 Windows-MCP �
 - 每个阶段完成后 `long_run_update` 写 checkpoint/证据；无证据不能标 `done`。
 - 实现完成后必须 `long_run_review`。FAIL 形成返工并重新审查；任何 review 后的工作变化都会让旧 PASS 失效。
 - `long_run_complete` 是最终 return 门：步骤、证据、最新 PASS revision 与后台任务状态全部通过前，不得声称“一条龙已完成”。
-- 浏览器刷新、Connector 重连、上下文压缩后，以 `.ai-bridge/long-runs/<run_id>.json` 为事实源恢复，禁止靠聊天记忆猜进度。
+- 浏览器刷新、Connector 重连、上下文压缩或新会话恢复时，先按 §1.1 的五级事实源顺序恢复；其中 `.ai-bridge/long-runs/<run_id>.json` 是**长任务执行状态**的最终事实源，用于恢复 step/checkpoint/task/review revision，但不得覆盖 `AGENTS.md`、当前真实架构或已验收文档事实。禁止靠聊天记忆猜进度或重新制造超长接管提示词。
 - MCP/CodexPro 重启后旧 `task_id` unknown 时，必须提供明确终态证据后再 resolve。
 - 目标仍可执行且无需真实用户输入/授权时，`wait_task` 返回 running 不能成为结束 turn 的理由；继续自动推进并定期给用户简短进展。
 
@@ -187,7 +197,7 @@ OAuth/Bearer Gateway (loopback)
 | `app_state.py` | 共享 Hub 的 Tunnel/Gateway 编排；不得持有项目业务状态 |
 | `gateway.py` | OAuth/Bearer、Hub MCP 代理、多根/任务/handle/设备无状态路由 |
 | `engines.py` | CodexPro / Windows-MCP 进程管理与私有运行时解析 |
-| `elevation.py` | Windows elevated task/broker 注册、认证、引擎/短命令委派（v0.8.8） |
+| `elevation.py` | Windows elevated task/broker 注册、认证、引擎/短命令委派（v0.8.9） |
 | `platform_support.py` | Windows/Linux 平台差异、XDG/桌面路径、进程参数 |
 | `secrets.py` | Windows Credential/DPAPI 与 Linux secret-service/AES-GCM |
 | `update_manager.py` | GitHub Release 检查、资产选择、更新接力 |
@@ -220,7 +230,7 @@ npm run smoke
 发布构建：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.8
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.9
 ```
 
 ### Linux / SteamOS build host
@@ -229,12 +239,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Versi
 uv venv --python 3.12
 uv pip install -p .venv -e '.[dev,package]'
 cd third_party/codexpro && npm ci && npm run build && cd ../..
-bash scripts/build_linux.sh 0.8.8
+bash scripts/build_linux.sh 0.8.9
 ```
 
 Linux release 以 Ubuntu 22.04 构建保持较旧 glibc 基线；SteamOS Desktop Mode 真机是额外兼容证据，不能用“未真机”掩盖 CI/构建失败。
 
-## 8. v0.8.8 发布门
+## 8. v0.8.9 发布门
 
 发布前至少必须满足：
 
@@ -243,9 +253,9 @@ Linux release 以 Ubuntu 22.04 构建保持较旧 glibc 基线；SteamOS Desktop
 - CodexPro TypeScript build、完整 smoke 通过；必须覆盖 stateless explicit handle、多根路由、systemAccess、PathGuard 安全回归和 durable long-run。
 - Windows elevated broker：错误 token/非授权入口拒绝、首次授权、重复启动、stop/crash、真实 high-integrity 无破坏性探针通过。
 - `uv lock --check`；PowerShell parser 与 Bash 发布脚本语法通过。
-- Windows `build.ps1 -Version 0.8.8` 成功；安装器 payload 完整。
-- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-0.8.8.tar.gz`。
-- commit、branch push、annotated `v0.8.8` tag、GitHub Release 资产必须指向同一源提交。
+- Windows `build.ps1 -Version 0.8.9` 成功；安装器 payload 完整。
+- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-0.8.9.tar.gz`。
+- commit、branch push、annotated `v0.8.9` tag、GitHub Release 资产必须指向同一源提交。
 - 使用正式资产升级当前实例后恢复 C:/D: 根，桌面快捷方式、Gateway health、真实 MCP route/full-system 数据面通过。
 - v0.9.x tags/branches 是历史，不删除、不改写、不 force-push。
 
