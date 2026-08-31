@@ -108,6 +108,12 @@ CodexPro server instructions tell capable model clients to create a durable long
 
 This is an execution-discipline guardrail, not a way for the server to override ChatGPT host limits. `Connection interrupted` and `Message delivery timed out` can still originate above the MCP server in the browser↔OpenAI delivery path. The durable state exists so a reconnect or later turn can recover the exact run status without relying on chat memory, while SSE/progress liveness reduces avoidable idle-path disconnects during a still-live turn.
 
+### Risk-tiered validation and cleanup
+
+Creating a durable run does **not** imply that every task must run the repository's heaviest validation. The project-level `AGENTS.md` risk tier controls verification scope: documentation/process changes use focused contract/text checks and diff review; local code uses targeted regression; runtime/state changes add integration/smoke; security, routing core, installation, cross-platform and formal-release changes use the full system-level gate. This keeps long-run durability independent from test cost.
+
+Before terminal review, clean only temporary artifacts that are both attributable to the current task and reproducible (for example one-off smoke output, temporary build directories, disposable helper scripts, or superseded transient logs). Never use cleanup as a generic repository sweeper: durable run state needed for recovery, formal release assets, user configuration, unknown-origin files, third-party source, and uncommitted work from another session must be preserved. Cleanup must be followed by a worktree/diff audit before completion.
+
 ## Timeout strategy
 
 - `bash`: background task; no fixed execution-time limit. It ends only when the child exits, fails, or is cancelled.

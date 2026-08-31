@@ -25,7 +25,15 @@
 
 ## 2. 所有开发任务必须执行的强制流水线
 
-除纯问答、纯解释和用户明确要求的只读诊断外，任何功能、修复、重构、性能、安全、发布任务都必须按以下顺序执行。不得因为任务“看起来简单”跳过根因、计划、审查或测试；确实不适用的步骤应在 `开发计划.md` 写明“不适用 + 原因”。
+除纯问答、纯解释和用户明确要求的只读诊断外，任何功能、修复、重构、性能、安全、发布任务都必须完成必要的根因、方案、Review、验证和收尾；但**验证强度按风险分级，不再要求每个低风险任务机械跑完整发布流水线**。执行时把下列 A–G 详细职责压缩理解为 5 个门：`范围/根因 → 架构/方案 → 实现 + Review + 分级验证 → 按风险发布 → 文档归档 + 临时文件清理 + commit/push`。详细 Phase 保留作为高风险任务检查表，不要求低风险任务逐项制造“不适用”文档噪声。
+
+### 2.0 验证等级与提速原则
+
+- **L0 — 文档/流程/注释/非执行说明**：只做相关文档合同/文本检查（若存在）、必要格式/静态检查、`git diff --check` 和 Review；默认不跑全仓 pytest、PyInstaller、Windows/Linux 构建、安装包、真实 MCP/Hub smoke，也不重启服务。
+- **L1 — 单模块低风险代码**：targeted regression + 受影响模块 lint/typecheck；依赖影响面可证明收敛时不扩大到全仓。
+- **L2 — 跨模块/状态/路由/数据库/API/桌面运行时**：targeted + 相关集成/负向 + 必要 build/smoke；只有实际运行态受影响时才重启并做真实 MCP tool call。
+- **L3 — 权限/安全/路由核心、durable task、安装升级、跨平台、发布资产**：保留完整专业门，包括相关全量测试、Windows/Linux 构建、安装/升级、真实 MCP/Hub/权限 smoke 和 release asset 校验。
+- 命中多个等级取最高级；Review 发现影响面扩大时升级等级。禁止为了“流程完整”运行与本次变更无关的重型测试，也禁止为了提速降低 L3 安全/发布门。
 
 ### Phase A — 需求分析师：还原真实需求
 
@@ -82,24 +90,25 @@ P0/P1/P2 或任何会导致验收失败的 finding 一律 `FAIL → 返工 → �
 
 ### Phase F — 专业测试：按验收标准逐项验证
 
-- 顺序建议：targeted regression → 静态检查 → 单元/集成 → 跨平台 typecheck → upstream build/smoke → 安全/负向 → 实机/live probe → 正式构建。
-- 任何 acceptance criterion 失败都返回开发阶段修复；修复后相关 review 与测试必须重跑。
-- 不允许只因“全量 pytest 绿”就跳过工作区、多会话、权限、管理员 token、真实 MCP 数据面等系统级验收。
+- 具体测试集合由 §2.0 的 L0–L3 决定；只执行本次 acceptance 与实际影响面要求的最小充分组合，不为 L0/L1 任务机械跑跨平台 build、安装包或真实 MCP smoke。
+- 任何 acceptance criterion 失败都返回开发阶段修复；修复后只重跑受影响的 Review/验证层，除非影响面扩大才升级等级。
+- L3 仍不允许只因“全量 pytest 绿”就跳过工作区、多会话、权限、管理员 token、真实 MCP 数据面、安装升级等系统级验收。
 
 ### Phase G — 发布与上线闭环
 
-只有 review + test 全部 PASS 后才允许：
+只有与当前风险等级匹配的 review + validation 全部 PASS 后才允许进入收尾；L0/L1 且不涉及运行态/发布资产的任务执行 docs-only closeout，不创建 tag/Release、不重启服务：
 
 1. 按需更新 `项目架构.md` / README / CHANGELOG；
 2. 把本阶段新增且已经验收的发布/上线事实与证据写入 `进度验收.md`；
 3. 复核 §1.1 的逐项迁移已经执行：**`开发计划.md` 只能保留尚未完成任务**；整轮全部完成时才写“当前无待开发任务”，不得留存已完成施工记录；
-4. `git diff --check` + 最终 worktree 审计；
-5. commit / push release branch；
-6. annotated version tag；
-7. GitHub Release 与 Windows/Linux 正式资产、checksum 必须来自同一源提交；
-8. 使用**正式发布资产**升级/热更新当前 MCP；恢复原本应运行的根服务；
-9. 核验桌面快捷方式、进程、端口、local/public health、真实 MCP tool call；
-10. 最后执行 `long_run_review(pass)` + `long_run_complete`，再向用户声称完成。
+4. 清理**仅由本任务生成且可证明可再生**的临时脚本、一次性 smoke/test 输出、缓存、临时构建目录和编排副产物；禁止删除 `.env`、用户配置、release 正式资产、第三方源码、未知来源文件或其它会话的未提交改动；
+5. `git diff --check` + 最终 worktree 审计，确认既没有误删正式文件，也没有残留本任务临时垃圾；
+6. commit / push 当前工作分支；
+7. 仅 L3 正式版本发布才创建 annotated version tag；
+8. 仅 L3 正式版本发布才创建 GitHub Release，并要求 Windows/Linux 正式资产、checksum 来自同一源提交；
+9. 仅实际运行态受影响时，使用正式发布/构建资产升级或热更新当前 MCP，并恢复原本应运行的根服务；
+10. 仅 L2/L3 运行态任务核验对应的快捷方式、进程、端口、local/public health、真实 MCP tool call；L0/L1 文档/局部任务不得为了“收尾”无意义重启；
+11. 最后执行 `long_run_review(pass)` + `long_run_complete`，再向用户声称完成。
 
 若发布基础设施暂时不可用，必须明确停在具体门，不得用“代码已完成”冒充“正式上线已完成”。
 
