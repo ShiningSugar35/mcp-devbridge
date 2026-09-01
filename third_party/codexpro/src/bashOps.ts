@@ -36,6 +36,18 @@ export interface BashTaskSnapshot extends BashResult {
   finishedAt?: string;
   error?: string;
   resumeHint?: string;
+  durableResolutionState?: "awaiting_terminal" | "persisting" | "retrying" | "persisted" | "failed";
+  durableResolutionAttempts?: number;
+  durableResolutionError?: string;
+}
+
+export type BashTaskTerminalHandler = (snapshot: BashTaskSnapshot) => void | Promise<void>;
+
+export interface BashTaskStartOptions {
+  cwd?: string;
+  sessionId?: string;
+  taskId?: string;
+  onTerminal?: BashTaskTerminalHandler;
 }
 
 interface BashTaskInternal {
@@ -56,7 +68,20 @@ interface BashTaskInternal {
   bashSessionId?: string;
   error?: string;
   maxOutputBytes: number;
+  onTerminal?: BashTaskTerminalHandler;
+  durableResolutionState?: "awaiting_terminal" | "persisting" | "retrying" | "persisted" | "failed";
+  durableResolutionAttempts: number;
+  durableResolutionPromise?: Promise<void>;
+  durableResolutionTimer?: NodeJS.Timeout;
+  durableResolutionError?: string;
+  cancellationAttempts: number;
+  cancellationTimer?: NodeJS.Timeout;
 }
+
+const BASH_TASK_ID_RE = /^[A-Za-z0-9._-]{1,160}$/;
+const BASH_TASK_TERMINAL_RESOLUTION_MAX_ATTEMPTS = 5;
+const BASH_TASK_CANCELLATION_INITIAL_GRACE_MS = 150;
+const BASH_TASK_CANCELLATION_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 
 const SAFE_ALLOWED_PREFIXES = [
   "pwd",
@@ -460,25 +485,48 @@ function trimOutput(value: string, maxBytes: number): { value: string; truncated
   return { value: `${sliced}\n...[output truncated to ${maxBytes} bytes]`, truncated: true };
 }
 
-function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
+interface ProcessTreeTerminationResult {
+  success: boolean;
+  detail: string;
+}
+
+function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): ProcessTreeTerminationResult {
+  if (!child.pid) return { success: true, detail: "child_pid_unavailable" };
   if (process.platform === "win32") {
-    // Windows does not provide Unix-style cooperative signals to process trees.
-    // Force the full tree while the parent PID still identifies its descendants;
-    // otherwise the shell can exit first and orphan an output-heavy grandchild.
-    const args = ["/pid", String(child.pid), "/t", "/f"];
+    // Keep the PowerShell parent alive until taskkill has had bounded chances to
+    // discover and terminate its descendants. Killing only the parent after one
+    // transient taskkill miss can orphan the real command while its inherited
+    // stdout/stderr handles keep the task non-terminal.
     const result = spawnSync(
       existingWindowsExecutable("taskkill.exe", "System32", "taskkill.exe"),
-      args,
-      { stdio: "ignore", windowsHide: true }
+      ["/PID", String(child.pid), "/T", "/F"],
+      { stdio: "ignore", windowsHide: true, timeout: 5_000 }
     );
-    if (result.status !== 0) child.kill(signal);
-    return;
+    const success = !result.error && result.status === 0;
+    return {
+      success,
+      detail:
+        `taskkill_status=${result.status ?? "null"}; ` +
+        `taskkill_signal=${result.signal ?? "null"}; ` +
+        `taskkill_error=${result.error instanceof Error ? result.error.name : "none"}`
+    };
   }
   try {
     process.kill(-child.pid, signal);
+    return { success: true, detail: `process_group_${signal.toLowerCase()}_requested` };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill(signal);
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      return { success: true, detail: "process_group_already_absent" };
+    }
+    try {
+      const success = child.kill(signal);
+      return { success, detail: success ? `child_${signal.toLowerCase()}_requested` : "child_kill_returned_false" };
+    } catch (fallbackError) {
+      return {
+        success: false,
+        detail: fallbackError instanceof Error ? fallbackError.name : "child_kill_failed"
+      };
+    }
   }
 }
 
@@ -515,7 +563,13 @@ export class BashTaskManager {
     }
     if (this.tasks.size <= this.maxTasks) return;
     const removable = [...this.tasks.values()]
-      .filter((task) => taskTerminal(task.status))
+      .filter(
+        (task) =>
+          taskTerminal(task.status) &&
+          (!task.onTerminal ||
+            task.durableResolutionState === "persisted" ||
+            task.durableResolutionState === "failed")
+      )
       .sort((left, right) => (left.finishedAtMs ?? left.startedAtMs) - (right.finishedAtMs ?? right.startedAtMs));
     while (this.tasks.size > this.maxTasks && removable.length) {
       const task = removable.shift();
@@ -558,6 +612,15 @@ export class BashTaskManager {
       truncated: task.truncated,
       ...(task.bashSessionId ? { bashSessionId: task.bashSessionId } : {}),
       ...(task.error ? { error: redactSensitiveText(task.error) } : {}),
+      ...(task.onTerminal
+        ? {
+            durableResolutionState: task.durableResolutionState ?? "awaiting_terminal",
+            durableResolutionAttempts: task.durableResolutionAttempts,
+            ...(task.durableResolutionError
+              ? { durableResolutionError: redactSensitiveText(task.durableResolutionError) }
+              : {})
+          }
+        : {}),
       ...(orchestrationStale
         ? {
             resumeHint: taskTerminal(task.status)
@@ -568,17 +631,106 @@ export class BashTaskManager {
     };
   }
 
+  private notifyTerminal(task: BashTaskInternal): void {
+    if (!task.onTerminal || !taskTerminal(task.status)) return;
+    if (
+      task.durableResolutionState === "persisted" ||
+      task.durableResolutionPromise ||
+      task.durableResolutionTimer
+    ) {
+      return;
+    }
+    if (task.durableResolutionAttempts >= BASH_TASK_TERMINAL_RESOLUTION_MAX_ATTEMPTS) {
+      task.durableResolutionState = "failed";
+      return;
+    }
+
+    task.durableResolutionAttempts += 1;
+    task.durableResolutionState = "persisting";
+    const snapshot = this.snapshot(task);
+    const promise = Promise.resolve()
+      .then(() => task.onTerminal!(snapshot))
+      .then(() => {
+        task.durableResolutionState = "persisted";
+        task.durableResolutionError = undefined;
+      })
+      .catch((error) => {
+        task.durableResolutionError = redactSensitiveText(
+          error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+        );
+        if (task.durableResolutionAttempts >= BASH_TASK_TERMINAL_RESOLUTION_MAX_ATTEMPTS) {
+          task.durableResolutionState = "failed";
+          return;
+        }
+        task.durableResolutionState = "retrying";
+        const delayMs = Math.min(5_000, 50 * 2 ** (task.durableResolutionAttempts - 1));
+        const timer = setTimeout(() => {
+          if (task.durableResolutionTimer === timer) task.durableResolutionTimer = undefined;
+          this.notifyTerminal(task);
+        }, delayMs);
+        timer.unref();
+        task.durableResolutionTimer = timer;
+      })
+      .finally(() => {
+        if (task.durableResolutionPromise === promise) task.durableResolutionPromise = undefined;
+      });
+    task.durableResolutionPromise = promise;
+  }
+
+  private requestCancellation(task: BashTaskInternal): void {
+    if (taskTerminal(task.status) || task.cancellationAttempts > 0 || task.cancellationTimer) return;
+
+    const attempt = () => {
+      task.cancellationTimer = undefined;
+      if (taskTerminal(task.status)) return;
+      task.cancellationAttempts += 1;
+      const signal: NodeJS.Signals =
+        task.cancellationAttempts >= BASH_TASK_CANCELLATION_RETRY_DELAYS_MS.length ? "SIGKILL" : "SIGTERM";
+      const termination = terminateProcessTree(task.child, signal);
+      if (termination.success) task.error = undefined;
+      if (taskTerminal(task.status)) return;
+
+      const delay = BASH_TASK_CANCELLATION_RETRY_DELAYS_MS[task.cancellationAttempts - 1];
+      if (delay === undefined) {
+        const timer = setTimeout(() => {
+          if (task.cancellationTimer === timer) task.cancellationTimer = undefined;
+          if (task.status === "cancelling") {
+            task.error =
+              `Process tree cancellation did not reach a terminal state after ` +
+              `${task.cancellationAttempts} bounded attempts; last=${termination.detail}.`;
+          }
+        }, 500);
+        timer.unref();
+        task.cancellationTimer = timer;
+        return;
+      }
+      const timer = setTimeout(attempt, delay);
+      timer.unref();
+      task.cancellationTimer = timer;
+    };
+
+    const initialTimer = setTimeout(() => {
+      if (task.cancellationTimer === initialTimer) task.cancellationTimer = undefined;
+      attempt();
+    }, BASH_TASK_CANCELLATION_INITIAL_GRACE_MS);
+    initialTimer.unref();
+    task.cancellationTimer = initialTimer;
+  }
+
   start(
     config: CodexProConfig,
     guard: PathGuard,
     workspace: Workspace,
     command: string,
-    options: { cwd?: string; sessionId?: string } = {}
+    options: BashTaskStartOptions = {}
   ): BashTaskSnapshot {
     if (!command?.trim()) throw new CodexProError("command is required.");
     const bashSessionId = assertBashSession(config, options.sessionId);
     assertSafeCommand(config, command);
+    const taskId = options.taskId?.trim() || randomUUID();
+    if (!BASH_TASK_ID_RE.test(taskId)) throw new CodexProError("task id contains unsafe characters.");
     this.prune();
+    if (this.tasks.has(taskId)) throw new CodexProError(`Async task id is already in use: ${taskId}`);
     const activeTasks = [...this.tasks.values()].filter((task) => !taskTerminal(task.status)).length;
     if (activeTasks >= Math.max(1, this.maxActiveTasks)) {
       throw new CodexProError(
@@ -607,7 +759,7 @@ export class BashTaskManager {
       windowsHide: true
     });
     const task: BashTaskInternal = {
-      taskId: randomUUID(),
+      taskId,
       workspaceId: workspace.id,
       command,
       cwd: path.relative(workspace.root, cwd) || ".",
@@ -621,7 +773,12 @@ export class BashTaskManager {
       stderr: "",
       truncated: false,
       ...(bashSessionId ? { bashSessionId } : {}),
-      maxOutputBytes: Math.max(16_384, config.maxOutputBytes)
+      maxOutputBytes: Math.max(16_384, config.maxOutputBytes),
+      ...(options.onTerminal
+        ? { onTerminal: options.onTerminal, durableResolutionState: "awaiting_terminal" as const }
+        : {}),
+      durableResolutionAttempts: 0,
+      cancellationAttempts: 0
     };
     this.tasks.set(task.taskId, task);
     this.prune();
@@ -644,22 +801,30 @@ export class BashTaskManager {
       task.stderr = next.value;
       task.truncated = task.truncated || next.truncated;
       task.finishedAtMs = Date.now();
+      if (task.cancellationTimer) clearTimeout(task.cancellationTimer);
+      task.cancellationTimer = undefined;
+      this.notifyTerminal(task);
     });
     child.on("close", (exitCode, signal) => {
       task.exitCode = exitCode;
       task.signal = signal;
       task.finishedAtMs = Date.now();
+      if (task.cancellationTimer) clearTimeout(task.cancellationTimer);
+      task.cancellationTimer = undefined;
       if (task.status === "cancelling") {
         task.status = "cancelled";
       } else if (task.status !== "failed") {
         task.status = exitCode === 0 ? "completed" : "failed";
       }
+      this.notifyTerminal(task);
     });
     return this.snapshot(task);
   }
 
   get(workspace: Workspace, taskId: string): BashTaskSnapshot {
-    return this.snapshot(this.find(workspace, taskId), true);
+    const task = this.find(workspace, taskId);
+    this.notifyTerminal(task);
+    return this.snapshot(task, true);
   }
 
   list(workspace: Workspace): BashTaskSnapshot[] {
@@ -667,27 +832,29 @@ export class BashTaskManager {
     return [...this.tasks.values()]
       .filter((task) => task.workspaceId === workspace.id)
       .sort((left, right) => right.startedAtMs - left.startedAtMs)
-      .map((task) => this.snapshot(task, true));
+      .map((task) => {
+        this.notifyTerminal(task);
+        return this.snapshot(task, true);
+      });
   }
 
   async wait(workspace: Workspace, taskId: string, waitMs = 15_000): Promise<BashTaskSnapshot> {
     const deadline = Date.now() + Math.max(0, Math.min(waitMs, BASH_TASK_WAIT_MAX_MS));
     const task = this.find(workspace, taskId);
     while (true) {
-      if (taskTerminal(task.status) || Date.now() >= deadline) return this.snapshot(task, true);
+      if (taskTerminal(task.status) || Date.now() >= deadline) {
+        this.notifyTerminal(task);
+        return this.snapshot(task, true);
+      }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
 
   cancel(workspace: Workspace, taskId: string): BashTaskSnapshot {
     const task = this.find(workspace, taskId);
-    if (!taskTerminal(task.status) && task.status !== "cancelling") {
+    if (!taskTerminal(task.status)) {
       task.status = "cancelling";
-      terminateProcessTree(task.child, "SIGTERM");
-      const retry = setTimeout(() => {
-        if (task.status === "cancelling") terminateProcessTree(task.child, "SIGKILL");
-      }, 750);
-      retry.unref();
+      this.requestCancellation(task);
     }
     return this.snapshot(task, true);
   }

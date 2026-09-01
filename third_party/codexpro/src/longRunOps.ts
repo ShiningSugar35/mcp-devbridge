@@ -377,6 +377,7 @@ export class LongRunStore {
     assertMutable(state);
     const at = nowIso();
     let changedWork = false;
+    let acceptedNoop = false;
     const stepId = cleanOptionalText(input.stepId, "step_id", 100);
     const note = cleanOptionalText(input.note, "note", 2_000);
     const evidence = cleanList(input.evidence, "evidence", EVIDENCE_MAX);
@@ -433,15 +434,28 @@ export class LongRunStore {
         throw new CodexProError("resolve_task_status must be completed, failed, or cancelled.");
       }
       const taskEvidence = cleanText(input.resolveTaskEvidence, "resolve_task_evidence", 2_000);
-      state.taskResolutions[resolveTaskId] = { status, evidence: taskEvidence, resolvedAt: at };
-      changedWork = true;
-      pushCheckpoint(state, { at, type: "task", message: `Resolved task ${resolveTaskId} as ${status}: ${taskEvidence}`, taskId: resolveTaskId });
+      const existingResolution = state.taskResolutions[resolveTaskId];
+      if (existingResolution) {
+        if (existingResolution.status !== status) {
+          throw new CodexProError(
+            `Task ${resolveTaskId} already has a conflicting terminal resolution (${existingResolution.status}).`
+          );
+        }
+        acceptedNoop = true;
+      } else {
+        state.taskResolutions[resolveTaskId] = { status, evidence: taskEvidence, resolvedAt: at };
+        changedWork = true;
+        pushCheckpoint(state, { at, type: "task", message: `Resolved task ${resolveTaskId} as ${status}: ${taskEvidence}`, taskId: resolveTaskId });
+      }
     }
 
     if (checkpoint) {
       pushCheckpoint(state, { at, type: evidence.length ? "evidence" : "progress", message: checkpoint, ...(stepId ? { stepId } : {}) });
     }
-    if (!changedWork && !checkpoint) throw new CodexProError("long_run_update did not contain any change or checkpoint.");
+    if (!changedWork && !checkpoint) {
+      if (acceptedNoop) return state;
+      throw new CodexProError("long_run_update did not contain any change or checkpoint.");
+    }
 
     if (changedWork) state.workRevision += 1;
     state.updatedAt = at;

@@ -15,9 +15,21 @@ packaging/*.pkg
 /tools/
 .tools/
 
-# 引擎依赖与构建产物（third_party/codexpro 内 npm ci 重建）
+# 引擎依赖与构建产物（third_party 内 npm ci 重建）
 third_party/codexpro/node_modules/
 third_party/codexpro/dist/
+third_party/regular-chat-controller/node_modules/
+third_party/regular-chat-controller/dist/
+third_party/regular-chat-controller/test-results/
+third_party/regular-chat-controller/traces/
+
+# Regular Chat Controller 本机敏感/运行态目录
+regular-chat/profiles/
+regular-chat/browsers/
+regular-chat/sessions/
+regular-chat/locks/
+regular-chat/logs/
+regular-chat/diagnostics/
 
 # 测试与日志
 .test-workspace/

@@ -1,0 +1,11 @@
+export const SESSION_SCHEMA_VERSION = 2 as const;
+export const MAX_SESSION_STATE_BYTES = 512 * 1024;
+export const MAX_ACTIVE_CHAT_TABS = 4;
+export const MAX_GENERATING_CHAT_TABS = 2;
+export const MAX_PENDING_SESSION_WRITES = 16;
+export const MAX_SESSION_EVENTS = 200;
+export const MAX_LOG_EVENTS = 1_000;
+export const MIN_POLL_INTERVAL_MS = 250;
+export const MAX_POLL_INTERVAL_MS = 10_000;
+export const DEFAULT_STABLE_OUTPUT_WINDOW_MS = 2_000;
+export const MAX_PROFILE_LOCK_BYTES = 4 * 1024;

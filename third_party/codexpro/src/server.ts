@@ -1,6 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -19,7 +19,8 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { registerWindowsBridgeTools } from "./windowsBridge.js";
-import { LongRunStore, summarizeLongRun, type LongRunState, type LongRunTaskObservation } from "./longRunOps.js";
+import { LongRunStore, summarizeLongRun, type LongRunState, type LongRunTaskObservation, type LongRunTaskTerminalStatus } from "./longRunOps.js";
+import { observeLongRunTasks as observeDurableLongRunTasks } from "./longRunTaskObservation.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const WAIT_TASK_OUTPUT_TAIL_BYTES = 2_048;
@@ -65,8 +66,21 @@ function bashTaskPollAfterSeconds(result: BashTaskSnapshot): number {
   return 120;
 }
 
-function bashTaskTerminal(result: BashTaskSnapshot): boolean {
+function bashTaskTerminal(result: BashTaskSnapshot): result is BashTaskSnapshot & { status: LongRunTaskTerminalStatus } {
   return result.status === "completed" || result.status === "failed" || result.status === "cancelled";
+}
+
+function bashTaskTerminalStatus(result: BashTaskSnapshot): LongRunTaskTerminalStatus {
+  if (!bashTaskTerminal(result)) throw new CodexProError(`Background task ${result.taskId} is not terminal.`);
+  return result.status;
+}
+
+function bashTaskTerminalEvidence(result: BashTaskSnapshot): string {
+  return (
+    `BashTaskManager terminal receipt: status=${result.status}; ` +
+    `exitCode=${result.exitCode ?? "null"}; signal=${result.signal ?? "null"}; ` +
+    `finishedAt=${result.finishedAt ?? "unknown"}.`
+  );
 }
 
 function tailTextUtf8(value: string, maxBytes = WAIT_TASK_OUTPUT_TAIL_BYTES): string {
@@ -164,24 +178,7 @@ function bashTaskTextResult(result: BashTaskSnapshot): string {
 }
 
 function observeLongRunTasks(workspace: Workspace, state: LongRunState): LongRunTaskObservation[] {
-  return state.taskIds.map((taskId) => {
-    try {
-      const task = bashTasks.get(workspace, taskId);
-      return {
-        taskId,
-        status: task.status,
-        detail: task.status === "running" || task.status === "cancelling"
-          ? `${task.durationMs} ms elapsed`
-          : `exit=${task.exitCode}${task.signal ? ` signal=${task.signal}` : ""}`
-      };
-    } catch {
-      const resolution = state.taskResolutions[taskId];
-      if (resolution) {
-        return { taskId, status: resolution.status, detail: `durably resolved: ${resolution.evidence}` };
-      }
-      return { taskId, status: "unknown", detail: "Task manager no longer has this id; explicit terminal resolution evidence is required before completion." };
-    }
-  });
+  return observeDurableLongRunTasks(bashTasks, workspace, state);
 }
 
 function longRunText(state: LongRunState, observations: LongRunTaskObservation[] = [], blockers: string[] = []): string {
@@ -1303,7 +1300,11 @@ export function createCodexProServer(
           nativeMcpTasksExtension: "not emitted by baseline connector; tool-level durable fallback remains compatible with hosts that do not advertise io.modelcontextprotocol/tasks"
         },
         registeredTools: registeredToolNames(server),
-        registeredToolCount: registeredToolNames(server).length
+        registeredToolCount: registeredToolNames(server).length,
+        registeredToolScope: "codexpro_project_engine",
+        registeredToolCountIncludesGatewayTools: false,
+        registeredToolCountNote:
+          "Project-engine count only. Compare ChatGPT app snapshots with MCP DevBridge Hub tools/list; the Hub may add Gateway and Windows bridge tools."
       };
       return textResult(`# CodexPro Server Config\n\n${JSON.stringify(safeConfig, null, 2)}`, safeConfig);
     }
@@ -2237,21 +2238,51 @@ export function createCodexProServer(
           throw new CodexProError(`Unknown long-run step: ${longRunStepId}.`);
         }
       }
-      const task = bashTasks.start(config, guard, workspace, String(args.command ?? ""), {
-        cwd: args.cwd,
-        sessionId: args.session_id
-      });
+      const reservedTaskId = longRunId ? randomUUID() : "";
       if (longRunId) {
-        try {
-          await longRuns.update(workspace, longRunId, {
-            ...(longRunStepId ? { stepId: longRunStepId } : {}),
-            taskId: task.taskId,
-            checkpoint: `Started background task ${task.taskId}: ${task.command}`
-          });
-        } catch (error) {
-          bashTasks.cancel(workspace, task.taskId);
-          throw error;
+        await longRuns.update(workspace, longRunId, {
+          ...(longRunStepId ? { stepId: longRunStepId } : {}),
+          taskId: reservedTaskId,
+          checkpoint: `Reserved durable background task ${reservedTaskId} before process start.`
+        });
+      }
+
+      let task: BashTaskSnapshot;
+      try {
+        task = bashTasks.start(config, guard, workspace, String(args.command ?? ""), {
+          cwd: args.cwd,
+          sessionId: args.session_id,
+          ...(reservedTaskId ? { taskId: reservedTaskId } : {}),
+          ...(longRunId
+            ? {
+                onTerminal: async (terminalTask: BashTaskSnapshot) => {
+                  await longRuns.update(workspace, longRunId, {
+                    resolveTaskId: terminalTask.taskId,
+                    resolveTaskStatus: bashTaskTerminalStatus(terminalTask),
+                    resolveTaskEvidence: bashTaskTerminalEvidence(terminalTask)
+                  });
+                }
+              }
+            : {})
+        });
+      } catch (error) {
+        if (longRunId && reservedTaskId) {
+          const startFailureClass = error instanceof Error ? error.name : "UnknownError";
+          const startFailureEvidence =
+            `Background task failed before process start; errorClass=${startFailureClass}.`;
+          try {
+            await longRuns.update(workspace, longRunId, {
+              resolveTaskId: reservedTaskId,
+              resolveTaskStatus: "failed",
+              resolveTaskEvidence: startFailureEvidence
+            });
+          } catch (resolutionError) {
+            throw new CodexProError(
+              `${errorText(error)} Durable terminal resolution also failed: ${errorText(resolutionError)}`
+            );
+          }
         }
+        throw error;
       }
       return textResult(bashTaskTextResult(task), {
         workspace_id: workspace.id,
