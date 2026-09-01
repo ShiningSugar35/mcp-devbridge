@@ -1,6 +1,6 @@
-# AGENTS.md — MCP DevBridge v0.8.9 维护指南
+# AGENTS.md — MCP DevBridge 开发与维护指南
 
-本文件是仓库内 AI/Agent 与工程师的最高优先级开发入口。当前维护线目标是 `release/v0.8.9`；v0.9+ 历史保留在远端，不得为了“补功能”把多 Agent runtime 重新混回本维护线。
+本文件是仓库内 AI/Agent 与工程师的最高优先级开发入口。正式生产基线是 `v0.8.9`；当前研发分支是 `release/v0.9.0`。不得移动或改写已发布版本的 tag/Release，也不得为了“补功能”把已经淘汰的多 Agent runtime 重新混回正式产品链。
 
 ## 1. 开工阅读顺序
 
@@ -243,7 +243,7 @@ npm run smoke
 发布构建：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.8.9
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version <VERSION>
 ```
 
 ### Linux / SteamOS build host
@@ -252,24 +252,25 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Versi
 uv venv --python 3.12
 uv pip install -p .venv -e '.[dev,package]'
 cd third_party/codexpro && npm ci && npm run build && cd ../..
-bash scripts/build_linux.sh 0.8.9
+bash scripts/build_linux.sh <VERSION>
 ```
 
 Linux release 以 Ubuntu 22.04 构建保持较旧 glibc 基线；SteamOS Desktop Mode 真机是额外兼容证据，不能用“未真机”掩盖 CI/构建失败。
 
-## 8. v0.8.9 发布门
+## 8. 发布门
 
-发布前至少必须满足：
+任何版本发布前至少必须满足：
 
+- `开发计划.md` 中与该版本发布声明有关的事项全部完成；平台阻断能力不得通过改文案、删测或伪造证据绕过。
 - `git diff --check` 通过，工作树只含有意变更；生成物、缓存、安装运行文件不得 track。
 - Python Ruff、Windows/Linux Pyright、全量 pytest 通过。
-- CodexPro TypeScript build、完整 smoke 通过；必须覆盖 stateless explicit handle、多根路由、systemAccess、PathGuard 安全回归和 durable long-run。
-- Windows elevated broker：错误 token/非授权入口拒绝、首次授权、重复启动、stop/crash、真实 high-integrity 无破坏性探针通过。
+- CodexPro TypeScript build、完整 smoke 通过；必须覆盖 stateless explicit handle、多根路由、权限边界、PathGuard 与 durable long-run。
+- Windows 管理员执行链：错误认证/非授权入口拒绝、首次授权、重复启动、stale 服务恢复、stop/crash 与真实 high-integrity 无破坏性探针通过。
 - `uv lock --check`；PowerShell parser 与 Bash 发布脚本语法通过。
-- Windows `build.ps1 -Version 0.8.9` 成功；安装器 payload 完整。
-- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-0.8.9.tar.gz`。
-- commit、branch push、annotated `v0.8.9` tag、GitHub Release 资产必须指向同一源提交。
-- 使用正式资产升级当前实例后恢复 C:/D: 根，桌面快捷方式、Gateway health、真实 MCP route/full-system 数据面通过。
-- v0.9.x tags/branches 是历史，不删除、不改写、不 force-push。
+- Windows `build.ps1 -Version <VERSION>` 成功且安装器 payload 完整；Linux 同源构建成功。
+- GitHub Release workflow 同时产出 Windows installer 与 `MCPDevBridge-Linux-x86_64-<VERSION>.tar.gz`。
+- commit、release branch、annotated `v<VERSION>` tag、CI 与 GitHub Release 资产必须指向同一源提交。
+- 使用正式资产升级当前实例后，原运行根、桌面快捷方式、Gateway/Tunnel、真实 MCP route/full-system 数据面恢复并通过验收。
+- 所有历史 tag/Release 均不可删除、移动、改写或 force-push。
 
 最终实测只写入 `进度验收.md`；完成任务从 `开发计划.md` 删除。

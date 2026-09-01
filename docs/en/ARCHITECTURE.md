@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current v0.8.8 maintenance line. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
+This document describes the current MCP DevBridge architecture. Historical implementation details belong in `CHANGELOG.md`, not in the live architecture contract.
 
 ## Runtime model
 

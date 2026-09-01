@@ -9,4 +9,4 @@ They are archival experimental assets only:
 - They are not a supported ChatGPT continuation path.
 - Their original relative imports assume the formal package layout and may require an isolated research harness before reuse.
 
-The maintained executable experiment is `third_party/regular-chat-controller/`, restricted to offline/provider-neutral fixtures until the external capability and policy gates documented in `../研究.md` are re-evaluated.
+The maintained executable experiment is `third_party/regular-chat-controller/`, restricted to offline/provider-neutral fixtures until the external capability and policy gates documented in `../研究与边界裁决.md` are re-evaluated.

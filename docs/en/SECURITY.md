@@ -117,7 +117,7 @@ Linux/SteamOS installs are user-level. `install.sh` canonicalizes custom target 
 
 Relative `XDG_CONFIG_HOME` / `XDG_DATA_HOME` values are treated as invalid rather than being used as attacker-controlled relative filesystem roots.
 
-Release history from newer v0.9.x branches/tags must not be rewritten or force-pushed as part of the v0.8.8 maintenance release.
+Published tags and Releases are immutable history and must not be rewritten, moved, deleted, or force-pushed during later maintenance or development work.
 
 
 ## Hub credential isolation
