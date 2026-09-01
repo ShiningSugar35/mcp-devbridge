@@ -24,6 +24,10 @@ import { observeLongRunTasks as observeDurableLongRunTasks } from "./longRunTask
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const WAIT_TASK_OUTPUT_TAIL_BYTES = 2_048;
+const TERMINAL_TASK_OUTPUT_TAIL_BYTES = 8_192;
+const TASK_DETAIL_COMMAND_PREVIEW_BYTES = 2_000;
+const TASK_LIST_MAX_ITEMS = 20;
+const TASK_LIST_COMMAND_PREVIEW_BYTES = 240;
 const WAIT_TASK_PROGRESS_HEARTBEAT_MS = 8_000;
 const WAIT_TASK_MAX_SECONDS_WITHOUT_PROGRESS = 30;
 const WAIT_TASK_MAX_SECONDS_WITH_PROGRESS = 120;
@@ -91,12 +95,43 @@ function tailTextUtf8(value: string, maxBytes = WAIT_TASK_OUTPUT_TAIL_BYTES): st
   return encoded.subarray(start).toString("utf8");
 }
 
+function previewTaskCommand(value: string, maxBytes: number): string {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.length <= maxBytes) return value;
+  const suffix = Buffer.from("…", "utf8");
+  let end = Math.max(0, maxBytes - suffix.length);
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+  return `${encoded.subarray(0, end).toString("utf8")}…`;
+}
+
+function taskListSummary(result: BashTaskSnapshot): Record<string, unknown> {
+  return {
+    task_id: result.taskId,
+    status: result.status,
+    cwd: result.cwd,
+    duration_ms: result.durationMs,
+    pid: result.pid,
+    exit_code: result.exitCode,
+    signal: result.signal,
+    started_at: result.startedAt,
+    finished_at: result.finishedAt,
+    last_observed_at: result.lastObservedAt,
+    truncated: result.truncated,
+    orchestration_stale: result.orchestrationStale,
+    orchestration_stale_after_ms: result.orchestrationStaleAfterMs,
+    durable_resolution_state: result.durableResolutionState,
+    durable_resolution_attempts: result.durableResolutionAttempts,
+    command_preview: previewTaskCommand(result.command, TASK_LIST_COMMAND_PREVIEW_BYTES)
+  };
+}
+
 function waitTaskTransportSnapshot(result: BashTaskSnapshot): Record<string, unknown> {
-  if (bashTaskTerminal(result)) return result as unknown as Record<string, unknown>;
-  const stdout = tailTextUtf8(result.stdout);
-  const stderr = tailTextUtf8(result.stderr);
+  const outputTailBytes = bashTaskTerminal(result) ? TERMINAL_TASK_OUTPUT_TAIL_BYTES : WAIT_TASK_OUTPUT_TAIL_BYTES;
+  const stdout = tailTextUtf8(result.stdout, outputTailBytes);
+  const stderr = tailTextUtf8(result.stderr, outputTailBytes);
   return {
     ...result,
+    command: previewTaskCommand(result.command, TASK_DETAIL_COMMAND_PREVIEW_BYTES),
     stdout,
     stderr,
     transportOutputTail: true,
@@ -2290,7 +2325,7 @@ export function createCodexProServer(
         task_id: task.taskId,
         poll_after_seconds: bashTaskPollAfterSeconds(task),
         ...(longRunId ? { long_run_id: longRunId, long_run_step_id: longRunStepId || null } : {}),
-        task
+        task: waitTaskTransportSnapshot(task)
       });
     }
   );
@@ -2316,7 +2351,7 @@ export function createCodexProServer(
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const task = bashTasks.get(workspace, String(args.task_id ?? ""));
-      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, poll_after_seconds: bashTaskPollAfterSeconds(task), task });
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, poll_after_seconds: bashTaskPollAfterSeconds(task), task: waitTaskTransportSnapshot(task) });
     }
   );
 
@@ -2391,10 +2426,26 @@ export function createCodexProServer(
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const tasks = bashTasks.list(workspace);
-      const lines = tasks.length
-        ? tasks.map((task) => `${task.taskId}  ${task.status}  ${task.durationMs} ms  ${task.command}`)
+      const activeTasks = tasks.filter((task) => !bashTaskTerminal(task));
+      const terminalSlots = Math.max(0, TASK_LIST_MAX_ITEMS - activeTasks.length);
+      const selectedTaskIds = new Set([
+        ...activeTasks.slice(0, TASK_LIST_MAX_ITEMS),
+        ...tasks.filter((task) => bashTaskTerminal(task)).slice(0, terminalSlots)
+      ].map((task) => task.taskId));
+      const visibleTasks = tasks.filter((task) => selectedTaskIds.has(task.taskId)).slice(0, TASK_LIST_MAX_ITEMS);
+      const taskSummaries = visibleTasks.map((task) => taskListSummary(task));
+      const lines = visibleTasks.length
+        ? visibleTasks.map((task) => `${task.taskId}  ${task.status}  ${task.durationMs} ms  ${previewTaskCommand(task.command, TASK_LIST_COMMAND_PREVIEW_BYTES)}`)
         : ["No command tasks in this workspace."];
-      return textResult(["# Tasks", "", ...lines].join("\n"), { workspace_id: workspace.id, root: workspace.root, tasks });
+      return textResult(["# Tasks", "", ...lines].join("\n"), {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        compacted: true,
+        total_count: tasks.length,
+        returned_count: taskSummaries.length,
+        omitted_count: Math.max(0, tasks.length - taskSummaries.length),
+        tasks: taskSummaries
+      });
     }
   );
 
@@ -2419,7 +2470,7 @@ export function createCodexProServer(
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const task = bashTasks.cancel(workspace, String(args.task_id ?? ""));
-      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task });
+      return textResult(bashTaskTextResult(task), { workspace_id: workspace.id, root: workspace.root, task_id: task.taskId, task: waitTaskTransportSnapshot(task) });
     }
   );
 

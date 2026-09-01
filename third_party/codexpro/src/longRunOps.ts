@@ -615,40 +615,91 @@ export class LongRunStore {
   }
 }
 
+const LONG_RUN_TRANSPORT_TEXT_MAX_BYTES = 300;
+const LONG_RUN_TRANSPORT_OBJECTIVE_MAX_BYTES = 2_000;
+const LONG_RUN_TRANSPORT_LIST_MAX_ITEMS = 10;
+const LONG_RUN_TRANSPORT_TASK_TAIL = 20;
+const LONG_RUN_TRANSPORT_CHECKPOINT_TAIL = 8;
+const LONG_RUN_TRANSPORT_RESOLUTION_TAIL = 20;
+
+function compactLongRunText(value: string, maxBytes = LONG_RUN_TRANSPORT_TEXT_MAX_BYTES): string {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.length <= maxBytes) return value;
+  const suffix = Buffer.from("…", "utf8");
+  let end = Math.max(0, maxBytes - suffix.length);
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+  return `${encoded.subarray(0, end).toString("utf8")}…`;
+}
+
+function compactLongRunList(values: string[], maxItems = LONG_RUN_TRANSPORT_LIST_MAX_ITEMS): string[] {
+  return values.slice(0, maxItems).map((value) => compactLongRunText(value));
+}
+
+function compactLongRunTaskObservations(taskObservations: LongRunTaskObservation[]): LongRunTaskObservation[] {
+  const active = taskObservations.filter((task) => task.status === "running" || task.status === "cancelling" || task.status === "unknown");
+  const terminal = taskObservations.filter((task) => task.status !== "running" && task.status !== "cancelling" && task.status !== "unknown");
+  const remaining = Math.max(0, LONG_RUN_TRANSPORT_TASK_TAIL - Math.min(active.length, LONG_RUN_TRANSPORT_TASK_TAIL));
+  return [...active.slice(0, LONG_RUN_TRANSPORT_TASK_TAIL), ...terminal.slice(-remaining)].map((task) => ({
+    ...task,
+    ...(task.detail ? { detail: compactLongRunText(task.detail) } : {})
+  }));
+}
+
 export function summarizeLongRun(state: LongRunState, taskObservations: LongRunTaskObservation[] = []): Record<string, unknown> {
   const done = state.steps.filter((step) => step.status === "done").length;
   const latestReview = state.reviews.at(-1);
   const hasBlockedStep = state.steps.some((step) => step.status === "blocked");
+  const compactTaskObservations = compactLongRunTaskObservations(taskObservations);
+  const taskResolutionEntries = Object.entries(state.taskResolutions);
+  const taskResolutionTail = Object.fromEntries(
+    taskResolutionEntries.slice(-LONG_RUN_TRANSPORT_RESOLUTION_TAIL).map(([taskId, resolution]) => [
+      taskId,
+      { ...resolution, evidence: compactLongRunText(resolution.evidence) }
+    ])
+  );
   return {
     run_id: state.runId,
     title: state.title,
-    objective: state.objective,
+    objective: compactLongRunText(state.objective, LONG_RUN_TRANSPORT_OBJECTIVE_MAX_BYTES),
     status: state.status,
     progress: { done, total: state.steps.length, percent: state.steps.length ? Math.floor((done / state.steps.length) * 100) : 0 },
     work_revision: state.workRevision,
     plan_revision: state.planRevision,
     review_round: state.reviewRound,
     latest_review: latestReview
-      ? { verdict: latestReview.verdict, summary: latestReview.summary, work_revision: latestReview.workRevision, reviewed_at: latestReview.reviewedAt }
+      ? { verdict: latestReview.verdict, summary: compactLongRunText(latestReview.summary, 1_200), work_revision: latestReview.workRevision, reviewed_at: latestReview.reviewedAt }
       : null,
     steps: state.steps.map((step) => ({
       id: step.id,
       title: step.title,
-      acceptance_criteria: step.acceptanceCriteria,
+      acceptance_criteria: compactLongRunList(step.acceptanceCriteria),
+      acceptance_criteria_count: step.acceptanceCriteria.length,
       status: step.status,
       evidence_count: step.evidence.length,
-      evidence_tail: step.evidence.slice(-5),
-      note_tail: step.notes.slice(-3),
+      evidence_tail: step.evidence.slice(-3).map((value) => compactLongRunText(value)),
+      note_tail: step.notes.slice(-2).map((value) => compactLongRunText(value)),
       updated_at: step.updatedAt
     })),
-    acceptance_criteria: state.overallAcceptanceCriteria,
-    task_ids: state.taskIds,
-    task_observations: taskObservations,
-    task_resolutions: state.taskResolutions,
-    checkpoint_tail: state.checkpoints.slice(-12),
+    acceptance_criteria: compactLongRunList(state.overallAcceptanceCriteria),
+    acceptance_criteria_count: state.overallAcceptanceCriteria.length,
+    task_id_count: state.taskIds.length,
+    task_ids: state.taskIds.slice(-LONG_RUN_TRANSPORT_TASK_TAIL),
+    task_ids_omitted: Math.max(0, state.taskIds.length - LONG_RUN_TRANSPORT_TASK_TAIL),
+    task_observation_count: taskObservations.length,
+    task_observations: compactTaskObservations,
+    task_resolution_count: taskResolutionEntries.length,
+    task_resolutions: taskResolutionTail,
+    task_resolutions_omitted: Math.max(0, taskResolutionEntries.length - LONG_RUN_TRANSPORT_RESOLUTION_TAIL),
+    checkpoint_count: state.checkpoints.length,
+    checkpoint_tail: state.checkpoints.slice(-LONG_RUN_TRANSPORT_CHECKPOINT_TAIL).map((checkpoint) => ({
+      ...checkpoint,
+      message: compactLongRunText(checkpoint.message)
+    })),
     created_at: state.createdAt,
     updated_at: state.updatedAt,
-    completion: state.completion ?? null,
+    completion: state.completion
+      ? { ...state.completion, summary: compactLongRunText(state.completion.summary, 1_200) }
+      : null,
     next_poll_after_seconds: taskObservations.some((task) => task.status === "running" || task.status === "cancelling") ? 30 : 0,
     autonomous_continuation: {
       recommended: state.status === "working" && !hasBlockedStep,
