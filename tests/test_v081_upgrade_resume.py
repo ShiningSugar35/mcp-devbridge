@@ -32,9 +32,14 @@ def test_live_upgrade_script_snapshots_equal_running_roots_and_shared_gateway() 
         encoding="utf-8-sig"
     )
     assert "resume_project_roots" in script
+    assert "resume_projects" in script
     assert "$resumeProjectRoots" in script
+    assert "$resumeProjects" in script
     assert "Test-LoopbackPort -Port $candidatePort" in script
     assert "project_roots = @($resumeRoots)" in script
+    assert "Test-ResumeProjectReady" in script
+    assert "$resumeConsumed" in script
+    assert "$readyProjectCount" in script
     assert "Get-ExpectedPort" in script
     assert "$global.gateway_port" in script
     assert "$project.gateway_port" not in script
@@ -47,12 +52,16 @@ def test_live_upgrade_script_snapshots_equal_running_roots_and_shared_gateway() 
     assert '$createArgs += @("/RL", "HIGHEST")' in script
 
 
-def test_upgrade_resume_restores_all_roots_without_entry_owner(tmp_path: Path, monkeypatch) -> None:
+def test_upgrade_resume_restores_all_roots_in_one_coordinated_batch(
+    tmp_path: Path, monkeypatch
+) -> None:
     _MemoryStore.values = {}
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setattr(dm, "SecretsStore", _MemoryStore)
     monkeypatch.setattr(device_hub, "SecretsStore", _MemoryStore)
     monkeypatch.setattr(dm, "get_project_tunnel_token", lambda _project_id: None)
+    monkeypatch.setattr(dm, "ensure_project_access_token", lambda _project_id: "x" * 32)
+    monkeypatch.setattr(dm, "_bridge_token", lambda ensure=False: "y" * 32)
 
     root_a = tmp_path / "project-a"
     root_b = tmp_path / "project-b"
@@ -64,11 +73,34 @@ def test_upgrade_resume_restores_all_roots_without_entry_owner(tmp_path: Path, m
 
     app = QApplication.instance() or QApplication([])
     window = dm.MainWindow()
-    calls: list[str] = []
+    attempts: list[str] = []
+    coordinator_starts: list[bool] = []
+    logs: list[str] = []
+
+    def fake_project_start(project_id: str, **_kwargs) -> None:
+        attempts.append(project_id)
+        if project_id == project_b.id and attempts.count(project_id) == 1:
+            raise RuntimeError("transient project start failure")
+
+    def fake_coordinator_start(_options) -> None:
+        coordinator_starts.append(True)
+        window.coord._state = EngineState.READY
+
     try:
         window._app_config.first_system_risk_accepted = True
         window._app_config.full_system_risk_accepted = True
-        monkeypatch.setattr(window, "_start_project_engine_for", lambda project: calls.append(project.root_path))
+        monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+        monkeypatch.setattr(window.pm, "start", fake_project_start)
+        monkeypatch.setattr(window.coord, "start", fake_coordinator_start)
+        monkeypatch.setattr(window, "_ports_conflict", lambda _options: None)
+        monkeypatch.setattr(window, "_append_log", logs.append)
+        monkeypatch.setattr(
+            window,
+            "_start_project_engine_for",
+            lambda _project: (_ for _ in ()).throw(
+                AssertionError("upgrade resume must not launch independent per-project transactions")
+            ),
+        )
         request = constants.config_dir() / "upgrade-resume.json"
         request.parent.mkdir(parents=True, exist_ok=True)
         request.write_text(
@@ -78,8 +110,12 @@ def test_upgrade_resume_restores_all_roots_without_entry_owner(tmp_path: Path, m
 
         window._resume_upgrade_if_requested()
 
-        assert set(calls) == {project_a.root_path, project_b.root_path}
-        assert len(calls) == 2
+        assert attempts.count(project_a.id) == 1
+        assert attempts.count(project_b.id) == 2
+        assert coordinator_starts == [True]
+        assert window._bulk_project_action is None
+        assert not window._busy_project_ids
+        assert any("2/2" in line for line in logs)
         assert not hasattr(window, "_service_root")
         assert not hasattr(window, "_start_service")
         assert not request.exists()

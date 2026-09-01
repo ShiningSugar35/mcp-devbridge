@@ -144,7 +144,7 @@ def test_admin_setup_success_continues_without_failure_dialog(
                 return True
 
             def ensure_running(self, *, interactive_registration: bool = False):
-                assert interactive_registration is False
+                assert interactive_registration is True
                 calls["running"] += 1
                 return {"ok": True, "elevated": True}
 

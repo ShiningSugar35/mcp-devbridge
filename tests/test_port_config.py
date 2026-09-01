@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from local_dev_mcp_bridge import constants
 from local_dev_mcp_bridge.backend_manager import port_in_use
 from local_dev_mcp_bridge.config_store import (
+    assign_project_ports,
     load_app_config,
     load_projects,
     save_app_config,
@@ -177,6 +178,25 @@ class TestPortInUseDetection:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
         assert port_in_use(port) is False
+
+
+class TestProjectPortAllocation:
+    def test_assign_project_ports_skips_live_loopback_listener(self, tmp_path: Path) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        occupied = int(listener.getsockname()[1])
+        project = ProjectConfig(root_path=str(tmp_path / "root"), display_name="root")
+        try:
+            assign_project_ports(
+                [project],
+                index=0,
+                base_codex=occupied,
+                base_windows=min(occupied + 100, 65000),
+            )
+            assert project.codexpro_port != occupied
+        finally:
+            listener.close()
 
 
 class TestCoordinatorPorts:

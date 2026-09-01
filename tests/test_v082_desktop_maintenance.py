@@ -159,6 +159,7 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
     app, window, project_a, project_b = _window(tmp_path, monkeypatch)
     started: list[str] = []
     stopped: list[str] = []
+    broker_stopped: list[bool] = []
     access_value = "x" * 32
     bridge_value = "y" * 32
 
@@ -178,8 +179,11 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
                 return True
 
             def ensure_running(self, *, interactive_registration: bool = False):
-                assert interactive_registration is False
+                assert interactive_registration is True
                 return {"ok": True, "elevated": True}
+
+            def force_stop(self) -> None:
+                broker_stopped.append(True)
 
         monkeypatch.setattr(
             elevation, "get_elevation_controller", lambda: FakeElevationController()
@@ -209,6 +213,89 @@ def test_start_and_stop_all_projects_state_machine(tmp_path: Path, monkeypatch) 
         assert window._bulk_project_action is None
         assert not window._busy_project_ids
         assert window.all_projects_btn.text() == "启动所有项目"
+        if IS_WINDOWS:
+            assert broker_stopped == [True]
+    finally:
+        _close(app, window)
+
+
+
+def test_stale_broker_restart_choice_recovers_full_access(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, project_a, _project_b = _window(tmp_path, monkeypatch)
+    if not IS_WINDOWS:
+        _close(app, window)
+        return
+    import local_dev_mcp_bridge.elevation as elevation
+
+    project_a.permission_mode = "system"
+    window._app_config.first_system_risk_accepted = True
+    window._app_config.full_system_risk_accepted = True
+    calls = {"ensure": 0, "force_stop": 0}
+
+    class FakeElevationController:
+        def ensure_registered(self, *, interactive: bool) -> bool:
+            raise AssertionError(
+                "the UI must let ensure_running detect a stale task before registration"
+            )
+
+        def ensure_running(self, *, interactive_registration: bool = False):
+            assert interactive_registration is True
+            calls["ensure"] += 1
+            if calls["ensure"] == 1:
+                raise elevation.StaleElevationBrokerError("stale broker")
+            return {"ok": True, "elevated": True}
+
+        def force_stop(self) -> None:
+            calls["force_stop"] += 1
+
+    monkeypatch.setattr(elevation, "get_elevation_controller", lambda: FakeElevationController())
+    monkeypatch.setattr(window, "_stale_admin_setup_choice", lambda _detail: "restart")
+    try:
+        assert window._require_start_confirmations([project_a]) is False
+        assert calls == {"ensure": 2, "force_stop": 1}
+    finally:
+        _close(app, window)
+
+
+
+def test_stale_broker_workspace_choice_reclaims_old_service_before_downgrade(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, project_a, _project_b = _window(tmp_path, monkeypatch)
+    if not IS_WINDOWS:
+        _close(app, window)
+        return
+    import local_dev_mcp_bridge.elevation as elevation
+
+    project_a.permission_mode = "system"
+    window.pm.update(project_a)
+    window._app_config.first_system_risk_accepted = True
+    window._app_config.full_system_risk_accepted = True
+    calls = {"ensure": 0, "force_stop": 0}
+
+    class FakeElevationController:
+        def ensure_registered(self, *, interactive: bool) -> bool:
+            raise AssertionError(
+                "the UI must let ensure_running detect a stale task before registration"
+            )
+
+        def ensure_running(self, *, interactive_registration: bool = False):
+            assert interactive_registration is True
+            calls["ensure"] += 1
+            raise elevation.StaleElevationBrokerError("stale service")
+
+        def force_stop(self) -> None:
+            calls["force_stop"] += 1
+
+    monkeypatch.setattr(elevation, "get_elevation_controller", lambda: FakeElevationController())
+    monkeypatch.setattr(window, "_stale_admin_setup_choice", lambda _detail: "workspace")
+    try:
+        assert window._require_start_confirmations([project_a]) is False
+        assert calls == {"ensure": 1, "force_stop": 1}
+        saved = window.pm.get(project_a.id)
+        assert saved is not None and saved.permission_mode == "workspace"
     finally:
         _close(app, window)
 

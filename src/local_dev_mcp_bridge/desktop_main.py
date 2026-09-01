@@ -2586,6 +2586,13 @@ class MainWindow(QMainWindow):
                         future.result()
                     except Exception as exc:  # noqa: BLE001
                         failures.append(f"{project.display_name}: {exc}")
+            if IS_WINDOWS:
+                try:
+                    from .elevation import get_elevation_controller
+
+                    get_elevation_controller().force_stop()
+                except Exception as exc:  # noqa: BLE001 - explicit stop-all must surface cleanup failure
+                    failures.append(f"管理员执行服务: {exc}")
             if failures:
                 preview = "；".join(failures[:3])
                 if len(failures) > 3:
@@ -2706,6 +2713,48 @@ class MainWindow(QMainWindow):
             return "cancel"
         return "cancel"
 
+    def _stale_admin_setup_choice(self, detail: str) -> str:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("管理员服务需要恢复")
+        dialog.setText(
+            "检测到上一次的 Windows 管理员服务仍在运行，但程序已经无法继续管理它。\n\n"
+            "终止旧服务并重启会中断它仍在托管的项目或命令；"
+            "这是恢复“完全访问”的必要操作。"
+        )
+        dialog.setInformativeText(detail)
+        restart = dialog.addButton(
+            "终止旧服务并重启", QMessageBox.ButtonRole.DestructiveRole
+        )
+        fallback = dialog.addButton(
+            "终止旧服务并改用项目工作区", QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is restart:
+            return "restart"
+        if clicked is fallback:
+            return "workspace"
+        return "cancel"
+
+    def _force_stop_stale_admin_service(self, controller: Any) -> bool:
+        try:
+            controller.force_stop()
+        except Exception as exc:  # noqa: BLE001 - user-facing recovery must report exact failure
+            detail = f"{type(exc).__name__}: {exc}"
+            self._append_log(f"旧管理员服务回收失败：{detail}")
+            QMessageBox.warning(
+                self,
+                "旧管理员服务无法停止",
+                "程序未能安全停止旧的管理员服务，因此没有继续切换权限。\n"
+                "请先关闭仍在执行的重要任务，再重试。",
+            )
+            return False
+        self._append_log("旧的 Windows 管理员服务已回收。")
+        return True
+
     def _use_workspace_recovery(self, projects: list[ProjectConfig]) -> bool:
         changed = [project for project in projects if project.permission_mode == "system"]
         if not changed:
@@ -2757,16 +2806,32 @@ class MainWindow(QMainWindow):
             self._app_config.full_system_risk_accepted = True
             save_app_config(self._app_config)
         if needs_system and IS_WINDOWS:
+            from .elevation import StaleElevationBrokerError, get_elevation_controller
+
             target_projects = list(projects or [])
+            controller = get_elevation_controller()
             while True:
                 detail = "Windows 管理员授权没有完成。"
                 try:
-                    from .elevation import get_elevation_controller
-
-                    controller = get_elevation_controller()
-                    if controller.ensure_registered(interactive=True):
-                        controller.ensure_running(interactive_registration=False)
-                        break
+                    controller.ensure_running(interactive_registration=True)
+                    break
+                except StaleElevationBrokerError as exc:
+                    detail = f"{type(exc).__name__}: {exc}"
+                    self._append_log(f"管理员权限设置未完成：{detail}")
+                    choice = self._stale_admin_setup_choice(str(exc))
+                    if choice == "restart":
+                        if not self._force_stop_stale_admin_service(controller):
+                            return True
+                        self._append_log("正在重新启动完全访问。")
+                        continue
+                    elif choice == "workspace":
+                        if not self._force_stop_stale_admin_service(controller):
+                            return True
+                        if target_projects and self._use_workspace_recovery(target_projects):
+                            break
+                        return True
+                    else:
+                        return True
                 except Exception as exc:
                     detail = f"{type(exc).__name__}: {exc}"
                 self._append_log(f"管理员权限设置未完成：{detail}")
@@ -3383,6 +3448,119 @@ class MainWindow(QMainWindow):
         self.audit_view.setColumnWidth(3, 75)
         self.audit_view.setColumnWidth(4, 90)
 
+    def _start_upgrade_resume_targets(self, targets: list[ProjectConfig]) -> None:
+        """Restore a frozen set of roots as one coordinated startup transaction.
+
+        Upgrade handoff previously launched the ordinary per-row start action once
+        per root. Those independent workers each owned their own Hub startup/error
+        path, so one transient root failure could be consumed with the handoff file
+        and never retried. The upgrade path now starts roots sequentially on one
+        worker, retries only failed roots once, and starts the shared Hub exactly once.
+        """
+        if not targets:
+            return
+        access = {
+            project.id: self._ensure_workspace_credential(project.id) for project in targets
+        }
+        bridge = _bridge_token(ensure=any(project.windows_enabled for project in targets))
+        options = self._current_options()
+        project_ids = {project.id for project in targets}
+        self._bulk_project_action = "start"
+        self._busy_project_ids.update(project_ids)
+        self._poll_status()
+
+        def run() -> str:
+            started_ids: list[str] = []
+            failures: dict[str, str] = {}
+            pending = list(targets)
+            for attempt in range(2):
+                retry: list[ProjectConfig] = []
+                for project in pending:
+                    try:
+                        self.pm.start(
+                            project.id,
+                            codex_token=access[project.id],
+                            permission_mode=project.permission_mode,
+                            execution_profile=PERMISSION_PROFILE.get(
+                                project.permission_mode, "full_system"
+                            ),
+                            windows_token=bridge,
+                            elevated=bool(
+                                IS_WINDOWS and project.permission_mode == "system"
+                            ),
+                        )
+                        if project.id not in started_ids:
+                            started_ids.append(project.id)
+                        failures.pop(project.id, None)
+                    except Exception as exc:  # noqa: BLE001 - aggregate all root failures
+                        failures[project.id] = (
+                            f"{project.display_name or project.root_path}: "
+                            f"{str(exc) or type(exc).__name__}"
+                        )
+                        retry.append(project)
+                if not retry or attempt == 1:
+                    break
+                pending = retry
+                time.sleep(0.25)
+
+            if not started_ids:
+                preview = "；".join(list(failures.values())[:3])
+                raise RuntimeError(
+                    "升级接力没有任何项目成功启动。" + (f" {preview}" if preview else "")
+                )
+
+            connection_issue = ""
+            if not self.coord.running:
+                conflict = self._ports_conflict(options)
+                if conflict:
+                    connection_issue = conflict
+                else:
+                    try:
+                        self.coord.start(options)
+                    except Exception as exc:  # noqa: BLE001 - preserve running roots
+                        connection_issue = str(exc) or type(exc).__name__
+            if self.coord.state != EngineState.READY and not connection_issue:
+                connection_issue = self.coord.message or "连接服务未进入可用状态。"
+            if (
+                self.coord.state == EngineState.READY
+                and options.connection != ConnectionMethod.LOCAL
+                and not self.coord.tunnel.is_running
+                and not connection_issue
+            ):
+                connection_issue = self.coord.message or (
+                    "公网连接尚未就绪；本机项目引擎保持可用。"
+                )
+
+            failure_values = list(failures.values())
+            failure_note = ""
+            if failure_values:
+                preview = "；".join(failure_values[:3])
+                if len(failure_values) > 3:
+                    preview += f"；另有 {len(failure_values) - 3} 个失败"
+                failure_note = f"；失败：{preview}"
+            if connection_issue:
+                return (
+                    f"升级接力完成：{len(started_ids)}/{len(targets)} 个平等运行根可用；"
+                    f"共享连接未就绪：{connection_issue}。项目引擎保持运行{failure_note}"
+                )
+            return (
+                f"升级接力完成：{len(started_ids)}/{len(targets)} 个平等运行根可用"
+                f"{failure_note}。"
+            )
+
+        def done(result: Any) -> None:
+            self._bulk_project_action = None
+            self._busy_project_ids.difference_update(project_ids)
+            self._append_log(
+                str(result)
+                if not isinstance(result, Exception)
+                else f"升级接力启动失败：{result}"
+            )
+            self._sync_token_ui()
+            self._poll_status()
+
+        _run_async(run, done)
+
     def _resume_upgrade_if_requested(self) -> None:
         """Consume installer handoff and restore all previously running roots equally.
 
@@ -3437,8 +3615,7 @@ class MainWindow(QMainWindow):
         self._append_log(
             f"检测到升级接力请求，正在平等恢复 {len(targets)} 个运行根；没有入口项目。"
         )
-        for project in targets:
-            self._start_project_engine_for(project)
+        self._start_upgrade_resume_targets(targets)
 
     # --------------------------------------------------------------- end
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming

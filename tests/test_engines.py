@@ -187,6 +187,31 @@ class TestManagerErrors:
             manager.start("short")
         assert spawned == []
 
+    def test_codex_start_refuses_foreign_listener_before_spawn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "http.js").write_text("// fake", encoding="utf-8")
+        manager = CodexProManager(node_exe="node", dist_dir=tmp_path, port=45678)
+        spawned: list[list[str]] = []
+        monkeypatch.setattr("local_dev_mcp_bridge.engines.port_listening", lambda _port: True)
+        monkeypatch.setattr(manager, "_spawn", lambda cmd, env, secrets, log_file: spawned.append(cmd))
+        with pytest.raises(SpawnError, match="45678"):
+            manager.start("C:/repo", "t" * 32)
+        assert spawned == []
+        assert manager.state == EngineState.ERROR
+
+    def test_windows_start_refuses_foreign_listener_before_spawn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = WindowsBridgeManager(uvx_exe="uvx", port=45679)
+        spawned: list[list[str]] = []
+        monkeypatch.setattr("local_dev_mcp_bridge.engines.port_listening", lambda _port: True)
+        monkeypatch.setattr(manager, "_spawn", lambda cmd, env, secrets, log_file: spawned.append(cmd))
+        with pytest.raises(SpawnError, match="45679"):
+            manager.start("t" * 32)
+        assert spawned == []
+        assert manager.state == EngineState.ERROR
+
     def test_windows_bridge_cmd_pins_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
         manager = WindowsBridgeManager(uvx_exe="uvx")
         spawned: list[list[str]] = []

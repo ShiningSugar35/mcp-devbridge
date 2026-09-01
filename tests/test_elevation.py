@@ -256,13 +256,73 @@ def test_controller_refuses_false_elevation(monkeypatch: pytest.MonkeyPatch) -> 
     controller = elevation.ElevationController()
     monkeypatch.setattr(controller, "health", lambda: {"ok": True, "elevated": False})
     monkeypatch.setattr(controller, "ensure_registered", lambda *, interactive: True)
+    monkeypatch.setattr(elevation, "_task_is_running", lambda: False)
     monkeypatch.setattr(elevation, "_run_task", lambda: True)
     monkeypatch.setattr(elevation, "_state_path", lambda: Path("Z:/definitely/missing/state.json"))
     monkeypatch.setattr(elevation.time, "sleep", lambda _seconds: None)
     health_calls = iter([None, {"ok": True, "elevated": False}])
     monkeypatch.setattr(controller, "health", lambda: next(health_calls))
-    with pytest.raises(RuntimeError, match="未处于 elevated"):
+    with pytest.raises(RuntimeError, match="未获得管理员权限"):
         controller.ensure_running(interactive_registration=False)
+
+
+def test_controller_does_not_kill_unreachable_running_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = elevation.ElevationController()
+    state = tmp_path / "elevated-broker.json"
+    state.write_text("stale", encoding="utf-8")
+    calls = {"register": 0, "stop": 0, "run": 0}
+
+    monkeypatch.setattr(elevation, "IS_WINDOWS", True)
+
+    def ensure_registered(*, interactive: bool) -> bool:
+        calls["register"] += 1
+        return True
+
+    monkeypatch.setattr(controller, "ensure_registered", ensure_registered)
+    monkeypatch.setattr(elevation, "_state_path", lambda: state)
+    monkeypatch.setattr(elevation, "_task_is_running", lambda: True)
+    monkeypatch.setattr(controller, "health", lambda: None)
+
+    def stop_task() -> bool:
+        calls["stop"] += 1
+        return True
+
+    def run_task() -> bool:
+        calls["run"] += 1
+        return True
+
+    monkeypatch.setattr(elevation, "_stop_task", stop_task)
+    monkeypatch.setattr(elevation, "_run_task", run_task)
+    with pytest.raises(elevation.StaleElevationBrokerError, match="仍在运行") as exc_info:
+        controller.ensure_running(interactive_registration=False)
+    assert "broker" not in str(exc_info.value).casefold()
+    assert calls == {"register": 0, "stop": 0, "run": 0}
+    assert state.exists()
+
+
+def test_force_stop_broker_ends_task_and_clears_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = elevation.ElevationController()
+    state = tmp_path / "elevated-broker.json"
+    state.write_text("stale", encoding="utf-8")
+    running = iter([True, False])
+    calls = {"stop": 0}
+    monkeypatch.setattr(elevation, "IS_WINDOWS", True)
+    monkeypatch.setattr(elevation, "_state_path", lambda: state)
+    monkeypatch.setattr(elevation, "_task_is_running", lambda: next(running, False))
+
+    def stop_task() -> bool:
+        calls["stop"] += 1
+        return True
+
+    monkeypatch.setattr(elevation, "_stop_task", stop_task)
+    monkeypatch.setattr(elevation.time, "sleep", lambda _seconds: None)
+    controller.force_stop()
+    assert calls["stop"] == 1
+    assert not state.exists()
 
 
 def test_elevated_manager_coalesces_status_ipc(
@@ -300,6 +360,7 @@ def test_ensure_running_serializes_parallel_starts(
     started = {"value": False, "runs": 0}
     monkeypatch.setattr(controller, "ensure_registered", lambda *, interactive: True)
     monkeypatch.setattr(elevation, "_state_path", lambda: tmp_path / "broker-state.json")
+    monkeypatch.setattr(elevation, "_task_is_running", lambda: False)
     monkeypatch.setattr(
         controller,
         "health",

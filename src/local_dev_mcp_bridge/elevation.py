@@ -41,6 +41,10 @@ BROKER_START_TIMEOUT_SECONDS = 25.0
 TASK_VALIDATION_TTL_SECONDS = 5.0
 
 
+class StaleElevationBrokerError(RuntimeError):
+    """A scheduled elevated broker exists but its authenticated control channel is lost."""
+
+
 def _auth_store_key() -> str:
     return "MCPDevBridge:elevated-" + "auth"
 
@@ -225,6 +229,45 @@ def _run_task() -> bool:
     try:
         result = subprocess.run(
             ["schtasks.exe", "/Run", "/TN", BROKER_TASK_NAME],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            check=False,
+            **run_platform_kwargs(),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _task_is_running() -> bool:
+    if not IS_WINDOWS or not _task_exists():
+        return False
+    script = (
+        "$task=Get-ScheduledTask -TaskName "
+        + _ps_quote(BROKER_TASK_NAME)
+        + "; if ([string]$task.State -eq 'Running') { exit 0 } else { exit 1 }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            check=False,
+            **run_platform_kwargs(),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _stop_task() -> bool:
+    if not IS_WINDOWS or not _task_exists():
+        return True
+    try:
+        result = subprocess.run(
+            ["schtasks.exe", "/End", "/TN", BROKER_TASK_NAME],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=8,
@@ -712,27 +755,62 @@ class ElevationController:
         # Task Scheduler has already accepted the first broker instance.
         with self._lock:
             current = self.health()
-            if current and current.get("elevated") is True:
+            if current:
+                if current.get("elevated") is not True:
+                    raise RuntimeError("Windows 管理员服务已启动，但未获得管理员权限。")
                 return current
+            # A prior desktop generation may have lost the state/auth channel while
+            # the scheduled broker is still running. Check this before registration:
+            # a stale task may still target the previous executable, and re-registering
+            # a running IgnoreNew task can fail before the UI gets a recovery choice.
+            if _task_is_running():
+                raise StaleElevationBrokerError(
+                    "检测到旧的 Windows 管理员服务仍在运行，但当前控制状态不可用。"
+                    "为避免无确认地中断其它项目任务，必须由用户明确选择是否终止旧服务并重启。"
+                )
             if not self.ensure_registered(interactive=interactive_registration):
                 raise RuntimeError(
-                    "Windows 管理员执行能力尚未授权。请首次启用「完全访问」并完成一次 UAC 授权。"
+                    "Windows 管理员执行能力尚未授权。请首次启用「完全访问」并完成一次系统权限确认。"
                 )
+            current = self.health()
+            if current:
+                if current.get("elevated") is not True:
+                    raise RuntimeError("Windows 管理员服务已启动，但未获得管理员权限。")
+                return current
             with contextlib.suppress(OSError):
                 _state_path().unlink(missing_ok=True)
             if not _run_task():
-                raise RuntimeError("无法启动已注册的 Windows 高权限 broker 任务。")
+                raise RuntimeError("无法启动 Windows 管理员服务。")
             deadline = time.monotonic() + BROKER_START_TIMEOUT_SECONDS
             while time.monotonic() < deadline:
                 health = self.health()
                 if health:
                     if health.get("elevated") is not True:
                         raise RuntimeError(
-                            "高权限 broker 已启动，但 Windows token 未处于 elevated 状态。"
+                            "Windows 管理员服务已启动，但未获得管理员权限。"
                         )
                     return health
                 time.sleep(0.2)
-            raise RuntimeError("Windows 高权限 broker 启动超时。")
+            raise RuntimeError("Windows 管理员服务启动超时。")
+
+    def force_stop(self) -> None:
+        """Explicitly stop the scheduled broker and all job-owned children.
+
+        This is intentionally separate from ensure_running(). The desktop calls it
+        only for the user's explicit “stop all projects” action so stale elevated
+        work is reclaimed without surprising unrelated long-running tasks during start.
+        """
+        with self._lock:
+            if _task_is_running():
+                if not _stop_task():
+                    raise RuntimeError("无法停止 Windows 管理员服务。")
+                deadline = time.monotonic() + 8.0
+                while _task_is_running() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                if _task_is_running():
+                    raise RuntimeError("Windows 管理员服务未能在限定时间内停止。")
+            with contextlib.suppress(OSError):
+                _state_path().unlink(missing_ok=True)
 
     def spawn_codex(
         self,
@@ -1002,6 +1080,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "BROKER_TASK_NAME",
+    "StaleElevationBrokerError",
     "ElevationController",
     "ElevatedCodexProManager",
     "ElevatedCommandResult",

@@ -125,9 +125,14 @@ def test_add_assigns_unique_ports(manager: tuple[ProjectManager, Path]) -> None:
     assert proj_a.codexpro_port != proj_b.windows_bridge_port
 
 
-def test_list_backfills_engine_ports_and_ids_for_legacy_configs(tmp_path: Path) -> None:
+def test_list_backfills_engine_ports_and_ids_for_legacy_configs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_dev_mcp_bridge import config_store
+
     config_dir = tmp_path / "config"
     os.environ["LOCALDEV_MCP_CONFIG_DIR"] = str(config_dir)
+    monkeypatch.setattr(config_store, "_loopback_port_in_use", lambda _port: False)
     try:
         legacy = ProjectConfig(
             id="",
@@ -210,6 +215,50 @@ def test_start_uses_project_permission(manager: tuple[ProjectManager, Path]) -> 
     assert unit is not None
     assert unit.calls[0]["permission_mode"] == "system"
     assert unit.windows.started is False
+
+
+def test_workspace_start_reclaims_reachable_elevated_child(
+    manager: tuple[ProjectManager, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_dev_mcp_bridge import elevation, project_manager
+
+    pm, tmp = manager
+    project = pm.add(str(tmp / "projA"), permission_mode="workspace")
+    calls: list[str] = []
+
+    class FakeController:
+        def health(self) -> dict[str, object]:
+            return {"ok": True, "elevated": True}
+
+        def stop_child(self, project_id: str) -> None:
+            calls.append(project_id)
+
+    monkeypatch.setattr(project_manager, "IS_WINDOWS", True)
+    monkeypatch.setattr(elevation, "get_elevation_controller", lambda: FakeController())
+    pm.start(project.id, codex_token=TOKEN, permission_mode="workspace", elevated=False)
+    assert calls == [project.id]
+
+
+def test_stop_reclaims_reachable_orphaned_elevated_child(
+    manager: tuple[ProjectManager, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_dev_mcp_bridge import elevation, project_manager
+
+    pm, tmp = manager
+    project = pm.add(str(tmp / "projA"), permission_mode="workspace")
+    calls: list[str] = []
+
+    class FakeController:
+        def health(self) -> dict[str, object]:
+            return {"ok": True, "elevated": True}
+
+        def stop_child(self, project_id: str) -> None:
+            calls.append(project_id)
+
+    monkeypatch.setattr(project_manager, "IS_WINDOWS", True)
+    monkeypatch.setattr(elevation, "get_elevation_controller", lambda: FakeController())
+    pm.stop(project.id)
+    assert calls == [project.id]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows elevation manager only")

@@ -402,6 +402,24 @@ class ProjectManager:
         with self._lock:
             return self._operation_locks.setdefault(project_id, threading.RLock())
 
+    def _stop_reachable_elevated_child(self, project_id: str) -> None:
+        """Stop the same project's broker-owned child when the broker is healthy.
+
+        An unreachable broker is deliberately left alone here: it can still own
+        unrelated long-running work. Explicit desktop “stop all projects” is the
+        only operation allowed to force-stop the whole scheduled broker.
+        """
+        if not IS_WINDOWS:
+            return
+        try:
+            from .elevation import get_elevation_controller
+
+            controller = get_elevation_controller()
+            if controller.health() is not None:
+                controller.stop_child(project_id)
+        except RuntimeError:
+            return
+
     def _write_supervisor_event(self, event: str, **fields: object) -> None:
         entry = {
             "event": event,
@@ -600,6 +618,8 @@ class ProjectManager:
                 timeout_seconds=timeout_seconds,
                 elevated=elevated,
             )
+            if not spec.elevated:
+                self._stop_reachable_elevated_child(project_id)
             view = self._start_unit_from_spec(project, spec)
             with self._lock:
                 self._runtime_specs[project_id] = spec
@@ -616,6 +636,7 @@ class ProjectManager:
                 unit = self._units.get(project_id)
             if unit is not None:
                 unit.stop()
+            self._stop_reachable_elevated_child(project_id)
         self._stop_supervisor_if_idle()
 
     def stop_all(self) -> None:
@@ -691,7 +712,7 @@ class ProjectManager:
             enabled=project.enabled,
             windows_enabled=project.windows_enabled,
             state=state.value,
-            message="",
+            message=str(getattr(unit, "message", "") or "") if unit is not None else "",
             engine_pid=pid,
         )
 

@@ -58,6 +58,52 @@ function Get-ExpectedPort {
     }
     return 8786
 }
+function Get-ElevatedBrokerState {
+    $statePath = Join-Path $ConfigDir "elevated-broker.json"
+    if (-not (Test-Path -LiteralPath $statePath)) { return $null }
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $state -or -not [bool]$state.elevated -or [int]$state.pid -le 0) {
+            return $null
+        }
+        if (-not (Get-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue)) {
+            return $null
+        }
+        return $state
+    }
+    catch { return $null }
+}
+
+function Test-ResumeProjectReady {
+    param([object]$Project, [object]$BrokerState)
+    $root = [string]$Project.root
+    $port = [int]$Project.port
+    $permissionMode = [string]$Project.permission_mode
+    if (-not $root -or $port -le 0 -or -not (Test-LoopbackPort -Port $port)) {
+        return $false
+    }
+    try { $root = [IO.Path]::GetFullPath($root) }
+    catch { return $false }
+    $rootPattern = '--root\s+(?:"' + [regex]::Escape($root) + '"|' + [regex]::Escape($root) + ')(?=\s+--port\s)'
+    $portPattern = '--port\s+' + [regex]::Escape([string]$port) + '(?:\s|$)'
+    $nodes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -ieq "node.exe" -and
+        [string]$_.CommandLine -match $rootPattern -and
+        [string]$_.CommandLine -match $portPattern
+    })
+    foreach ($node in $nodes) {
+        if ($permissionMode -eq "system") {
+            if ($BrokerState -and [bool]$BrokerState.elevated -and
+                [int]$node.ParentProcessId -eq [int]$BrokerState.pid) {
+                return $true
+            }
+            continue
+        }
+        return $true
+    }
+    return $false
+}
+
 function New-DesktopShortcut {
     param([string]$TargetExe)
     $desktop = [Environment]::GetFolderPath("Desktop")
@@ -112,6 +158,7 @@ if (-not $Worker) {
     # Each additional project has its own CodexPro port and can be restored independently
     # after the desktop process tree is replaced by the installer.
     $resumeProjectRoots = @()
+    $resumeProjects = @()
     $projectsPath = Join-Path $ConfigDir "projects.json"
     if (Test-Path -LiteralPath $projectsPath) {
         try {
@@ -123,6 +170,11 @@ if (-not $Worker) {
                     $normalizedRoot = [IO.Path]::GetFullPath($candidateRoot)
                     if ($resumeProjectRoots -notcontains $normalizedRoot) {
                         $resumeProjectRoots += $normalizedRoot
+                        $resumeProjects += [ordered]@{
+                            root = $normalizedRoot
+                            port = $candidatePort
+                            permission_mode = [string]$candidateProject.permission_mode
+                        }
                     }
                 }
             }
@@ -136,6 +188,7 @@ if (-not $Worker) {
     $request = [ordered]@{
         installer_path = $InstallerPath
         resume_project_roots = @($resumeProjectRoots)
+        resume_projects = @($resumeProjects)
         old_pid = $OldPid
         fallback_exe = $FallbackExe
         install_dir = $currentInstallDir
@@ -197,6 +250,28 @@ try {
     if ($installDir) { $installDir = [IO.Path]::GetFullPath($installDir) }
     $resumePath = Join-Path $ConfigDir "upgrade-resume.json"
     $resumeRoots = @($request.resume_project_roots)
+    $resumeProjects = @($request.resume_projects)
+    if ($resumeProjects.Count -eq 0 -and $resumeRoots.Count -gt 0) {
+        $projectsPath = Join-Path $ConfigDir "projects.json"
+        if (Test-Path -LiteralPath $projectsPath) {
+            try {
+                $projectPayload = Get-Content -LiteralPath $projectsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                foreach ($candidateProject in @($projectPayload.projects)) {
+                    $candidateRoot = [IO.Path]::GetFullPath([string]$candidateProject.root_path)
+                    if ($resumeRoots -contains $candidateRoot) {
+                        $resumeProjects += [ordered]@{
+                            root = $candidateRoot
+                            port = [int]$candidateProject.codexpro_port
+                            permission_mode = [string]$candidateProject.permission_mode
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-UpgradeLog "Unable to reconstruct resume project metadata: $($_.Exception.Message)"
+            }
+        }
+    }
     if ($resumeRoots.Count -gt 0) {
         Write-JsonAtomic -Path $resumePath -Value ([ordered]@{
             project_roots = @($resumeRoots)
@@ -252,6 +327,9 @@ try {
     $deadline = (Get-Date).AddSeconds(150)
     $ready = $false
     $expectedPort = 0
+    $readyProjectCount = 0
+    $resumeConsumed = $resumeRoots.Count -eq 0
+    $brokerElevated = $false
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
         if ($newProcess.HasExited) {
@@ -263,7 +341,18 @@ try {
             break
         }
         $expectedPort = Get-ExpectedPort
-        if (Test-LoopbackPort -Port $expectedPort) {
+        $resumeConsumed = -not (Test-Path -LiteralPath $resumePath)
+        $brokerState = Get-ElevatedBrokerState
+        $brokerElevated = [bool]($brokerState -and [bool]$brokerState.elevated)
+        $readyProjectCount = 0
+        foreach ($resumeProject in $resumeProjects) {
+            if (Test-ResumeProjectReady -Project $resumeProject -BrokerState $brokerState) {
+                $readyProjectCount += 1
+            }
+        }
+        if ((Test-LoopbackPort -Port $expectedPort) -and $resumeConsumed -and
+            $readyProjectCount -eq $resumeProjects.Count -and
+            $resumeProjects.Count -eq $resumeRoots.Count) {
             $ready = $true
             break
         }
@@ -274,13 +363,23 @@ try {
         ok = $ready
         project_root = $projectRoot
         expected_port = $expectedPort
+        expected_project_count = $resumeProjects.Count
+        ready_project_count = $readyProjectCount
+        resume_consumed = $resumeConsumed
+        elevated_broker_ready = $brokerElevated
         process_id = $newProcess.Id
         installed_exe = $installedExe
         shortcut = $shortcut
         finished_at = (Get-Date).ToString("o")
     })
-    if (-not $ready) { throw "New bridge did not become ready before timeout." }
-    Write-UpgradeLog $(if ($expectedPort -gt 0) { "Upgrade completed; loopback port $expectedPort is ready." } else { "Upgrade completed; desktop restarted successfully." })
+    if (-not $ready) {
+        throw "New bridge did not restore every previously running project before timeout."
+    }
+    Write-UpgradeLog $(if ($expectedPort -gt 0) {
+        "Upgrade completed; Gateway $expectedPort and $readyProjectCount/$($resumeProjects.Count) project roots are ready."
+    } else {
+        "Upgrade completed; desktop restarted successfully."
+    })
 }
 catch {
     Write-UpgradeLog "Upgrade worker failed: $($_.Exception.Message)"

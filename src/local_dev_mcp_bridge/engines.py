@@ -524,6 +524,9 @@ class CodexProManager(EngineManager):
                 "或设置环境变量 CODEXPRO_DIST_DIR 指向构建产物目录）"
             )
             raise SpawnError("CodexPro 构建产物缺失。")
+        if port_listening(self.port):
+            self._fail(f"CodexPro 本机端口 {self.port} 已被其他进程占用。")
+            raise SpawnError(f"CodexPro 本机端口 {self.port} 已被其他进程占用。")
         env = build_codex_env(
             root,
             permission_mode=permission_mode,
@@ -626,6 +629,9 @@ class WindowsBridgeManager(EngineManager):
             "--port",
             str(self.port),
         ]
+        if port_listening(self.port):
+            self._fail(f"Windows-MCP 本机端口 {self.port} 已被其他进程占用。")
+            raise SpawnError(f"Windows-MCP 本机端口 {self.port} 已被其他进程占用。")
         env = {
             "ANONYMIZED_TELEMETRY": "false",
             "WINDOWS_MCP_AUTH_KEY": token,

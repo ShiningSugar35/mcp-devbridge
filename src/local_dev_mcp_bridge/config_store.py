@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import uuid
 from pathlib import Path
 from typing import Any
@@ -181,10 +182,21 @@ def assign_project_ports(
         all_used.add(port)
     return projects
 
+def _loopback_port_in_use(port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.05)
+            return sock.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        return False
+
+
 def find_free(base: int, used: set[int]) -> int:
     port = base
-    while port in used:
+    while port <= 65535 and (port in used or _loopback_port_in_use(port)):
         port += 1
+    if port > 65535:
+        raise ValueError("没有可用的本机项目端口。")
     return port
 
 
