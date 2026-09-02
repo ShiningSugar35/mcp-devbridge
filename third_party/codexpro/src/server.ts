@@ -21,6 +21,7 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { registerWindowsBridgeTools } from "./windowsBridge.js";
 import { LongRunStore, summarizeLongRun, type LongRunState, type LongRunTaskObservation, type LongRunTaskTerminalStatus } from "./longRunOps.js";
 import { observeLongRunTasks as observeDurableLongRunTasks } from "./longRunTaskObservation.js";
+import { longRunDetail, longRunDetailRetrievalHint, taskDetailRetrievalHint, taskOutputDetail } from "./detailRetrieval.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const WAIT_TASK_OUTPUT_TAIL_BYTES = 2_048;
@@ -129,14 +130,18 @@ function waitTaskTransportSnapshot(result: BashTaskSnapshot): Record<string, unk
   const outputTailBytes = bashTaskTerminal(result) ? TERMINAL_TASK_OUTPUT_TAIL_BYTES : WAIT_TASK_OUTPUT_TAIL_BYTES;
   const stdout = tailTextUtf8(result.stdout, outputTailBytes);
   const stderr = tailTextUtf8(result.stderr, outputTailBytes);
+  const stdoutOmittedBytes = Math.max(0, Buffer.byteLength(result.stdout, "utf8") - Buffer.byteLength(stdout, "utf8"));
+  const stderrOmittedBytes = Math.max(0, Buffer.byteLength(result.stderr, "utf8") - Buffer.byteLength(stderr, "utf8"));
+  const detailRetrieval = taskDetailRetrievalHint(result, stdoutOmittedBytes, stderrOmittedBytes);
   return {
     ...result,
     command: previewTaskCommand(result.command, TASK_DETAIL_COMMAND_PREVIEW_BYTES),
     stdout,
     stderr,
     transportOutputTail: true,
-    transportStdoutOmittedBytes: Math.max(0, Buffer.byteLength(result.stdout, "utf8") - Buffer.byteLength(stdout, "utf8")),
-    transportStderrOmittedBytes: Math.max(0, Buffer.byteLength(result.stderr, "utf8") - Buffer.byteLength(stderr, "utf8"))
+    transportStdoutOmittedBytes: stdoutOmittedBytes,
+    transportStderrOmittedBytes: stderrOmittedBytes,
+    ...(detailRetrieval ? { detail_retrieval: detailRetrieval } : {})
   };
 }
 
@@ -236,6 +241,13 @@ function longRunText(state: LongRunState, observations: LongRunTaskObservation[]
       ? "Quality gate passed and this run is complete."
       : "Persisted state is durable under .ai-bridge/long-runs. Reconnect with long_run_status instead of holding one MCP request open."
   ].join("\n");
+}
+
+function longRunTransportSummary(state: LongRunState, observations: LongRunTaskObservation[] = []): Record<string, unknown> {
+  return {
+    ...summarizeLongRun(state, observations),
+    detail_retrieval: longRunDetailRetrievalHint(state)
+  };
 }
 
 function errorResult(error: unknown): any {
@@ -399,7 +411,9 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
   run_review: "long_run_review",
   run_complete: "long_run_complete",
   run_list: "long_run_list",
-  run_cancel: "long_run_cancel"
+  run_cancel: "long_run_cancel",
+  task_output: "get_task",
+  run_detail: "long_run_status"
 };
 
 const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
@@ -415,9 +429,13 @@ function registeredToolHandler(server: McpServer, name: string): CodexToolHandle
   return registeredToolHandlersByServer.get(server as object)?.get(name);
 }
 
-function normalizeSupertoolAction(value: unknown): string {
+function normalizeSupertoolActionKey(value: unknown): string {
   const raw = String(value ?? "list_actions").trim();
-  const normalized = raw.toLowerCase().replace(/[\s-]+/g, "_");
+  return raw.toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function normalizeSupertoolAction(value: unknown): string {
+  const normalized = normalizeSupertoolActionKey(value);
   return SUPERTOOL_ACTION_ALIASES[normalized] ?? normalized;
 }
 
@@ -698,7 +716,7 @@ function serverInstructions(config: CodexProConfig): string {
     config.writeMode !== "off"
       ? "6. For multi-phase work or anything expected to take more than about two minutes, create a durable long_run_start plan before side effects. Attach background bash tasks with long_run_id/long_run_step_id, checkpoint evidence after each phase, run long_run_review, rework on FAIL, and do not give the user a final completion answer until long_run_complete succeeds."
       : "6. Durable long-run writes are unavailable because write mode is off; do not claim a quality-gated long-run workflow is active.",
-    "7. Long-run state lives under .ai-bridge/long-runs and survives client disconnects/reconnects. Keep each MCP wait bounded and recover with long_run_status after an actual reconnect; a bounded tool request is not a reason to end the assistant turn.",
+    "7. Long-run state lives under .ai-bridge/long-runs and survives client disconnects/reconnects. Keep each MCP wait bounded and recover with long_run_status after an actual reconnect; a bounded tool request is not a reason to end the assistant turn. Compact task/long-run results may include detail_retrieval; only when omitted history matters, call the stable codexpro wrapper with action=task_output or action=run_detail and follow next_cursor until null instead of increasing default result size.",
     "8. While a clear user goal remains actionable and no real user input, approval, or safety boundary is required, continue autonomously in the same assistant turn. Never ask the user to say continue merely because a background task is still running. During tool-heavy waiting, send a concise user-visible progress update about every 45-60 seconds or at meaningful phase changes when the host supports commentary, then keep working.",
     "9. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
@@ -1218,6 +1236,7 @@ export function createCodexProServer(
       }
     },
     async (args, extra) => {
+      const requestedAction = normalizeSupertoolActionKey(args.action);
       const action = normalizeSupertoolAction(args.action);
       const names = registeredToolNames(server).filter((name) => name !== SUPERTOOL_NAME);
       if (action === "list_actions" || action === "help") {
@@ -1258,13 +1277,25 @@ export function createCodexProServer(
         );
       }
 
-      const childArgs =
+      const childArgs: Record<string, unknown> =
         args.args && typeof args.args === "object" && !Array.isArray(args.args)
-          ? args.args
+          ? { ...args.args }
           : {};
       let result: any;
       try {
-        result = await handler(childArgs, extra);
+        if (requestedAction === "task_output") {
+          const workspace = workspaces.getWorkspace(typeof childArgs.workspace_id === "string" ? childArgs.workspace_id : undefined);
+          const task = bashTasks.get(workspace, String(childArgs.task_id ?? ""));
+          const detail = taskOutputDetail(task, childArgs);
+          result = textResult(detail.text, { workspace_id: workspace.id, root: workspace.root, ...detail.structured });
+        } else if (requestedAction === "run_detail") {
+          const workspace = workspaces.getWorkspace(typeof childArgs.workspace_id === "string" ? childArgs.workspace_id : undefined);
+          const state = await longRuns.read(workspace, String(childArgs.run_id ?? ""));
+          const detail = longRunDetail(state, childArgs);
+          result = textResult(detail.text, { workspace_id: workspace.id, root: workspace.root, ...detail.structured });
+        } else {
+          result = await handler(childArgs, extra);
+        }
       } catch (error) {
         result = errorResult(error);
       }
@@ -1273,7 +1304,7 @@ export function createCodexProServer(
         result.structuredContent = {
           codexpro_tool: action,
           codexpro_title: action,
-          codexpro_super_action: action,
+          codexpro_super_action: requestedAction,
           wrapped_tool: action,
           ...(structured && typeof structured === "object" && !Array.isArray(structured) ? structured : {})
         };
@@ -2504,7 +2535,7 @@ export function createCodexProServer(
       });
       const observations = observeLongRunTasks(workspace, state);
       const blockers = longRuns.completionBlockers(state, observations);
-      return textResult(longRunText(state, observations, blockers), summarizeLongRun(state, observations));
+      return textResult(longRunText(state, observations, blockers), longRunTransportSummary(state, observations));
     }
   );
 
@@ -2528,7 +2559,7 @@ export function createCodexProServer(
       const observations = observeLongRunTasks(workspace, state);
       const blockers = state.status === "completed" ? [] : longRuns.completionBlockers(state, observations);
       return textResult(longRunText(state, observations, blockers), {
-        ...summarizeLongRun(state, observations),
+        ...longRunTransportSummary(state, observations),
         completion_blockers: blockers
       });
     }
@@ -2606,7 +2637,7 @@ export function createCodexProServer(
       const observations = observeLongRunTasks(workspace, state);
       const blockers = longRuns.completionBlockers(state, observations);
       return textResult(longRunText(state, observations, blockers), {
-        ...summarizeLongRun(state, observations),
+        ...longRunTransportSummary(state, observations),
         completion_blockers: blockers
       });
     }
@@ -2653,7 +2684,7 @@ export function createCodexProServer(
       const observations = observeLongRunTasks(workspace, state);
       const blockers = longRuns.completionBlockers(state, observations);
       return textResult(longRunText(state, observations, blockers), {
-        ...summarizeLongRun(state, observations),
+        ...longRunTransportSummary(state, observations),
         completion_blockers: blockers
       });
     }
@@ -2679,7 +2710,7 @@ export function createCodexProServer(
       const before = await longRuns.read(workspace, String(args.run_id ?? ""));
       const observations = observeLongRunTasks(workspace, before);
       const state = await longRuns.complete(workspace, before.runId, args.summary, observations);
-      return textResult(longRunText(state, observations), summarizeLongRun(state, observations));
+      return textResult(longRunText(state, observations), longRunTransportSummary(state, observations));
     }
   );
 
@@ -2702,7 +2733,7 @@ export function createCodexProServer(
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const state = await longRuns.cancel(workspace, String(args.run_id ?? ""), args.reason);
       const observations = observeLongRunTasks(workspace, state);
-      return textResult(longRunText(state, observations), summarizeLongRun(state, observations));
+      return textResult(longRunText(state, observations), longRunTransportSummary(state, observations));
     }
   );
 

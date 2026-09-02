@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { summarizeLongRun } from "../dist/longRunOps.js";
+import { longRunDetailRetrievalHint } from "../dist/detailRetrieval.js";
 
 async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -211,7 +212,10 @@ try {
     status: "completed",
     detail: "详".repeat(1_000)
   }));
-  const longRunSummary = summarizeLongRun(longRunState, longRunObservations);
+  const longRunSummary = {
+    ...summarizeLongRun(longRunState, longRunObservations),
+    detail_retrieval: longRunDetailRetrievalHint(longRunState)
+  };
   const longRunSummaryBytes = Buffer.byteLength(JSON.stringify(longRunSummary), "utf8");
   if (longRunSummaryBytes > 60_000) {
     failures.push(`summarizeLongRun transport is ${longRunSummaryBytes} bytes; expected <= 60000`);

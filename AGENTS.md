@@ -106,7 +106,7 @@ P0/P1/P2 或任何会导致验收失败的 finding 一律 `FAIL → 返工 → �
 6. commit / push 当前工作分支；
 7. 仅 L3 正式版本发布才创建 annotated version tag；
 8. 仅 L3 正式版本发布才创建 GitHub Release，并要求 Windows/Linux 正式资产、checksum 来自同一源提交；
-9. 仅实际运行态受影响时，使用正式发布/构建资产升级或热更新当前 MCP，并恢复原本应运行的根服务；
+9. 仅实际运行态受影响时，使用正式发布/构建资产升级或热更新当前 MCP，并恢复原本应运行的根服务。**计划内重启/热加载前必须先对目标项目引擎已打开的全部 workspace 执行 active-task drain 检查**：只要存在 `running/cancelling` background task，就必须延后该根重启，除非用户明确要求取消这些任务；禁止直接对承载活跃任务的 CodexPro PID 使用 `taskkill /T` 或等价整树终止。进程崩溃属于故障恢复，不以此规则掩盖，但必须依赖 durable terminal evidence fail-closed 恢复；
 10. 仅 L2/L3 运行态任务核验对应的快捷方式、进程、端口、local/public health、真实 MCP tool call；L0/L1 文档/局部任务不得为了“收尾”无意义重启；
 11. 最后执行 `long_run_review(pass)` + `long_run_complete`，再向用户声称完成。
 

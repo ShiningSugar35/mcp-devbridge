@@ -39,6 +39,11 @@ export interface BashTaskSnapshot extends BashResult {
   durableResolutionState?: "awaiting_terminal" | "persisting" | "retrying" | "persisted" | "failed";
   durableResolutionAttempts?: number;
   durableResolutionError?: string;
+  stdoutObservedBytes: number;
+  stderrObservedBytes: number;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  outputRetentionLimitBytes: number;
 }
 
 export type BashTaskTerminalHandler = (snapshot: BashTaskSnapshot) => void | Promise<void>;
@@ -65,6 +70,10 @@ interface BashTaskInternal {
   stdout: string;
   stderr: string;
   truncated: boolean;
+  stdoutObservedBytes: number;
+  stderrObservedBytes: number;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
   bashSessionId?: string;
   error?: string;
   maxOutputBytes: number;
@@ -536,7 +545,9 @@ function appendRollingOutput(current: string, chunk: unknown, maxBytes: number):
   if (merged.byteLength <= maxBytes) return { value: merged.toString("utf8"), truncated: false };
   const marker = Buffer.from("...[earlier output omitted]...\n", "utf8");
   const payloadBytes = Math.max(1, maxBytes - marker.byteLength);
-  const tail = merged.subarray(Math.max(0, merged.byteLength - payloadBytes));
+  let start = Math.max(0, merged.byteLength - payloadBytes);
+  while (start < merged.byteLength && (merged[start] & 0xc0) === 0x80) start += 1;
+  const tail = merged.subarray(start);
   return { value: Buffer.concat([marker, tail]).toString("utf8"), truncated: true };
 }
 
@@ -610,6 +621,11 @@ export class BashTaskManager {
       stdout: redactSensitiveText(task.stdout),
       stderr: redactSensitiveText(task.stderr),
       truncated: task.truncated,
+      stdoutObservedBytes: task.stdoutObservedBytes,
+      stderrObservedBytes: task.stderrObservedBytes,
+      stdoutTruncated: task.stdoutTruncated,
+      stderrTruncated: task.stderrTruncated,
+      outputRetentionLimitBytes: task.maxOutputBytes,
       ...(task.bashSessionId ? { bashSessionId: task.bashSessionId } : {}),
       ...(task.error ? { error: redactSensitiveText(task.error) } : {}),
       ...(task.onTerminal
@@ -772,6 +788,10 @@ export class BashTaskManager {
       stdout: "",
       stderr: "",
       truncated: false,
+      stdoutObservedBytes: 0,
+      stderrObservedBytes: 0,
+      stdoutTruncated: false,
+      stderrTruncated: false,
       ...(bashSessionId ? { bashSessionId } : {}),
       maxOutputBytes: Math.max(16_384, config.maxOutputBytes),
       ...(options.onTerminal
@@ -783,23 +803,32 @@ export class BashTaskManager {
     this.tasks.set(task.taskId, task);
     this.prune();
 
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {
+      task.stdoutObservedBytes += Buffer.byteLength(String(chunk), "utf8");
       const next = appendRollingOutput(task.stdout, chunk, task.maxOutputBytes);
       task.stdout = next.value;
-      task.truncated = task.truncated || next.truncated;
+      task.stdoutTruncated = task.stdoutTruncated || next.truncated;
+      task.truncated = task.stdoutTruncated || task.stderrTruncated;
     });
     child.stderr?.on("data", (chunk) => {
+      task.stderrObservedBytes += Buffer.byteLength(String(chunk), "utf8");
       const next = appendRollingOutput(task.stderr, chunk, task.maxOutputBytes);
       task.stderr = next.value;
-      task.truncated = task.truncated || next.truncated;
+      task.stderrTruncated = task.stderrTruncated || next.truncated;
+      task.truncated = task.stdoutTruncated || task.stderrTruncated;
     });
     child.on("error", (error) => {
       if (taskTerminal(task.status)) return;
       task.status = "failed";
       task.error = `${error.name}: ${error.message}`;
-      const next = appendRollingOutput(task.stderr, `\n[codexpro] ${task.error}\n`, task.maxOutputBytes);
+      const errorOutput = `\n[codexpro] ${task.error}\n`;
+      task.stderrObservedBytes += Buffer.byteLength(errorOutput, "utf8");
+      const next = appendRollingOutput(task.stderr, errorOutput, task.maxOutputBytes);
       task.stderr = next.value;
-      task.truncated = task.truncated || next.truncated;
+      task.stderrTruncated = task.stderrTruncated || next.truncated;
+      task.truncated = task.stdoutTruncated || task.stderrTruncated;
       task.finishedAtMs = Date.now();
       if (task.cancellationTimer) clearTimeout(task.cancellationTimer);
       task.cancellationTimer = undefined;
