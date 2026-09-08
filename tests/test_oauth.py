@@ -52,6 +52,7 @@ class _Env:
                 {
                     "authorization": request.headers.get("authorization", ""),
                     "path": request.url.path,
+                    "query": request.url.query.decode("ascii"),
                     "method": request.method,
                 }
             )
@@ -433,9 +434,92 @@ def test_mcp_legacy_bearer_passthrough(env: _Env) -> None:
     assert env.calls[-1]["authorization"] == f"Bearer {PUB_TOKEN}"
 
 
+def test_mcp_header_bearer_is_authoritative_and_query_is_not_forwarded(env: _Env) -> None:
+    r = env.client.get(
+        "/mcp?token=wrong-url-value",
+        headers={"Authorization": f"Bearer {PUB_TOKEN}"},
+    )
+
+    assert r.status_code == 200
+    assert env.calls[-1]["authorization"] == f"Bearer {PUB_TOKEN}"
+    assert env.calls[-1]["query"] == ""
+
+
+@pytest.mark.parametrize("parameter", ["token", "key"])
+def test_mcp_hub_access_code_in_query_authenticates_and_is_not_forwarded(
+    env: _Env, parameter: str
+) -> None:
+    r = env.client.get("/mcp", params={parameter: PUB_TOKEN})
+
+    assert r.status_code == 200, r.text
+    assert env.calls[-1]["authorization"] == f"Bearer {PUB_TOKEN}"
+    assert env.calls[-1]["query"] == ""
+
+
+def test_mcp_header_error_does_not_fall_back_to_valid_query_access_code(env: _Env) -> None:
+    r = env.client.get(
+        "/mcp?token=" + PUB_TOKEN,
+        headers={"Authorization": "Bearer invalid-header-value"},
+    )
+
+    assert r.status_code == 401
+    assert r.json() == {"error": "Unauthorized"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/mcp?token=",
+        "/mcp?token=one&token=two",
+        "/mcp?token=" + PUB_TOKEN + "&key=conflicting-value",
+        "/mcp?" + PUB_TOKEN,
+    ],
+)
+def test_mcp_missing_or_ambiguous_url_access_code_is_rejected(env: _Env, url: str) -> None:
+    r = env.client.get(url)
+
+    assert r.status_code == 401
+    assert r.json() == {"error": "Unauthorized"}
+
+
+def test_mcp_post_jsonrpc_accepts_query_access_code_before_body_parsing(env: _Env) -> None:
+    r = env.client.post(
+        "/mcp?token=" + PUB_TOKEN,
+        json={"jsonrpc": "2.0", "id": 91, "method": "tools/list", "params": {}},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == 91
+    assert env.calls == []  # tools/list is served by the stable Hub contract.
+
+
+def test_mcp_query_access_code_preserves_sse_and_hides_query_from_upstream(env: _Env) -> None:
+    sse_payload = b'event: message\ndata: {"jsonrpc":"2.0","id":92,"result":{}}\n\n'
+
+    def _sse(request: httpx.Request) -> httpx.Response:
+        env.calls.append(
+            {
+                "authorization": request.headers.get("authorization", ""),
+                "path": request.url.path,
+                "query": request.url.query.decode("ascii"),
+                "method": request.method,
+            }
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse_payload)
+
+    env.gateway._http = httpx.AsyncClient(transport=httpx.MockTransport(_sse))
+    r = env.client.get("/mcp?key=" + PUB_TOKEN)
+
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert r.content == sse_payload
+    assert env.calls[-1]["query"] == ""
+
+
 def test_mcp_unauthorized(env: _Env) -> None:
     r = env.client.get("/mcp")
     assert r.status_code == 401
+    assert r.json() == {"error": "Unauthorized"}
     assert "Bearer" in r.headers.get("www-authenticate", "")
     assert "resource_metadata" in r.headers.get("www-authenticate", "")
 

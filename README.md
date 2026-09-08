@@ -84,7 +84,7 @@ SteamOS 建议在 Desktop Mode 下使用用户目录安装，不修改只读系�
 2. 添加要授权的目录。需要让某个磁盘下的子目录都可路由时，可以直接添加磁盘根，例如 `C:\` 或 `D:\`。
 3. 为项目选择权限模式和连接方式。
 4. 启动一个或多个项目，或使用“启动所有项目”。
-5. 在桌面应用中获取 MCP 连接信息，并配置到支持 MCP 的客户端。
+5. 在桌面应用中获取 MCP 连接信息，并配置到支持 MCP 的客户端。若 OpenAI/ChatGPT connector 只能选“No Auth”，复制“`No Auth Server URL`”；它含访问码，只能粘贴到自己的受信任连接。
 6. 后续调用直接使用目标绝对路径，或继续使用已经获得的 workspace handle；通常不需要手工切换“当前项目”。
 
 例如同时启动：
@@ -122,8 +122,8 @@ MCP DevBridge 能够向远端 MCP 客户端开放高权限的本地开发能力�
 
 - workspace/read-only 模式下使用 canonical path containment 限制文件访问范围；
 - 防止 `..`、symlink/junction 等路径逃逸；
-- 公网入口要求 OAuth/Bearer 认证；
-- 凭据和 token 不写入普通日志、URL 或项目配置；
+- 公网入口要求 OAuth/Bearer 认证；个人 OpenAI/ChatGPT No Auth connector 可使用桌面显式复制的 `?token=<Hub 访问码>` URL capability（`key` 为兼容别名），Header Bearer 仍优先；
+- 凭据和 token 不写入普通日志或项目配置。唯一 URL 例外是用户主动复制的 No Auth Hub capability；它等同密码，不得分享，Gateway 验证后不会向上游转发，重新生成访问码会使旧 URL 立即失效；
 - 日志中的 command、content、patch 和 secret-like 字段会经过脱敏；
 - 已知格式化磁盘、破坏引导、递归删除系统目录等高风险命令受硬限制；
 - Windows 管理员能力使用受控的系统授权机制，不通过关闭或绕过 UAC 获得权限。

@@ -112,9 +112,9 @@ A remote Quick Tunnel address may change and be updated through heartbeats witho
 
 ## Authentication and secrets
 
-Public modes terminate at the OAuth/Bearer Gateway. OAuth authorizes the Hub; the consent page does not require choosing an “entry workspace”. The Gateway selects the concrete active root at tool-call time and uses that project’s upstream credential when proxying to CodexPro.
+Public modes terminate at the OAuth/Bearer Gateway. OAuth authorizes the Hub; the consent page does not require choosing an “entry workspace”. The Gateway selects the concrete active root at tool-call time and uses that project’s upstream credential when proxying to CodexPro. For personal OpenAI/ChatGPT connectors that cannot send an Authorization header, the Gateway also accepts a deliberately narrow `No Auth` URL capability: `/mcp?token=<current Hub access code>` (`key` is a legacy alias). Header Bearer is authoritative; URL values are compared in constant time before body parsing, are never interpreted as OAuth/project/device credentials, are removed before upstream proxying, and are invalidated by Hub access-code rotation. This compatibility path is a password-bearing URL and is intentionally shown only as an explicit copy field with a sharing warning.
 
-Windows secret storage prefers Windows Credential Manager with the existing DPAPI fallback. Linux/SteamOS prefers the desktop secret service and falls back to an AES-GCM encrypted user-level store with user-only key/file permissions. Secrets are not plaintext fields in `projects.json`, URLs, audit logs, or upgrade-resume metadata.
+Windows secret storage prefers Windows Credential Manager with the existing DPAPI fallback. Linux/SteamOS prefers the desktop secret service and falls back to an AES-GCM encrypted user-level store with user-only key/file permissions. Secrets are not plaintext fields in `projects.json`, audit logs, or upgrade-resume metadata; the explicitly user-copied `No Auth` URL capability above is the sole URL exception.
 
 ## Core components
 

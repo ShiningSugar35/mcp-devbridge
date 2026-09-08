@@ -15,7 +15,7 @@
 
 ## Client modes
 
-Each project can be configured for ChatGPT-compatible Bearer use or Gemini OAuth settings. In public Hub mode, OAuth authorizes the Hub rather than an “entry workspace”; active-root routing happens from the actual tool call.
+Each project can be configured for ChatGPT-compatible Bearer use or Gemini OAuth settings. In public Hub mode, OAuth authorizes the Hub rather than an “entry workspace”; active-root routing happens from the actual tool call. A personal OpenAI/ChatGPT connector that exposes only `No Auth` may instead use the desktop-copied `https://host/mcp?token=<Hub-access-code>` value (`key` is accepted as a compatibility alias). This is a password-bearing URL capability, not an OpenAI protocol extension: Header Bearer remains authoritative, OAuth remains supported, and the URL code is stripped before the upstream engine is called.
 
 Client/platform capabilities still apply. MCP DevBridge does not bypass a client’s plan limits, action approval rules, or write restrictions.
 

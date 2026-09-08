@@ -176,6 +176,31 @@ def test_workbench_hides_internal_port_and_uses_plain_language(
         _close(app, window)
 
 
+def test_connection_info_exposes_encoded_no_auth_server_url_for_personal_connector(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, window, _a, _b = _window(tmp_path, monkeypatch)
+    try:
+        window.coord._set_url("https://mcp.example.test/mcp", False)
+        window._current_token = "access code+/?:value"
+        window._refresh_url_ui()
+
+        expected = "https://mcp.example.test/mcp?token=access+code%2B%2F%3F%3Avalue"
+        assert window.no_auth_url_edit.text() == expected
+        assert window.no_auth_url_copy_btn.text() == "复制 No Auth 地址"
+        assert "访问码" in window.no_auth_url_edit.toolTip()
+
+        window.no_auth_url_copy_btn.click()
+        app.processEvents()
+        assert QApplication.clipboard().text() == expected
+
+        window._current_token = "rotated"
+        window._refresh_url_ui()
+        assert window.no_auth_url_edit.text() == "https://mcp.example.test/mcp?token=rotated"
+    finally:
+        _close(app, window)
+
+
 def test_close_to_tray_hides_without_quitting(tmp_path: Path, monkeypatch) -> None:
     app, window, _a, _b = _window(tmp_path, monkeypatch)
     try:

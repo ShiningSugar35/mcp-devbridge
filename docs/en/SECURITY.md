@@ -10,7 +10,7 @@ MCP DevBridge intentionally grants a remote MCP client powerful local-developmen
 - Public traffic reaches the Gateway only through an explicitly configured Cloudflare/ngrok/Quick Tunnel.
 - Public clients authenticate with OAuth or a compatible Bearer path before requests are proxied upstream.
 - Loopback-anonymous behavior exists only for local compatibility paths; control/public paths continue to require authentication as defined by the component.
-- Public URL and credential are separate concepts. Bearer tokens, OAuth secrets, tunnel tokens, and heartbeat secrets must never be embedded in the public MCP URL.
+- Public URL and credential are separate concepts by default. OAuth secrets, tunnel tokens, heartbeat secrets, project/upstream credentials, and device credentials must never be embedded in a public MCP URL. The sole documented compatibility exception is a user-copied, personal OpenAI/ChatGPT `No Auth` URL capability at `/mcp?token=<Hub-access-code>` (with `key` as a legacy alias). It is not an OAuth or project credential, is treated exactly like a password, is accepted only for the current Hub access code, and is revoked when that access code is regenerated. Header Bearer remains authoritative; the Gateway verifies URL values with timing-safe equality before parsing a request body, removes `token`/`key` from the upstream URL, and must not record their values in diagnostics, audit, FlightRecorder, configuration, or repository files. Duplicate conflicting values and unnamed raw query capabilities are rejected.
 
 ## Multi-root authorization and routing
 
@@ -81,7 +81,7 @@ Protected values prefer the desktop Secret Service when available. The fallback 
 
 ### Common rules
 
-The following must never be written in plaintext to repository files, normal config JSON, audit logs, URLs, or upgrade-resume metadata:
+The following must never be written in plaintext to repository files, normal config JSON, audit logs, upgrade-resume metadata, or public URLs, except for the narrowly defined user-copied `/mcp?token=<Hub-access-code>` compatibility URL above:
 
 - MCP Bearer tokens;
 - OAuth client/access/refresh secrets;
@@ -89,7 +89,7 @@ The following must never be written in plaintext to repository files, normal con
 - remote-device Bearer/heartbeat credentials;
 - other values whose field names are recognized as secret-like.
 
-Gateway comparisons for compatible Bearer authentication use timing-safe equality where applicable.
+Gateway comparisons for compatible Header Bearer and Hub URL-capability authentication use timing-safe equality. The URL capability is never forwarded to the upstream engine; the Gateway injects the normal internal upstream authorization only after validation.
 
 ## OAuth Hub model
 

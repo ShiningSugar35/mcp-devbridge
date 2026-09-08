@@ -80,6 +80,7 @@ const child = spawn("node", ["dist/http.js"], {
     CODEXPRO_HTTP_TOKEN: token,
     CODEXPRO_BASH_MODE: "full",
     CODEXPRO_WRITE_MODE: "workspace",
+    CODEXPRO_TOOL_MODE: "full",
     CODEXPRO_SYSTEM_ACCESS: "0",
     CODEXPRO_MAX_OUTPUT_BYTES: "120000"
   },

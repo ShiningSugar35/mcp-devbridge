@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from PySide6.QtCore import QLockFile, QObject, Qt, QThreadPool, QTimer, Signal
@@ -573,11 +573,17 @@ class MainWindow(QMainWindow):
         self.token_edit.setReadOnly(True)
         self.url_edit = QLineEdit("选择项目后显示")
         self.url_edit.setReadOnly(True)
+        self.no_auth_url_edit = QLineEdit("选择项目后显示")
+        self.no_auth_url_edit.setReadOnly(True)
+        self.no_auth_url_edit.setToolTip(
+            "此地址含访问码，等同密码。仅复制到你自己的受信任 No Auth 连接，勿分享或写入文档。"
+        )
         tok_row = QHBoxLayout()
         tok_row.setSpacing(8)
         self.token_copy_btn = QPushButton("复制访问码")
         self.token_regenerate_btn = QPushButton("重新生成")
         self.url_copy_btn = QPushButton("复制地址")
+        self.no_auth_url_copy_btn = QPushButton("复制 No Auth 地址")
         self.token_copy_btn.clicked.connect(
             lambda: self._copy_with_feedback(self.token_copy_btn, self._current_token)
         )
@@ -585,12 +591,20 @@ class MainWindow(QMainWindow):
         self.url_copy_btn.clicked.connect(
             lambda: self._copy_with_feedback(self.url_copy_btn, self._display_url())
         )
+        self.no_auth_url_copy_btn.clicked.connect(
+            lambda: self._copy_with_feedback(
+                self.no_auth_url_copy_btn, self._no_auth_server_url()
+            )
+        )
         tok_row.addWidget(self.token_copy_btn)
         tok_row.addWidget(self.token_regenerate_btn)
         tok_row.addWidget(self.url_copy_btn)
+        tok_row.addWidget(self.no_auth_url_copy_btn)
         tok_row.addStretch(1)
         tok_layout.addWidget(self.token_edit)
         tok_layout.addWidget(self.url_edit)
+        tok_layout.addWidget(QLabel("No Auth Server URL（含访问码，请勿分享）"))
+        tok_layout.addWidget(self.no_auth_url_edit)
         tok_layout.addLayout(tok_row)
 
         # --- shared Hub Gateway port
@@ -3083,10 +3097,20 @@ class MainWindow(QMainWindow):
                 return f"https://{host}/mcp"
         return self._local_url()
 
+    def _no_auth_server_url(self) -> str:
+        """Return the explicit personal-connector URL capability for copying only."""
+        token = self._current_token
+        if not token:
+            return ""
+        base = self._display_url()
+        separator = "&" if "?" in base else "?"
+        return f"{base}{separator}{urlencode({'token': token})}"
+
     def _refresh_url_ui(self) -> None:
         project = self._project_config()
         if project is None:
             self.url_edit.setText("选择项目后显示")
+            self.no_auth_url_edit.setText("选择项目后显示")
             self.service_url_edit.setText("选择项目后显示")
             self.port_warn_label.setVisible(False)
             return
@@ -3101,6 +3125,7 @@ class MainWindow(QMainWindow):
         else:
             suffix = "仅本机"
         self.url_edit.setText(f"{url}  ·  {suffix}")
+        self.no_auth_url_edit.setText(self._no_auth_server_url())
         self._update_gateway_port_ui()
 
     def _poll_status(self) -> None:
@@ -3204,6 +3229,7 @@ class MainWindow(QMainWindow):
                 return
             self._current_token = str(result)
             self._sync_token_ui()
+            self._refresh_url_ui()
             self._append_log("已重新生成连接访问码。")
 
         _run_async(run, done)

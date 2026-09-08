@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import html
 import json
 import os
 import re
+import secrets
 import shlex
 import threading
 import time
@@ -34,6 +34,7 @@ from contextlib import asynccontextmanager, suppress
 from email.utils import formatdate
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlencode
 
 import httpx
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
@@ -339,6 +340,7 @@ _SSE_KEEPALIVE_SECONDS = 12.0
 _MAX_AFFINITY_ENTRIES = 16_384
 _MAX_WORKSPACE_ROUTE_ENTRIES = 512
 _MAX_WORKSPACE_REHYDRATE_INFLIGHT = 64
+_URL_ACCESS_CODE_PARAMS = frozenset({"token", "key"})
 
 
 def _remember_bounded_affinity(mapping: dict[str, str], key: str, value: str) -> None:
@@ -595,7 +597,46 @@ def _row(label: str, value: str) -> str:
 
 
 def _constant_time_eq(left: str, right: str | None) -> bool:
-    return bool(right) and hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+    return bool(right) and secrets.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _extract_mcp_access_code(request: Request) -> tuple[str, str]:
+    """Return the authoritative MCP credential source and value.
+
+    A Bearer header wins over every URL value, including when it is empty or
+    invalid, so a malformed client header can never silently fall back to a
+    query capability. ``token`` is the canonical No Auth connector parameter;
+    ``key`` remains a compatibility alias. Ambiguous or blank URL values are
+    represented as an empty query credential and fail closed at the caller.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return "header", auth_header[7:].strip()
+
+    values: list[str] = []
+    found = False
+    for name, value in request.query_params.multi_items():
+        if name.casefold() not in _URL_ACCESS_CODE_PARAMS:
+            continue
+        found = True
+        if not value:
+            return "query", ""
+        values.append(value)
+    if not found:
+        return "none", ""
+    if len(set(values)) != 1:
+        return "query", ""
+    return "query", values[0]
+
+
+def _upstream_query_without_access_code(request: Request) -> str:
+    """Preserve ordinary query parameters but never proxy URL capabilities."""
+    pairs = [
+        (name, value)
+        for name, value in request.query_params.multi_items()
+        if name.casefold() not in _URL_ACCESS_CODE_PARAMS
+    ]
+    return urlencode(pairs, doseq=True)
 
 
 def _rewrite_server_identity(payload: bytes) -> bytes:
@@ -1318,10 +1359,55 @@ class OAuthGateway:
 
     # ------------------------------------------------------------- /mcp
     async def _mcp_endpoint(self, request: Request) -> Response:
-        body = await request.body()
-        auth_header = request.headers.get("authorization", "")
-        bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        credential_source, bearer = _extract_mcp_access_code(request)
         engine_credential = self.upstream_token_source()
+        proxy_token: str | None = None
+        workspace_id = ""
+        authenticated_workspace = ""
+        upstream_target: str | None = None
+        if credential_source in {"header", "query"}:
+            if not bearer:
+                return self._unauthorized()
+            if credential_source == "query":
+                # URL capabilities are deliberately narrower than Header Bearer:
+                # only the current Hub access code is valid here, never OAuth or
+                # a project/device/upstream credential.
+                if not _constant_time_eq(bearer, engine_credential):
+                    return self._unauthorized()
+                proxy_token = engine_credential
+            elif _constant_time_eq(bearer, engine_credential):
+                proxy_token = engine_credential or bearer
+            else:
+                # OAuth is the normal public-connector credential. Resolve it before the
+                # backward-compatible per-project bearer scan so a slow native credential
+                # store cannot stall every OAuth request on the Gateway event loop.
+                record = await self._provider.load_access_token(bearer)
+                if record is not None:
+                    if record.resource and record.resource.rstrip("/") != self.resource_url:
+                        return self._unauthorized()
+                    workspace_id = _workspace_from_subject(record.subject or "")
+                    proxy_token = engine_credential
+                    if not proxy_token and self._workspace_registry is None:
+                        return self._unauthorized()
+                else:
+                    authenticated_workspace = await asyncio.to_thread(
+                        self._workspace_for_credential, bearer
+                    )
+                    if not authenticated_workspace:
+                        return self._unauthorized()
+                    # A project bearer remains a backward-compatible fallback, but path/task
+                    # routing may override it so the credential never becomes a routing fence.
+                    workspace_id = authenticated_workspace
+                    proxy_token = engine_credential or bearer
+        elif self.allow_local_anonymous and _is_loopback(request):
+            proxy_token = None
+        else:
+            return self._unauthorized()
+
+        # Authenticate before consuming a JSON-RPC body or allocating an SSE
+        # upstream stream. This keeps URL-capability failures cheap and lets the
+        # existing proxy retain its normal POST/GET semantics after validation.
+        body = await request.body()
         session_id = self._extract_session_id(request)
 
         jsonrpc_method = ""
@@ -1351,40 +1437,6 @@ class OAuthGateway:
                 project_id=route_workspace_id,
                 device_id=route_device_id,
             )
-
-        proxy_token: str | None = None
-        workspace_id = ""
-        authenticated_workspace = ""
-        upstream_target: str | None = None
-        if bearer:
-            if _constant_time_eq(bearer, engine_credential):
-                proxy_token = engine_credential or bearer
-            else:
-                # OAuth is the normal public-connector credential. Resolve it before the
-                # backward-compatible per-project bearer scan so a slow native credential
-                # store cannot stall every OAuth request on the Gateway event loop.
-                record = await self._provider.load_access_token(bearer)
-                if record is not None:
-                    if record.resource and record.resource.rstrip("/") != self.resource_url:
-                        return self._unauthorized()
-                    workspace_id = _workspace_from_subject(record.subject or "")
-                    proxy_token = engine_credential
-                    if not proxy_token and self._workspace_registry is None:
-                        return self._unauthorized()
-                else:
-                    authenticated_workspace = await asyncio.to_thread(
-                        self._workspace_for_credential, bearer
-                    )
-                    if not authenticated_workspace:
-                        return self._unauthorized()
-                    # A project bearer remains a backward-compatible fallback, but path/task
-                    # routing may override it so the credential never becomes a routing fence.
-                    workspace_id = authenticated_workspace
-                    proxy_token = engine_credential or bearer
-        elif self.allow_local_anonymous and _is_loopback(request):
-            proxy_token = None
-        else:
-            return self._unauthorized()
 
         if rpc is not None and jsonrpc_method == "tools/list":
             payload = _stable_tools_list_payload(rpc.get("id"))
@@ -1614,8 +1666,9 @@ class OAuthGateway:
     ) -> Response:
         base = upstream_target or self.upstream_url
         target = f"{base}{request.url.path}"
-        if request.url.query:
-            target = f"{target}?{request.url.query}"
+        upstream_query = _upstream_query_without_access_code(request)
+        if upstream_query:
+            target = f"{target}?{upstream_query}"
         headers = {
             key: value for key, value in request.headers.items() if key.lower() not in _HOP_HEADERS
         }
@@ -3269,10 +3322,7 @@ class OAuthGateway:
     # ----------------------------------------------------------- helper
     def _unauthorized(self) -> Response:
         return JSONResponse(
-            {
-                "error": "unauthorized",
-                "message": "需要 OAuth access token 或有效的 Bearer 访问令牌。",
-            },
+            {"error": "Unauthorized"},
             status_code=401,
             headers={
                 "WWW-Authenticate": (

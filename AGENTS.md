@@ -193,7 +193,7 @@ OAuth/Bearer Gateway (loopback)
 ## 5. 安全与密钥
 
 - 引擎、Gateway、legacy backend 默认只绑定 loopback；公网只能经明确 tunnel。
-- 公开 URL 与凭据分离。禁止把 Bearer、OAuth secret、Cloudflare token 拼进 URL、日志或仓库。
+- 公开 URL 与凭据默认分离。Bearer、OAuth secret、Cloudflare token 不得拼进 URL、日志或仓库。**唯一受控兼容例外**是用户主动复制给受信任个人 OpenAI/ChatGPT `No Auth` connector 的 Hub URL capability：仅 `/mcp?token=<Hub access code>`（兼容别名 `key`）、仅当前 Hub access code、Header Bearer 优先、恒定时间比对、入口验证后立即从上游 URL 剥离、不得写入应用日志/仓库/普通配置，并且“重新生成访问码”必须立即使历史 capability 失效。不得把 OAuth、项目、设备、Tunnel 或管理员凭据做成 URL capability；无名称 raw query、重复冲突值或其它 URL secret 一律拒绝。
 - Windows：优先 Windows Credential Manager，兼容 DPAPI fallback。
 - Linux/SteamOS：优先 desktop secret service；fallback 为用户配置目录 AES-GCM，加密 key/密文限制用户权限。
 - 新项目桌面默认仍为 `system + full_system`（完全访问，危险），首次实际启用需一次风险确认；Windows 管理员能力另需一次正规 UAC broker 授权。
