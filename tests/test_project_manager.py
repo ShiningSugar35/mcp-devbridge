@@ -373,12 +373,18 @@ def test_parallel_real_engines(real_manager: tuple[ProjectManager, Path]) -> Non
 
     proj_a = pm.add(str(tmp / "projA"))
     proj_b = pm.add(str(tmp / "projB"))
-    # The desktop bridge may be running on production ports while tests execute.
-    # Use isolated test ports so the suite never interferes with the active MCP session.
-    proj_a.codexpro_port = 19787
-    proj_b.codexpro_port = 19788
-    proj_a.windows_bridge_port = 29731
-    proj_b.windows_bridge_port = 29732
+    # Reserve distinct OS-selected ports; never evict another test or service.
+    import contextlib
+    import socket
+
+    with contextlib.ExitStack() as reservations:
+        sockets = [reservations.enter_context(socket.socket()) for _ in range(4)]
+        for listener in sockets:
+            listener.bind(("127.0.0.1", 0))
+        ports = [listener.getsockname()[1] for listener in sockets]
+        proj_a.codexpro_port, proj_b.codexpro_port = ports[:2]
+        proj_a.windows_bridge_port, proj_b.windows_bridge_port = ports[2:]
+    # Engines own their listeners, so release reservations immediately before spawn.
     pm.reconfigure(proj_a)
     pm.reconfigure(proj_b)
     try:

@@ -2,6 +2,14 @@
 
 All dates are local development dates.
 
+## 0.8.9.1 (2026-09-08) — owner-authorized same-version replacement
+
+- Preserve the exact product version `0.8.9.1`. The owner explicitly authorized replacing this release/tag and the local installation after validation. Preserve all prior artifacts, tag/source metadata and checksums for rollback; identify the replacement by its source commit, workflow run and asset SHA-256 in `release-provenance.json`. Other historical versions are unchanged. Semantic-version-only update discovery does not automatically detect this replacement on other computers.
+- Retain the initial 0.8.9.1 protocol/authentication boundary fixes, immutable 50-tool catalog serialization cache, bounded diagnostic logs, four-segment version support, broker observation recovery and installation-scoped process ownership checks.
+- Move blocking local commands and shell diagnostics off the shared HTTP event loop into a lazy executor with four process-wide admission slots. Cancellation of an HTTP waiter does not release a still-running worker slot or replay a side effect. Shutdown closes admission; replacement Gateways share the same active-operation ceiling. Recheck call-stage permissions when the worker begins executing.
+- Correct local tool audit outcomes and MCP `isError` for failed/timed-out commands. Bound shell diagnostics by a shared 20-second probe budget and a three-second per-probe limit; avoid duplicate shell version probes. Use OS-assigned integration-test ports and preserve the independent original concurrency counterexamples.
+- This repair does not assert a unique cause for an uncorrelated ChatGPT stream-recovery error, a lifetime leak-free guarantee, or a completed rewrite of all subprocess output capture.
+
 ## 0.8.9-fixed (2026-09-08) — repair release; package version `0.8.9.post1`
 
 - Add a deliberately narrow personal OpenAI/ChatGPT `No Auth` compatibility path: the desktop can copy `/mcp?token=<Hub-access-code>` (with `key` as a legacy alias), Header Bearer stays authoritative, URL codes use constant-time validation before JSON-RPC/SSE work begins, and query credentials are stripped before upstream proxying. The copied URL is password-equivalent and access-code rotation revokes it.

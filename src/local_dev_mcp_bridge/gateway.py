@@ -58,6 +58,8 @@ from .device_hub import DeviceRegistry
 from .flight_recorder import FlightRecorder
 from .gateway_diagnostics import scrub_body, write_entry
 from .gateway_protocol import McpRequestError, parse_mcp_envelope, read_mcp_body
+from .gateway_shell_probe import shell_self_test
+from .gateway_workers import LocalToolBusy, LocalToolWorkers
 from .hub_tool_contract import (
     HUB_TOOL_CONTRACT_FINGERPRINT,
     HUB_TOOL_CONTRACT_VERSION,
@@ -65,10 +67,9 @@ from .hub_tool_contract import (
     load_codexpro_full_tool_contract,
 )
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
-from .platform_support import run_platform_kwargs
 from .routing_state import load_workspace_routes, save_workspace_routes
 from .secrets import SecretsStore
-from .shell import detect_binaries, get_shell_info, run_command, run_program
+from .shell import run_command, run_program
 
 _DEVICE_TOOL_NAMES = frozenset(
     {
@@ -1203,6 +1204,7 @@ class OAuthGateway:
             ),
             transport=transport,
         )
+        self._local_executor = LocalToolWorkers()
         self.app = self._build_app()
         self._server: Any | None = None
         self._thread: threading.Thread | None = None
@@ -1272,6 +1274,7 @@ class OAuthGateway:
             try:
                 yield
             finally:
+                self._local_executor.close()
                 if not self._http.is_closed:
                     await self._http.aclose()
 
@@ -1590,18 +1593,28 @@ class OAuthGateway:
                         _jsonrpc_error(rpc.get("id"), error_code, message)
                     )
             params = rpc.get("params") or {}
-            if tool_name in _DEVICE_TOOL_NAMES:
-                result = await self._exec_local_tool(
-                    tool_name, rpc, params, workspace_id, session_id
-                )
-                self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
-                return result
-            if remote is None and tool_name in _LOCAL_TOOL_NAMES:
-                result = await self._exec_local_tool(
-                    tool_name, rpc, params, workspace_id, session_id
-                )
-                self._audit_gateway_tool(request, rpc, tool_name, workspace_id, device_id, True)
-                return result
+            if tool_name in _DEVICE_TOOL_NAMES or (
+                remote is None and tool_name in _LOCAL_TOOL_NAMES
+            ):
+                local_started = time.monotonic()
+                success, error_type = False, "local_tool_error"
+                try:
+                    result = await self._exec_local_tool(
+                        tool_name, rpc, params, workspace_id, session_id
+                    )
+                    payload = json.loads(bytes(result.body))
+                    success = "error" not in payload and not payload.get("result", {}).get("isError")
+                    error_type = "" if success else "local_tool_error"
+                    return result
+                except asyncio.CancelledError:
+                    error_type = "waiter_cancelled_execution_unknown"
+                    raise
+                finally:
+                    self._audit_gateway_tool(
+                        request, rpc, tool_name, workspace_id, device_id, bool(success),
+                        duration_ms=int((time.monotonic() - local_started) * 1000),
+                        error_type=error_type,
+                    )
 
         if remote is None and rpc is not None and jsonrpc_method == "tools/call" and workspace_id:
             _effective_tool, effective_arguments = self._unwrap_codexpro_call(
@@ -2087,7 +2100,32 @@ class OAuthGateway:
         )
 
     # ---------------------------------------------------- local tools
+    @property
+    def _local_tool_workers(self) -> tuple[Any, ...]:
+        return self._local_executor.active
+
     async def _exec_local_tool(
+        self,
+        name: str,
+        rpc: dict[str, Any],
+        params: dict[str, Any],
+        workspace_id: str = "",
+        session_id: str = "",
+    ) -> JSONResponse:
+        if name not in {"run_command", "run_program", "shell_self_test"}:
+            return self._exec_local_tool_sync(name, rpc, params, workspace_id, session_id)
+        try:
+            return await self._local_executor.run(
+                lambda: self._exec_local_tool_sync(name, rpc, params, workspace_id, session_id)
+            )
+        except LocalToolBusy as exc:
+            return JSONResponse(_jsonrpc_error(rpc.get("id"), -32005, str(exc)))
+        except Exception as exc:
+            return JSONResponse(_jsonrpc_error(
+                rpc.get("id"), -32603, f"工具执行失败: {type(exc).__name__}"
+            ))
+
+    def _exec_local_tool_sync(
         self,
         name: str,
         rpc: dict[str, Any],
@@ -2100,6 +2138,12 @@ class OAuthGateway:
         workspace = self._resolve_workspace_path(workspace_id) or self._workspace or Path.cwd()
         system_access = self._workspace_permission_mode(workspace_id) == "system"
         try:
+            if name in {"run_command", "run_program", "shell_self_test"}:
+                # Permission may change after HTTP admission and before worker execution.
+                policy_error = self._workspace_tool_policy_error(name, arguments, workspace_id)
+                if policy_error is not None:
+                    _kind, code, message = policy_error
+                    return JSONResponse(_jsonrpc_error(rpc_id, code, message))
             if name == "run_command":
                 command = str(arguments.get("command", ""))
                 if not command.strip():
@@ -2133,7 +2177,10 @@ class OAuthGateway:
                     f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
                 )
                 return JSONResponse(
-                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]})
+                    _jsonrpc_result(rpc_id, {
+                        "content": [{"type": "text", "text": text}],
+                        "isError": bool(res.timed_out or res.exit_code != 0),
+                    })
                 )
             elif name == "run_program":
                 executable = str(arguments.get("executable", ""))
@@ -2170,41 +2217,15 @@ class OAuthGateway:
                     f"--- stdout ---\n{res.stdout}\n--- stderr ---\n{res.stderr}"
                 )
                 return JSONResponse(
-                    _jsonrpc_result(rpc_id, {"content": [{"type": "text", "text": text}]})
+                    _jsonrpc_result(rpc_id, {
+                        "content": [{"type": "text", "text": text}],
+                        "isError": bool(res.timed_out or res.exit_code != 0),
+                    })
                 )
             elif name == "shell_self_test":
-                lines: list[str] = []
-                info = get_shell_info()
-                default = info.get("default") or {}
-                if isinstance(default, dict):
-                    if default.get("executable"):
-                        lines.append(
-                            f"[✓] shell: {default.get('name', '?')} ({default.get('path', '?')})"
-                        )
-                    else:
-                        lines.append(f"[✗] shell: 不可执行 ({default.get('path', '?')})")
-                bin_versions = detect_binaries()
-                for tool in ("python", "git", "node", "npm"):
-                    ver = bin_versions.get(tool, "")
-                    symbol = "[✓]" if ver else "[✗]"
-                    lines.append(f"{symbol} {tool}: {ver or '未安装'}")
-                for tool in ("pytest", "pyright"):
-                    import subprocess as _sp
-
-                    try:
-                        r = _sp.run(
-                            ["python", "-m", tool, "--version"],
-                            capture_output=True,
-                            timeout=30,
-                            **run_platform_kwargs(),
-                        )
-                        out = r.stdout.decode("utf-8", errors="replace").strip().splitlines()
-                        lines.append(f"[✓] {tool}: {out[0] if out else 'ok'} (python -m {tool})")
-                    except Exception:
-                        lines.append(f"[✗] {tool}: 未安装或不可调用")
                 return JSONResponse(
                     _jsonrpc_result(
-                        rpc_id, {"content": [{"type": "text", "text": "\n".join(lines)}]}
+                        rpc_id, {"content": [{"type": "text", "text": shell_self_test()}]}
                     )
                 )
             elif name == "devbridge_list_workspaces":
@@ -3416,6 +3437,7 @@ class OAuthGateway:
             _write_diag_entry(event="gateway_http_close_failed", failure_type=type(failures[0]).__name__)
 
     def stop(self) -> None:
+        self._local_executor.close()
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:

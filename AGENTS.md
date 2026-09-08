@@ -1,6 +1,6 @@
 # AGENTS.md — MCP DevBridge 开发与维护指南
 
-本文件是仓库内 AI/Agent 与工程师的最高优先级开发入口。当前正式生产基线是 `v0.8.9-fixed`（annotated tag 解引用到 `09494dece0d6aec6a3735eee7e557c3c9f745ffb`，内部产品版本为 `0.8.9.post1`）；当前维护分支是 `release/v0.8.9-fixed`。历史 `v0.8.9` tag/Release 必须保持不动，且不得移动或改写任何已发布 tag/Release，也不得为了“补功能”把已经淘汰的多 Agent runtime 重新混回正式产品链。
+本文件是仓库内 AI/Agent 与工程师的开发入口。当前产品版本为 `0.8.9.1`，维护分支为 `release/v0.8.9.1`；正式已安装构建与发布源以 `进度验收.md` 的运行态证据及 Release provenance 为准。历史 `v0.8.9-fixed` / `v0.8.9` 保持不动，一般不得移动或改写已发布 tag/Release；唯一例外为本文件 §8 登记的 2026-09-08 所有者授权 `v0.8.9.1` 同版本重发。不得为了补功能把已经淘汰的多 Agent runtime 混回正式产品链。
 
 ## 1. 开工阅读顺序
 
@@ -258,6 +258,11 @@ bash scripts/build_linux.sh <VERSION>
 Linux release 以 Ubuntu 22.04 构建保持较旧 glibc 基线；SteamOS Desktop Mode 真机是额外兼容证据，不能用“未真机”掩盖 CI/构建失败。
 
 ## 8. 发布门
+
+### 2026-09-08 所有者单次授权：同版本重发 0.8.9.1
+
+用户已明确要求：将本轮新增修复验证通过后，替换线上及本机正在运行的 `0.8.9.1`，热更新安装并重发，版本号不前推。本裁决仅覆盖本轮 `v0.8.9.1` 的 tag/Release/资产，优先于本文件的一般不可改写要求；其它历史版本仍不可变。必须先保存旧 annotated tag 对象、源提交、Release 元数据、全部旧资产及 SHA-256，确认 GitHub 实际未启用 immutable 保护；新 Windows/Linux 资产必须同源构建通过。使用具名且带旧值核验的 tag 更新，不 force-push 分支；替换期间保留回滚副本，发布说明和 provenance 明示同版本重发及新旧 SHA。不得把版本未变化当作新包已安装，必须核对实际冻结 EXE 与新包哈希。更新前仍须所有根/全部 workspace active-task drain，不取消其它会话任务。
+
 
 任何版本发布前至少必须满足：
 
