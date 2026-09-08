@@ -22,6 +22,9 @@ WINDOWS_INSTALLER_PREFIX = "MCPDevBridge-Setup-"
 LINUX_PACKAGE_PREFIX = "MCPDevBridge-Linux-x86_64-"
 # Backward-compatible public name used by older callers/tests.
 INSTALLER_PREFIX = WINDOWS_INSTALLER_PREFIX
+_RELEASE_VERSION_RE = re.compile(
+    r"^v?(?P<base>\d+\.\d+\.\d+)(?:(?:\.post(?P<post>\d+))|(?P<fixed>-fixed))?$"
+)
 
 
 @dataclass(frozen=True)
@@ -38,8 +41,19 @@ class ReleaseInfo:
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
-    match = re.search(r"(\d+(?:\.\d+)+)", value or "")
-    return tuple(int(part) for part in match.group(1).split(".")) if match else (0,)
+    """Return a stable sort key for supported release and package identities.
+
+    ``vX.Y.Z-fixed`` is the one public repair-release label. It maps to the
+    PEP 440 package version ``X.Y.Z.post1`` so a base installation discovers
+    the repair but an already-updated post release does not offer it again.
+    Other prerelease/suffix formats remain ineligible for stable updates.
+    """
+    match = _RELEASE_VERSION_RE.fullmatch((value or "").strip())
+    if not match:
+        return (0,)
+    base = tuple(int(part) for part in match.group("base").split("."))
+    post = int(match.group("post") or ("1" if match.group("fixed") else "0"))
+    return (*base, post) if post else base
 
 
 def is_newer(latest: str, current: str) -> bool:
@@ -67,7 +81,7 @@ def _release_info_from_payload(payload: dict[str, object]) -> ReleaseInfo | None
     if bool(payload.get("draft")) or bool(payload.get("prerelease")):
         return None
     tag = str(payload.get("tag_name") or "").strip()
-    if not re.fullmatch(r"v?\d+\.\d+\.\d+", tag):
+    if version_tuple(tag) == (0,):
         return None
     version = tag.lstrip("v")
     assets = payload.get("assets") or []

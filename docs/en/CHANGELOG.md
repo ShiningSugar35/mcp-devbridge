@@ -2,6 +2,12 @@
 
 All dates are local development dates.
 
+## 0.8.9-fixed (2026-09-08) — repair release; package version `0.8.9.post1`
+
+- Add a deliberately narrow personal OpenAI/ChatGPT `No Auth` compatibility path: the desktop can copy `/mcp?token=<Hub-access-code>` (with `key` as a legacy alias), Header Bearer stays authoritative, URL codes use constant-time validation before JSON-RPC/SSE work begins, and query credentials are stripped before upstream proxying. The copied URL is password-equivalent and access-code rotation revokes it.
+- Publish the repair under external tag/release identity `v0.8.9-fixed`, while using PEP 440 package/runtime version `0.8.9.post1`. Stable update discovery treats this single `-fixed` label as the equivalent post release so `0.8.9` installs can discover it without accepting arbitrary prerelease suffixes.
+- Align the detail-retrieval smoke fixture with its existing full-mode 38-tool assertion; this changes only the isolated smoke child configuration, not product default tool mode or the Hub contract.
+
 ## 0.8.9 (2026-08-29) — long-running connection governance and forensic recovery
 
 - Harden shared Gateway/Tunnel startup and runtime recovery with bounded retry/backoff, transient DNS/network classification, cancellation-aware waits, responsibility-local restart, and Cloudflare auto→HTTP/2 fallback when connectivity evidence requires it; temporary public-path failure no longer tears down healthy local projects.

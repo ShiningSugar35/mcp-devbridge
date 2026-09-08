@@ -50,7 +50,7 @@ def _write_fixture(root: Path, *, versions: dict[str, str]) -> None:
 
 def test_current_repository_release_versions_match() -> None:
     helper = _load_helper()
-    result = helper.check_release_versions(REPO_ROOT, "0.8.9")
+    result = helper.check_release_versions(REPO_ROOT, "0.8.9.post1")
     assert result.ok
     assert result.mismatches == ()
     assert set(result.observed) == {
@@ -138,3 +138,25 @@ def test_cli_rejects_invalid_expected_version(value: str) -> None:
         encoding="utf-8",
     )
     assert completed.returncode == 2
+
+
+def test_cli_accepts_pep440_post_release_version(tmp_path: Path) -> None:
+    versions = {key: "0.8.9.post1" for key in ("pyproject", "package", "spec", "installer", "lock")}
+    _write_fixture(tmp_path, versions=versions)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(HELPER_PATH),
+            "--root",
+            str(tmp_path),
+            "--expected",
+            "0.8.9.post1",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode == 0, completed.stderr

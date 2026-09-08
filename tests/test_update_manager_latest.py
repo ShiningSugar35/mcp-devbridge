@@ -55,3 +55,22 @@ def test_fetch_latest_release_jumps_directly_to_highest_stable_platform_build(mo
     assert latest.tag == "v0.8.7"
     assert latest.asset_name == "MCPDevBridge-Setup-0.8.7.exe"
     assert updates.is_newer(latest.version, "0.8.4")
+
+
+def test_fixed_repair_release_is_newer_than_base_but_not_its_post_release(monkeypatch) -> None:
+    monkeypatch.setattr(updates, "IS_WINDOWS", True)
+    monkeypatch.setattr(updates, "IS_LINUX", False)
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", updates.RELEASES_API),
+        json=[_release("v0.8.9"), _release("v0.8.9-fixed")],
+    )
+    monkeypatch.setattr(updates.httpx, "get", lambda *args, **kwargs: response)
+
+    latest = updates.fetch_latest_release()
+
+    assert latest.tag == "v0.8.9-fixed"
+    assert latest.version == "0.8.9-fixed"
+    assert latest.asset_name == "MCPDevBridge-Setup-0.8.9-fixed.exe"
+    assert updates.is_newer(latest.version, "0.8.9")
+    assert not updates.is_newer(latest.version, "0.8.9.post1")

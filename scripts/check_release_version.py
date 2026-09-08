@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-_VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+_VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:\.post[0-9]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     expected = str(args.expected or "").strip()
     if not _VERSION_PATTERN.fullmatch(expected):
         print(
-            f"invalid expected release version: {expected!r}; use X.Y.Z or SemVer suffixes",
+            f"invalid expected release version: {expected!r}; use a PEP 440 X.Y.Z or X.Y.Z.postN version",
             file=sys.stderr,
         )
         return 2
