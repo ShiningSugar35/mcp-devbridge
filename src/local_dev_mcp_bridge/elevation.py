@@ -941,12 +941,17 @@ class ElevatedCodexProManager:
                 if not status.get("running"):
                     self._state = EngineState.ERROR
                     self._error = str(status.get("error") or "高权限 CodexPro 进程已退出。")
-                elif self._state == EngineState.STARTING:
-                    self._state = EngineState.READY
+                else:
+                    if self._state == EngineState.STARTING:
+                        self._state = EngineState.READY
+                    self._error = None
                 self._status_deadline = time.monotonic() + 0.25
             except RuntimeError as exc:
-                self._state = EngineState.ERROR
+                # A failed control-plane observation is not a confirmed child
+                # exit. Preserve the last state so the supervisor still checks
+                # the authenticated HTTP/MCP data plane before restarting.
                 self._error = str(exc)
+                self._status_deadline = time.monotonic() + 1.0
         return self._state
 
     @property

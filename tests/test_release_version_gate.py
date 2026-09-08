@@ -50,7 +50,7 @@ def _write_fixture(root: Path, *, versions: dict[str, str]) -> None:
 
 def test_current_repository_release_versions_match() -> None:
     helper = _load_helper()
-    result = helper.check_release_versions(REPO_ROOT, "0.8.9.post1")
+    result = helper.check_release_versions(REPO_ROOT, "0.8.9.1")
     assert result.ok
     assert result.mismatches == ()
     assert set(result.observed) == {

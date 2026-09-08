@@ -56,6 +56,8 @@ from .audit import AuditLogger
 from .constants import LOG_DIR as _LOG_DIR
 from .device_hub import DeviceRegistry
 from .flight_recorder import FlightRecorder
+from .gateway_diagnostics import scrub_body, write_entry
+from .gateway_protocol import McpRequestError, parse_mcp_envelope, read_mcp_body
 from .hub_tool_contract import (
     HUB_TOOL_CONTRACT_FINGERPRINT,
     HUB_TOOL_CONTRACT_VERSION,
@@ -373,6 +375,7 @@ _DIAG_SENSITIVE_KEYS = frozenset(
 _DIAG_SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "x-api-key"})
 _DIAG_BODY_MAX = 2048
 _DIAG_LOG_FILE: str = ""
+_DIAG_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _diag_log_path() -> Path:
@@ -389,19 +392,7 @@ def _diag_short_hash(value: str) -> str:
 
 
 def _diag_redact_body(body: bytes | str) -> str:
-    if not body:
-        return ""
-    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return text[:_DIAG_BODY_MAX]
-    if isinstance(data, dict):
-        data = dict(data)
-        for key in list(data):
-            if key.lower() in _DIAG_SENSITIVE_KEYS:
-                data[key] = "***REDACTED***"
-    return json.dumps(data, ensure_ascii=False, default=str)[:_DIAG_BODY_MAX]
+    return scrub_body(body)
 
 
 def _diag_redact_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -409,14 +400,8 @@ def _diag_redact_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def _write_diag_entry(**fields: Any) -> None:
-    entry = {**fields, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    line = json.dumps(entry, ensure_ascii=False, default=str) + "\n"
-    try:
-        p = _diag_log_path()
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(line)
-    except OSError:
-        pass
+    with suppress(OSError):
+        write_entry(_diag_log_path(), fields, max_bytes=_DIAG_MAX_BYTES)
 
 
 class UpstreamResponseTooLarge(RuntimeError):
@@ -609,9 +594,14 @@ def _extract_mcp_access_code(request: Request) -> tuple[str, str]:
     ``key`` remains a compatibility alias. Ambiguous or blank URL values are
     represented as an empty query credential and fail closed at the caller.
     """
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.lower().startswith("bearer "):
-        return "header", auth_header[7:].strip()
+    auth_headers = request.headers.getlist("authorization")
+    if auth_headers:
+        # Header presence is authoritative, including malformed credentials.
+        # Ambiguous or unsupported headers must not downgrade to a URL
+        # capability or to loopback anonymous access.
+        if len(auth_headers) != 1 or not auth_headers[0].lower().startswith("bearer "):
+            return "header", ""
+        return "header", auth_headers[0][7:].strip()
 
     values: list[str] = []
     found = False
@@ -906,6 +896,13 @@ def _build_stable_hub_tools() -> tuple[dict[str, Any], ...]:
 
 
 _STABLE_HUB_TOOLS = _build_stable_hub_tools()
+# Immutable wire data only; no user results, credentials, or request ids.
+_STABLE_HUB_RESULT_BYTES = json.dumps(
+    {"tools": _STABLE_HUB_TOOLS}, ensure_ascii=False, separators=(",", ":")
+).encode("utf-8")
+_STABLE_HUB_TOOLS_SUMMARY = _tools_response_summary(
+    b'{"result":' + _STABLE_HUB_RESULT_BYTES + b"}"
+)
 _STABLE_HUB_READ_ONLY_TOOLS = frozenset(
     str(tool.get("name") or "")
     for tool in _STABLE_HUB_TOOLS
@@ -919,13 +916,18 @@ _UPSTREAM_WAIT_GRACE_SECONDS = 10.0
 _UPSTREAM_WAIT_TASK_MAX_SECONDS = 120
 _UPSTREAM_LONG_RUN_STATUS_MAX_SECONDS = 60
 _UPSTREAM_BUFFER_MAX_BYTES = 8 * 1024 * 1024
+_MCP_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+_MCP_REQUEST_READ_SECONDS = 15.0
 
 
 def _stable_tools_list_payload(rpc_id: Any) -> bytes:
-    return json.dumps(
-        {"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": _STABLE_HUB_TOOLS}},
-        ensure_ascii=False,
-    ).encode("utf-8")
+    return b"".join((
+        b'{"jsonrpc":"2.0","id":',
+        json.dumps(rpc_id, ensure_ascii=True).encode("ascii"),
+        b',"result":',
+        _STABLE_HUB_RESULT_BYTES,
+        b"}",
+    ))
 
 
 def _jsonrpc_result(rpc_id: Any, result: Any) -> dict[str, Any]:
@@ -1407,22 +1409,22 @@ class OAuthGateway:
         # Authenticate before consuming a JSON-RPC body or allocating an SSE
         # upstream stream. This keeps URL-capability failures cheap and lets the
         # existing proxy retain its normal POST/GET semantics after validation.
-        body = await request.body()
+        try:
+            body = await read_mcp_body(
+                request, max_bytes=_MCP_REQUEST_MAX_BYTES,
+                timeout_seconds=_MCP_REQUEST_READ_SECONDS,
+            )
+            rpc = parse_mcp_envelope(body) if request.method == "POST" else None
+        except McpRequestError as exc:
+            return JSONResponse(
+                _jsonrpc_error(exc.rpc_id, exc.code, str(exc)), status_code=exc.status
+            )
         session_id = self._extract_session_id(request)
-
-        jsonrpc_method = ""
+        jsonrpc_method = str(rpc.get("method", "")) if rpc is not None else ""
         tool_name = ""
-        rpc: dict[str, Any] | None = None
-        if request.method == "POST":
-            try:
-                parsed = json.loads(body)
-                if isinstance(parsed, dict):
-                    rpc = parsed
-                    jsonrpc_method = str(parsed.get("method", ""))
-                    if jsonrpc_method == "tools/call":
-                        tool_name = str((parsed.get("params") or {}).get("name", ""))
-            except json.JSONDecodeError:
-                rpc = None
+        if rpc is not None and jsonrpc_method == "tools/call":
+            tool_name = str(rpc["params"]["name"])
+        rpc_id = rpc.get("id") if rpc is not None else None
 
         call_arguments = _tool_arguments(rpc.get("params") if rpc is not None else {})
         route_workspace_id = str(call_arguments.get(_ROUTE_WORKSPACE_ARG) or "").strip()
@@ -1440,7 +1442,7 @@ class OAuthGateway:
 
         if rpc is not None and jsonrpc_method == "tools/list":
             payload = _stable_tools_list_payload(rpc.get("id"))
-            tools_summary = _tools_response_summary(payload)
+            tools_summary = _STABLE_HUB_TOOLS_SUMMARY
             _write_diag_entry(
                 path=request.url.path,
                 method=request.method,
@@ -1466,12 +1468,12 @@ class OAuthGateway:
             )
             if self._device_registry is None:
                 if route_device_id != self._local_device_id:
-                    return JSONResponse(_jsonrpc_error(None, -32602, "指定电脑不存在。"))
+                    return JSONResponse(_jsonrpc_error(rpc_id, -32602, "指定电脑不存在。"))
             else:
                 target_view = next((view for view in views if view.id == route_device_id), None)
                 if target_view is None or not target_view.online:
                     return JSONResponse(
-                        _jsonrpc_error(None, -32001, "指定电脑当前不可用。"), status_code=502
+                        _jsonrpc_error(rpc_id, -32001, "指定电脑当前不可用。"), status_code=502
                     )
             device_id = route_device_id
             if session_id:
@@ -1486,7 +1488,7 @@ class OAuthGateway:
             if remote is None:
                 return JSONResponse(
                     _jsonrpc_error(
-                        None, -32001, "目标电脑当前离线。请用 devbridge_list_devices 查看在线设备。"
+                        rpc_id, -32001, "目标电脑当前离线。请用 devbridge_list_devices 查看在线设备。"
                     ),
                     status_code=502,
                 )
@@ -1497,7 +1499,7 @@ class OAuthGateway:
             if route_workspace_id:
                 if self._workspace_registry and not self._workspace_registry(route_workspace_id):
                     return JSONResponse(
-                        _jsonrpc_error(None, -32000, "指定工作区尚未启动或不存在。"),
+                        _jsonrpc_error(rpc_id, -32000, "指定工作区尚未启动或不存在。"),
                         status_code=502,
                     )
                 workspace_id = route_workspace_id
@@ -1545,7 +1547,7 @@ class OAuthGateway:
                 if not upstream_target:
                     return JSONResponse(
                         _jsonrpc_error(
-                            None,
+                            rpc_id,
                             -32000,
                             "目标工作区尚未运行。请先在 MCP DevBridge 桌面启动该根目录。",
                         ),
@@ -1770,6 +1772,39 @@ class OAuthGateway:
                 ), status_code=502,
             )
 
+        def unreachable_response(stage: str, error_type: str = "HTTPError") -> JSONResponse:
+            _write_diag_entry(
+                path=request.url.path, method=request.method,
+                jsonrpc_method=jsonrpc_method, tool_name=affinity_tool,
+                event="upstream_unreachable", stage=stage, error_type=error_type,
+                workspace_hash=_diag_short_hash(workspace_id),
+            )
+            audit_terminal(False, "upstream_unreachable")
+            return JSONResponse(
+                _jsonrpc_error(
+                    rpc.get("id") if rpc else None, -32001,
+                    "upstream connection failed; operation outcome may be unknown. "
+                    "Check effects before retrying a write; no write call was automatically replayed.",
+                ),
+                status_code=502,
+            )
+
+        async def buffer_response(
+            response: httpx.Response, stage: str, limit: int | None = None,
+        ) -> bytes | JSONResponse:
+            try:
+                return await _read_and_close_upstream(
+                    response, deadline_at=deadline_at,
+                    max_bytes=min(limit, _UPSTREAM_BUFFER_MAX_BYTES)
+                    if limit is not None else _UPSTREAM_BUFFER_MAX_BYTES,
+                )
+            except (TimeoutError, httpx.TimeoutException):
+                return deadline_response(stage)
+            except UpstreamResponseTooLarge:
+                return too_large_response(stage)
+            except httpx.HTTPError as exc:
+                return unreachable_response(stage, type(exc).__name__)
+
         async def send_once() -> httpx.Response:
             pending = self._http.send(
                 self._http.build_request(request.method, target, content=body, headers=headers),
@@ -1816,22 +1851,17 @@ class OAuthGateway:
                     upstream = await send_once()
                 except (TimeoutError, httpx.TimeoutException):
                     return deadline_response("safe_retry_headers")
-                except httpx.HTTPError:
-                    return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
+                except httpx.HTTPError as exc:
+                    return unreachable_response("safe_retry_headers", type(exc).__name__)
             else:
-                audit_terminal(False, "upstream_unreachable")
-                return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
+                return unreachable_response("response_headers", type(first_error).__name__)
         buffered_payload: bytes | None = None
         content_type = upstream.headers.get("content-type", "").lower()
         if request.method == "POST" and "application/json" in content_type:
-            try:
-                buffered_payload = await _read_and_close_upstream(
-                    upstream, deadline_at=deadline_at, max_bytes=_UPSTREAM_BUFFER_MAX_BYTES
-                )
-            except (TimeoutError, httpx.TimeoutException):
-                return deadline_response("response_body")
-            except UpstreamResponseTooLarge:
-                return too_large_response("response_body")
+            buffered = await buffer_response(upstream, "response_body")
+            if isinstance(buffered, JSONResponse):
+                return buffered
+            buffered_payload = buffered
         if workspace_handle.startswith("ws_") and upstream.status_code < 400:
             try:
                 content_length = int(upstream.headers.get("content-length") or "-1")
@@ -1842,15 +1872,12 @@ class OAuthGateway:
                 and ("json" in content_type or "text/event-stream" in content_type)
             ):
                 if buffered_payload is None:
-                    try:
-                        buffered_payload = await _read_and_close_upstream(
-                            upstream, deadline_at=deadline_at,
-                            max_bytes=_WORKSPACE_ERROR_INSPECT_MAX_BYTES,
-                        )
-                    except (TimeoutError, httpx.TimeoutException):
-                        return deadline_response("workspace_error_inspection")
-                    except UpstreamResponseTooLarge:
-                        return too_large_response("workspace_error_inspection")
+                    buffered = await buffer_response(
+                        upstream, "workspace_error_inspection", _WORKSPACE_ERROR_INSPECT_MAX_BYTES
+                    )
+                    if isinstance(buffered, JSONResponse):
+                        return buffered
+                    buffered_payload = buffered
                 workspace_error = self._extract_structured_field(buffered_payload, "error")
                 unknown_marker = f"Unknown workspace_id: {workspace_handle}"
                 if unknown_marker in workspace_error:
@@ -1888,8 +1915,8 @@ class OAuthGateway:
                         upstream = await send_once()
                     except (TimeoutError, httpx.TimeoutException):
                         return deadline_response("workspace_retry_headers")
-                    except httpx.HTTPError:
-                        return JSONResponse({"error": "upstream_unreachable"}, status_code=502)
+                    except httpx.HTTPError as exc:
+                        return unreachable_response("workspace_retry_headers", type(exc).__name__)
                     buffered_payload = None
         if buffered_payload is not None:
             audit_terminal(
@@ -1915,16 +1942,10 @@ class OAuthGateway:
                 if buffered_payload is not None:
                     payload = buffered_payload
                 else:
-                    try:
-                        payload = await _read_and_close_upstream(
-                            upstream,
-                            deadline_at=deadline_at,
-                            max_bytes=_UPSTREAM_BUFFER_MAX_BYTES,
-                        )
-                    except (TimeoutError, httpx.TimeoutException):
-                        return deadline_response("open_workspace_body")
-                    except UpstreamResponseTooLarge:
-                        return too_large_response("open_workspace_body")
+                    buffered = await buffer_response(upstream, "open_workspace_body")
+                    if isinstance(buffered, JSONResponse):
+                        return buffered
+                    payload = buffered
                     audit_terminal(
                         upstream.status_code < 400,
                         "" if upstream.status_code < 400 else f"http_{upstream.status_code}",
@@ -1950,16 +1971,10 @@ class OAuthGateway:
                 if buffered_payload is not None:
                     payload = buffered_payload
                 else:
-                    try:
-                        payload = await _read_and_close_upstream(
-                            upstream,
-                            deadline_at=deadline_at,
-                            max_bytes=_UPSTREAM_BUFFER_MAX_BYTES,
-                        )
-                    except (TimeoutError, httpx.TimeoutException):
-                        return deadline_response("bash_body")
-                    except UpstreamResponseTooLarge:
-                        return too_large_response("bash_body")
+                    buffered = await buffer_response(upstream, "bash_body")
+                    if isinstance(buffered, JSONResponse):
+                        return buffered
+                    payload = buffered
                     audit_terminal(
                         upstream.status_code < 400,
                         "" if upstream.status_code < 400 else f"http_{upstream.status_code}",
@@ -1969,13 +1984,13 @@ class OAuthGateway:
                     with self._session_lock:
                         _remember_bounded_affinity(self._task_workspaces, task_id, workspace_id)
                 return Response(content=payload, status_code=upstream.status_code, headers=filtered)
-            if b'"tools/list"' in body:
-                payload = (
-                    buffered_payload
-                    if buffered_payload is not None
-                    else await _read_and_close_upstream(upstream, deadline_at=deadline_at)
+            if jsonrpc_method == "tools/list":
+                buffered = buffered_payload if buffered_payload is not None else await buffer_response(
+                    upstream, "tools_list_body"
                 )
-                rewritten = _inject_tools(payload)
+                if isinstance(buffered, JSONResponse):
+                    return buffered
+                rewritten = _inject_tools(buffered)
                 tools_summary = _tools_response_summary(rewritten)
                 _write_diag_entry(
                     path=request.url.path,
@@ -1994,13 +2009,13 @@ class OAuthGateway:
                 return Response(
                     content=rewritten, status_code=upstream.status_code, headers=filtered
                 )
-            if b"initialize" in body:
-                payload = (
-                    buffered_payload
-                    if buffered_payload is not None
-                    else await _read_and_close_upstream(upstream, deadline_at=deadline_at)
+            if jsonrpc_method == "initialize":
+                buffered = buffered_payload if buffered_payload is not None else await buffer_response(
+                    upstream, "initialize_body"
                 )
-                rewritten = _rewrite_server_identity(payload)
+                if isinstance(buffered, JSONResponse):
+                    return buffered
+                rewritten = _rewrite_server_identity(buffered)
                 _write_diag_entry(
                     path=request.url.path,
                     method=request.method,

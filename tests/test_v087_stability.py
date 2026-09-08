@@ -133,6 +133,7 @@ def test_project_supervisor_recovers_only_desired_running_project(
 ) -> None:
     config_dir = tmp_path / "config"
     monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr("local_dev_mcp_bridge.constants.LOG_DIR", tmp_path / "logs")
     root = tmp_path / "project"
     root.mkdir()
     units: dict[str, _RecoverableUnit] = {}

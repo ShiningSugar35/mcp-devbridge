@@ -23,7 +23,7 @@ LINUX_PACKAGE_PREFIX = "MCPDevBridge-Linux-x86_64-"
 # Backward-compatible public name used by older callers/tests.
 INSTALLER_PREFIX = WINDOWS_INSTALLER_PREFIX
 _RELEASE_VERSION_RE = re.compile(
-    r"^v?(?P<base>\d+\.\d+\.\d+)(?:(?:\.post(?P<post>\d+))|(?P<fixed>-fixed))?$"
+    r"^v?(?P<base>\d+\.\d+\.\d+(?:\.\d+)?)(?:(?:\.post(?P<post>\d+))|(?P<fixed>-fixed))?$"
 )
 
 
@@ -52,8 +52,12 @@ def version_tuple(value: str) -> tuple[int, ...]:
     if not match:
         return (0,)
     base = tuple(int(part) for part in match.group("base").split("."))
-    post = int(match.group("post") or ("1" if match.group("fixed") else "0"))
-    return (*base, post) if post else base
+    if match.group("post") is None and not match.group("fixed"):
+        return base
+    post = int(match.group("post") or "1")
+    # Keep a fourth release component separate from the post-release rank.
+    # X.Y.Z.postN < X.Y.Z.1, including post0, and legacy -fixed == post1.
+    return (*base, *((0,) * (4 - len(base))), post + 1)
 
 
 def is_newer(latest: str, current: str) -> bool:
