@@ -74,6 +74,21 @@ function Get-ElevatedBrokerState {
     catch { return $null }
 }
 
+function Get-UpgradeOwnedProcesses {
+    param([string]$InstallRoot, [object[]]$Processes)
+    if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+        throw "Cannot establish the upgrade installation identity."
+    }
+    $expectedExe = [IO.Path]::GetFullPath((Join-Path $InstallRoot "MCPDevBridge.exe"))
+    return @($Processes | Where-Object {
+        $_.Name -ieq "MCPDevBridge.exe" -and $_.ExecutablePath -and
+        [string]::Equals(
+            [IO.Path]::GetFullPath([string]$_.ExecutablePath),
+            $expectedExe, [StringComparison]::OrdinalIgnoreCase
+        )
+    })
+}
+
 function Test-ResumeProjectReady {
     param([object]$Project, [object]$BrokerState)
     $root = [string]$Project.root
@@ -283,12 +298,29 @@ try {
         Write-UpgradeLog "No running project roots; update will restart only the desktop."
     }
     Start-Sleep -Seconds 2
-    $oldProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -ieq "MCPDevBridge.exe" }
+    $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $oldProcesses = @(Get-UpgradeOwnedProcesses -InstallRoot $installDir -Processes $snapshot)
+    if ($oldPidValue -le 0 -or @($oldProcesses | Where-Object {
+        [int]$_.ProcessId -eq $oldPidValue
+    }).Count -ne 1) {
+        throw "Upgrade parent is not an owned installation process."
+    }
+    # Only the selected desktop and this profile's recorded broker are owned.
+    # Another user's process or installation must never be stopped by name.
+    $ownedIds = @($oldPidValue)
+    $ownedBroker = Get-ElevatedBrokerState
+    if ($ownedBroker) { $ownedIds += [int]$ownedBroker.pid }
+    $oldProcesses = @($oldProcesses | Where-Object { $ownedIds -contains [int]$_.ProcessId })
     foreach ($proc in @($oldProcesses)) {
         $pidValue = [int]$proc.ProcessId
         if ($pidValue -le 0) { continue }
-        Write-UpgradeLog "Stopping old MCP DevBridge process tree: PID=$pidValue"
+        $current = @(Get-CimInstance Win32_Process -Filter ("ProcessId=" + $pidValue) -ErrorAction SilentlyContinue)
+        if ($current.Count -eq 0) { continue }
+        $confirmed = @(Get-UpgradeOwnedProcesses -InstallRoot $installDir -Processes $current)
+        if ($confirmed.Count -ne 1 -or $confirmed[0].CreationDate -ne $proc.CreationDate) {
+            throw "Upgrade process identity changed before stopping."
+        }
+        Write-UpgradeLog "Stopping owned MCP DevBridge process tree: PID=$pidValue"
         & taskkill.exe /PID $pidValue /T /F | Out-Null
     }
     if (@($oldProcesses).Count -gt 0) { Start-Sleep -Seconds 2 }

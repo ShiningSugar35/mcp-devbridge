@@ -65,6 +65,12 @@ CodexPro build成功；完整npm smoke任务 `94f80eee-2264-45d8-b064-6ff1d1f5e4
 - TypeScript SDK官方迁移：https://ts.sdk.modelcontextprotocol.io/v2/migration/support-2026-07-28
 - Python Packaging版本规范：https://packaging.python.org/en/latest/specifications/version-specifiers/
 
+## 升级停止范围补强
+
+执行前审查发现原 worker 按进程名全局停止 MCPDevBridge 实例。本轮改为核验当前安装目录的 exe，只选择指定桌面 PID 与当前配置记录的高权限 broker，并在停止前检查创建时间；未知目录、父进程不匹配或身份改变则拒绝继续，其他安装目录/无路径信息的进程不入选。纯筛选器与 PowerShell AST 反例3 failed→3 passed（`bd67c01b-8f80-4fb6-9d14-9af856f0229d`→`af1be3b5-3f3a-4d15-8d4b-03c68047ab28`），测试没有停止真实进程或运行安装器。
+
+首轮候选 `833792ad008079478bb53161a2464988a28c1618` 的 Actions `34188745711` Windows/Linux 均成功。最终发布重新构建包含停止范围修复的提交，不把旧候选资产作为最终资产。
+
 ## 正式发布与本地更新
 
 以执行后的提交、Actions同源构建、资产SHA-256、tag/Release、active-task drain与真实安装后验证记录为准；源码冻结时这些发布步骤尚未记录为完成。
