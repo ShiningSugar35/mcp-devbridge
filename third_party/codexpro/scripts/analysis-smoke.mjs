@@ -68,14 +68,15 @@ try {
   execFileSync('git', ['add', '--', 'large-diff.txt'], { cwd: tmp, stdio: 'pipe' });
   execFileSync('git', ['commit', '--quiet', '-m', 'fixture baseline'], { cwd: tmp, stdio: 'pipe' });
 
-  const [{ loadConfig }, { PathGuard, WorkspaceManager }, { inventoryWorkspace }, { extractWorkspaceFiles }, classification, analysisApi, { gitDiff }] = await Promise.all([
+  const [{ loadConfig }, { PathGuard, WorkspaceManager }, { inventoryWorkspace }, { extractWorkspaceFiles }, classification, analysisApi, { gitDiff }, searchApi] = await Promise.all([
     importBuilt('config.js'),
     importBuilt('guard.js'),
     importBuilt('analysis/inventory.js'),
     importBuilt('analysis/extract.js'),
     importBuilt('analysis/classify.js'),
     importBuilt('analysis/index.js'),
-    importBuilt('gitOps.js')
+    importBuilt('gitOps.js'),
+    importBuilt('searchOps.js')
   ]);
   const config = loadConfig(['--root', tmp, '--bash', 'off', '--write', 'off']);
   const guard = new PathGuard(config);
@@ -286,6 +287,53 @@ try {
   assert.equal(candidateLimited.matches.length, 2);
   assert.equal(candidateLimited.coverage.truncated, true);
   assert(candidateLimited.warnings.some((warning) => warning.includes('retained the first 8 candidates')));
+
+  const originalPath = process.env.PATH;
+  try {
+    // Force the portable Node lexical fallback; its directory walk must honor the same total budget.
+    process.env.PATH = '';
+    const normalLexical = await searchApi.searchWorkspace(
+      { ...config, analysisEnabled: false },
+      guard,
+      workspace,
+      { query: 'authenticate', root: 'src' }
+    );
+    assert.equal(normalLexical.used, 'node');
+    assert(normalLexical.matches.some((match) => match.path === 'src/auth.ts'));
+    assert.equal(normalLexical.warnings?.length ?? 0, 0);
+
+    const lexicalStarted = Date.now();
+    const boundedLexical = await searchApi.searchWorkspace(
+      { ...config, analysisEnabled: false },
+      guard,
+      workspace,
+      { query: 'definitely-not-present', root: 'deadline-scope', timeoutMs: 1 }
+    );
+    assert(Date.now() - lexicalStarted < 1_000, 'lexical deadline must fail soft well before the Gateway deadline');
+    assert.equal(boundedLexical.truncated, true);
+    assert(boundedLexical.warnings?.some((warning) => warning.includes('deadline')));
+
+    analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+    const structuredStarted = Date.now();
+    const boundedStructured = await searchApi.searchWorkspace(config, guard, workspace, {
+      query: 'deadlineMarker',
+      intent: 'text',
+      root: 'deadline-scope',
+      timeoutMs: 1
+    });
+    assert(Date.now() - structuredStarted < 1_000, 'lexical and structured search must share one total deadline');
+    assert(
+      boundedStructured.warnings?.some((warning) => warning.includes('deadline'))
+        || boundedStructured.analysis?.warnings.some((warning) => /deadline|cancel/i.test(warning)),
+      'deadline search must describe its fail-soft truncation'
+    );
+    for (let attempt = 0; attempt < 160 && analysisApi.analysisRuntimeSnapshot().inflight; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(analysisApi.analysisRuntimeSnapshot().inflight, 0, 'deadline search shared analysis must clean up within its own bounded lifetime');
+  } finally {
+    process.env.PATH = originalPath;
+  }
 
   await write(
     'large-diff.txt',

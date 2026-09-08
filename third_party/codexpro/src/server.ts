@@ -2028,7 +2028,7 @@ export function createCodexProServer(
         "openai/toolInvocation/invoked": "Workspace search complete"
       }
     },
-    async (args) => {
+    async (args, extra) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const result = await searchWorkspace(config, guard, workspace, {
         query: args.query,
@@ -2039,7 +2039,8 @@ export function createCodexProServer(
         maxResults: limitInt(args.max_results, config.maxSearchResults, 1, config.maxSearchResults),
         intent: args.intent,
         symbol: args.symbol,
-        includeTests: args.include_tests === undefined ? undefined : parseBool(args.include_tests, false)
+        includeTests: args.include_tests === undefined ? undefined : parseBool(args.include_tests, false),
+        signal: extra?.mcpReq?.signal
       });
       const structured: Record<string, unknown> = {
         workspace_id: workspace.id,
@@ -2048,6 +2049,7 @@ export function createCodexProServer(
         truncated: result.truncated,
         used: result.used
       };
+      if (result.warnings?.length) structured.warnings = result.warnings;
       if (result.analysis) structured.analysis = result.analysis;
       return textResult(result.text, structured);
     }

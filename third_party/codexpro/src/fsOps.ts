@@ -299,6 +299,8 @@ export async function listFiles(
     maxFiles: number;
     warnings?: string[];
     signal?: AbortSignal;
+    /** Optional streaming visitor. Return false to stop enumeration after this file. */
+    onFile?: (relativePath: string) => boolean | Promise<boolean>;
   }
 ): Promise<string[]> {
   options.signal?.throwIfAborted();
@@ -306,6 +308,7 @@ export async function listFiles(
   const stat = await fsp.stat(target.absPath);
   options.signal?.throwIfAborted();
   const files: string[] = [];
+  let stopped = false;
 
   async function addFile(absFile: string): Promise<void> {
     options.signal?.throwIfAborted();
@@ -314,11 +317,12 @@ export async function listFiles(
     if (!options.includeHidden && rel.split("/").some(isHiddenName)) return;
     if (options.glob && !minimatch(rel, options.glob, { dot: true })) return;
     files.push(rel);
+    if (options.onFile && !(await options.onFile(rel))) stopped = true;
   }
 
   async function walk(absDir: string): Promise<void> {
     options.signal?.throwIfAborted();
-    if (files.length >= options.maxFiles) return;
+    if (stopped || files.length >= options.maxFiles) return;
     let entries: fs.Dirent[];
     try {
       entries = await fsp.readdir(absDir, { withFileTypes: true });
@@ -339,7 +343,7 @@ export async function listFiles(
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       options.signal?.throwIfAborted();
-      if (files.length >= options.maxFiles) return;
+      if (stopped || files.length >= options.maxFiles) return;
       const abs = path.join(absDir, entry.name);
       const rel = displayPath(abs, workspace.root);
       if (guard.isBlockedRelativePath(rel)) continue;
