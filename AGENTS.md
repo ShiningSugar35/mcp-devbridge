@@ -1,6 +1,6 @@
 # AGENTS.md — MCP DevBridge 开发与维护指南
 
-本文件是仓库内 AI/Agent 与工程师的最高优先级开发入口。正式生产基线是 `v0.8.9`；当前修复研发分支是 `release/v0.8.9-fixed`，产品版本元数据仍保持 `0.8.9`，直到另行完成正式版本发布门。不得移动或改写已发布版本的 tag/Release，也不得为了“补功能”把已经淘汰的多 Agent runtime 重新混回正式产品链。
+本文件是仓库内 AI/Agent 与工程师的最高优先级开发入口。当前正式生产基线是 `v0.8.9-fixed`（annotated tag 解引用到 `09494dece0d6aec6a3735eee7e557c3c9f745ffb`，内部产品版本为 `0.8.9.post1`）；当前维护分支是 `release/v0.8.9-fixed`。历史 `v0.8.9` tag/Release 必须保持不动，且不得移动或改写任何已发布 tag/Release，也不得为了“补功能”把已经淘汰的多 Agent runtime 重新混回正式产品链。
 
 ## 1. 开工阅读顺序
 
