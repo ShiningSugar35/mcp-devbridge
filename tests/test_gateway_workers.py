@@ -114,17 +114,21 @@ async def test_http_cancel_records_uncertainty_without_freeing_worker(gateway, m
             await gateway._http.aclose()
 
 
+def test_local_tool_limit_is_five():
+    assert workers.LOCAL_TOOL_LIMIT == 5
+
+
 @pytest.mark.asyncio
 async def test_shutdown_and_replacement_retain_process_wide_capacity():
     old, new = workers.LocalToolWorkers(), workers.LocalToolWorkers()
     release = threading.Event()
-    futures = [old.submit(lambda: release.wait(5)) for _ in range(4)]
+    futures = [old.submit(lambda: release.wait(5)) for _ in range(5)]
     try:
         started = time.monotonic()
         old.close()
         old.close()
         assert time.monotonic() - started < 0.5
-        assert len(old.active) == 4
+        assert len(old.active) == 5
         with pytest.raises(workers.LocalToolBusy):
             old.submit(lambda: "not submitted")
         with pytest.raises(workers.LocalToolBusy):
@@ -162,9 +166,9 @@ async def test_submit_failure_releases_admission(monkeypatch):
         failed.close()
     healthy = workers.LocalToolWorkers()
     release = threading.Event()
-    futures = [healthy.submit(lambda: release.wait(5)) for _ in range(4)]
+    futures = [healthy.submit(lambda: release.wait(5)) for _ in range(5)]
     try:
-        assert len(healthy.active) == 4
+        assert len(healthy.active) == 5
     finally:
         release.set()
         await asyncio.gather(*(asyncio.wrap_future(f) for f in futures))

@@ -192,6 +192,25 @@ try {
   );
   assert(scopedInspect.files.every((file) => file.path.startsWith('packages/core/')));
 
+  // An explicit analysis timeout must govern BOTH the shared build and this waiter.
+  // The old implementation always restarted a 15s build timer even for a 25s caller.
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  {
+    const originalSetTimeout = globalThis.setTimeout;
+    const delays = [];
+    globalThis.setTimeout = function(callback, ms, ...args) {
+      delays.push(ms);
+      return originalSetTimeout(callback, ms, ...args);
+    };
+    try {
+      await analysisApi.inspectWorkspace(config, guard, workspace, 'packages/core', { timeoutMs: 25_000, buildTimeoutMs: 25_000 });
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+    assert(delays.filter((ms) => ms === 25_000).length >= 2, `analysis build/wait must both use25000ms, observed ${delays.join(',')}`);
+    assert(!delays.includes(15_000), `explicit search analysis budget must not restart legacy15s build timer: ${delays.join(',')}`);
+  }
+
   analysisApi.invalidateWorkspaceAnalysis(workspace.id);
   const scopedReview = await analysisApi.reviewWorkspaceChanges(config, guard, workspace, {
     changedPaths: ['src/auth.ts'],

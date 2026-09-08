@@ -80,15 +80,15 @@ async def test_cancelled_waiter_does_not_release_running_worker_capacity(gateway
         return result()
 
     monkeypatch.setattr(gm, "run_command", slow)
-    tasks = [asyncio.create_task(gateway._exec_local_tool("run_command", {"id": n}, params("run_command"))) for n in range(4)]
+    tasks = [asyncio.create_task(gateway._exec_local_tool("run_command", {"id": n}, params("run_command"))) for n in range(5)]
     try:
         for _ in range(100):
             with lock:
                 count = entered
-            if count == 4:
+            if count == 5:
                 break
             await asyncio.sleep(0.01)
-        assert entered == 4
+        assert entered == 5
         tasks[0].cancel()
         with pytest.raises(asyncio.CancelledError):
             await tasks[0]
@@ -96,7 +96,7 @@ async def test_cancelled_waiter_does_not_release_running_worker_capacity(gateway
         body = json.loads(overloaded.body)
         assert body["id"] == "busy"
         assert body["error"]["code"] == -32005
-        assert entered == 4  # Rejected calls never start or queue a command.
+        assert entered == 5  # Rejected calls never start or queue a command.
         release.set()
         await asyncio.gather(*tasks[1:])
         for _ in range(100):
@@ -106,7 +106,7 @@ async def test_cancelled_waiter_does_not_release_running_worker_capacity(gateway
         assert not gateway._local_tool_workers
         followup = await gateway._exec_local_tool("run_command", {"id": "next"}, params("run_command"))
         assert "result" in json.loads(followup.body)
-        assert entered == 5
+        assert entered == 6
     finally:
         release.set()
         await asyncio.gather(*tasks, return_exceptions=True)

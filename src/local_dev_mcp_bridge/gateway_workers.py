@@ -12,7 +12,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, TypeVar
 
-LOCAL_TOOL_LIMIT = 4
+LOCAL_TOOL_LIMIT = 5
 _PROCESS_SLOTS = threading.BoundedSemaphore(LOCAL_TOOL_LIMIT)
 _T = TypeVar("_T")
 

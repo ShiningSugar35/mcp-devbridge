@@ -9,14 +9,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const built = (name) => import(pathToFileURL(path.join(root, 'dist', name)).href);
-const [{ loadConfig }, { PathGuard, WorkspaceManager }, { searchWorkspace }] = await Promise.all([
-  built('config.js'), built('guard.js'), built('searchOps.js'),
+const [{ loadConfig }, { PathGuard, WorkspaceManager }, { searchWorkspace }, analysisApi] = await Promise.all([
+  built('config.js'), built('guard.js'), built('searchOps.js'), built('analysis/index.js'),
 ]);
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-search-deadline-'));
 const originalStat = fs.stat;
 const originalRead = fs.readFile;
 const originalSpawn = cp.spawn;
 let rgMode = false;
+let commandDelayMs = 0;
 let rgPid;
 let rgArgs;
 const fakeMatch = JSON.stringify({ type: 'match', data: {
@@ -24,7 +25,7 @@ const fakeMatch = JSON.stringify({ type: 'match', data: {
 } });
 cp.spawn = (name, args, options) => {
   if (name === 'where' || name === '/bin/sh') {
-    return originalSpawn(process.execPath, ['-e', `process.exit(${rgMode ? 0 : 1})`], options);
+    return originalSpawn(process.execPath, ['-e', `setTimeout(()=>process.exit(${rgMode ? 0 : 1}), ${commandDelayMs})`], options);
   }
   if (name === 'rg') {
     rgArgs = args;
@@ -43,6 +44,47 @@ try {
   config.analysisEnabled = false;
   const guard = new PathGuard(config);
   const workspace = new WorkspaceManager(config).defaultWorkspace();
+
+  // Default search policy is 30s. This observes the real timer without waiting for it.
+  {
+    const originalSetTimeout = globalThis.setTimeout;
+    const delays = [];
+    globalThis.setTimeout = function(callback, ms, ...args) {
+      delays.push(ms);
+      return originalSetTimeout(callback, ms, ...args);
+    };
+    try {
+      await searchWorkspace(config, guard, workspace, { query: 'needle', root: 'a-first.txt' });
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+    assert(delays.includes(30_000), `default search deadline must be 30000ms, observed ${delays.join(',')}`);
+  }
+
+  // Structured search starts after command discovery: its build/wait budget must use
+  // the OUTER deadline's remaining time, capped below 25s, not restart a full window.
+  {
+    analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+    commandDelayMs = 100;
+    const originalSetTimeout = globalThis.setTimeout;
+    const delays = [];
+    globalThis.setTimeout = function(callback, ms, ...args) {
+      delays.push(ms);
+      return originalSetTimeout(callback, ms, ...args);
+    };
+    try {
+      await searchWorkspace({ ...config, analysisEnabled: true }, guard, workspace, {
+        query: 'needle', root: 'a-first.txt', intent: 'text', timeoutMs: 1_000
+      });
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      commandDelayMs = 0;
+    }
+    assert(delays.includes(1_000), `outer test deadline missing: ${delays.join(',')}`);
+    const remainingBudgets = delays.filter((ms) => ms >= 300 && ms < 1_000);
+    assert(remainingBudgets.length >= 2, `structured build/wait must share remaining budget, observed ${delays.join(',')}`);
+    assert(!delays.includes(15_000), `search-triggered analysis must not restart the legacy15s build timer: ${delays.join(',')}`);
+  }
   fs.stat = async (...args) => {
     if (path.resolve(String(args[0])) === tmp) await delay(650);
     return originalStat(...args);

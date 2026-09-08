@@ -95,7 +95,7 @@ export async function inspectWorkspace(
       throw new Error(`Repository analysis is busy (${analysisInflight.size}/${MAX_ANALYSIS_INFLIGHT} active builds).`);
     }
     const controller = new AbortController();
-    const buildDeadlineMs = DEFAULT_ANALYSIS_DEADLINE_MS;
+    const buildDeadlineMs = boundedAnalysisDeadline(execution.buildTimeoutMs);
     const timer = setTimeout(() => controller.abort(new Error(`Repository analysis exceeded ${buildDeadlineMs}ms deadline.`)), buildDeadlineMs);
     timer.unref?.();
     shared = buildWorkspaceAnalysis(config, guard, workspace, normalizedRoot, controller.signal).finally(() => clearTimeout(timer));
@@ -126,7 +126,9 @@ export async function searchWorkspaceStructured(
   };
   assertSearchActive();
   const analysisRoot = options.includeTests ? "." : options.root?.trim() || ".";
-  const analysis = await inspectWorkspace(config, guard, workspace, analysisRoot, { signal: options.signal, timeoutMs: options.timeoutMs });
+  const analysis = await inspectWorkspace(config, guard, workspace, analysisRoot, {
+    signal: options.signal, timeoutMs: options.timeoutMs, buildTimeoutMs: options.timeoutMs
+  });
   assertSearchActive();
   const intent = classifySearchIntent(query, options.intent ?? "auto", options.regex);
   const groups = emptySearchGroups();
@@ -289,7 +291,10 @@ let analysisBuildsStarted = 0;
 
 export interface AnalysisExecutionOptions {
   signal?: AbortSignal;
+  /** Per-waiter budget. Does not shorten an already shared build. */
   timeoutMs?: number;
+  /** New-build budget. Omit to preserve the normal 15s analysis build default. */
+  buildTimeoutMs?: number;
 }
 
 export function analysisRuntimeSnapshot(): {

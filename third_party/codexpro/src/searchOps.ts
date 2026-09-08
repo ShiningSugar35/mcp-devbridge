@@ -33,7 +33,8 @@ export interface SearchResult {
   analysis?: StructuredSearchResult;
 }
 
-const SEARCH_DEADLINE_MS = 20_000;
+const SEARCH_DEADLINE_MS = 30_000;
+const STRUCTURED_SEARCH_DEADLINE_MS = 25_000;
 const SEARCH_INFLIGHT_LIMIT = 8;
 let activeSearches = 0;
 
@@ -216,6 +217,7 @@ export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, 
   const forwardAbort = () => controller.abort(new Error("Search cancelled by caller."));
   rawOptions.signal?.addEventListener("abort", forwardAbort, { once: true });
   if (rawOptions.signal?.aborted) forwardAbort();
+  const deadlineAt = Date.now() + timeoutMs;
   const timer = setTimeout(() => controller.abort(new Error(`Search exceeded shared ${timeoutMs}ms deadline.`)), timeoutMs);
   const result: SearchResult = { text: "", matches: [], truncated: false, used: "node", warnings: [] };
   const structuredRequested = rawOptions.intent !== undefined || rawOptions.symbol !== undefined || rawOptions.includeTests !== undefined;
@@ -236,7 +238,8 @@ export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, 
       try {
         result.analysis = await searchWorkspaceStructured(config, guard, workspace, {
           query, intent: options.intent ?? "auto", includeTests: Boolean(options.includeTests),
-          regex: options.regex, root: options.root, maxResults: options.maxResults, signal, timeoutMs: Math.min(timeoutMs, 15_000)
+          regex: options.regex, root: options.root, maxResults: options.maxResults, signal,
+          timeoutMs: Math.max(1, Math.min(STRUCTURED_SEARCH_DEADLINE_MS, deadlineAt - Date.now()))
         });
       } catch (error) {
         result.analysis = unavailableAnalysis(options, `Repository analysis unavailable: ${redactSensitiveText(error instanceof Error ? error.message : String(error))}`);
