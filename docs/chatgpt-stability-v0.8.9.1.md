@@ -6,7 +6,9 @@
 
 本轮确认并修复了 MCP 本地缺陷，而不能把所有 ChatGPT 错误一概归为 OpenAI。高权限 broker 的一次状态查询超时原先会永久标记引擎 ERROR，使 supervisor 跳过仍可能健康的 HTTP/MCP 数据面并重启该项目。真实 supervisor 日志在 2026-09-08 00:27:17–00:27:34 UTC 记录三个根因 broker TimeoutError 被重启，03:42:43 UTC 又出现两根一次失败。隔离反例复现该放大机制；修复后，查询失败保留最后确认状态并短退避重查，明确退出或真正的数据面连续失败仍进入原恢复路径。最初 broker 为什么超时尚无充分证据，不能把这个放大机制解释成所有超时的最初来源。
 
-本会话也观察到平台提示“因 OpenAI 无法确定请求的安全状态，已拦截此工具调用。”；该调用没有可读的进程结果，后续原生调用可用。它证明本次可见平台拦截，不能证明原截图与它同源，也不能单凭这句提示断言请求是否到达 Gateway。当前消息没有可用截图或对应时间，本轮不伪造截图诊断结论，不修改工具风险声明绕过平台检查。
+本会话也观察到平台提示“因 OpenAI 无法确定请求的安全状态，已拦截此工具调用。”；该调用没有可读的进程结果，后续原生调用可用。它证明本次可见平台拦截，不能单凭这句提示断言请求是否到达 Gateway，更不能把它与另一条流恢复超时报错混为一谈。
+
+本轮后段项目计划补充了准确报错字符串 `ChatGPT stream recovery polling timed out`；本执行流未直接取得截图图像或对应浏览器网络 trace。该字符串在本地 Python 产品源码与 CodexPro TypeScript 源码中精确搜索均为零命中。按文案可判断它描述 ChatGPT 客户端/宿主的会话流恢复轮询超时，而不是本项目直接定义并抛出的同名错误；但本地 MCP 断连、网络或平台端异常都可能成为上游触发因素，不能由文案单独证明唯一根因。本轮没有检索到 OpenAI 对该精确字符串的官方定义；官方通用故障指南也要求区分网络/浏览器/服务端因素，持续问题需带时间戳的网络和控制台证据（https://help.openai.com/en/articles/7996703-troubleshooting-chatgpt-error-messages）。因此不宣称已经彻底修复这条平台提示，不修改工具风险声明绕过平台检查。
 
 ## 已实施修复
 
@@ -73,4 +75,22 @@ CodexPro build成功；完整npm smoke任务 `94f80eee-2264-45d8-b064-6ff1d1f5e4
 
 ## 正式发布与本地更新
 
-以执行后的提交、Actions同源构建、资产SHA-256、tag/Release、active-task drain与真实安装后验证记录为准；源码冻结时这些发布步骤尚未记录为完成。
+正式 Release `v0.8.9.1` 已于 2026-09-08T05:38:05Z 发布为 latest，source/tag 为 `08ef5a8a7dd6b3f8e04d529b8808a648a59eb332`，同源 Actions 为 `34189621202`。Windows573 passed/3 skipped，Linux569 passed/7 skipped，双平台类型/Ruff/TS及正式安装载荷门通过；这些结果只覆盖具名冻结提交，不包括后来新增的并发反例。
+
+Windows安装器99,287,552B，SHA-256 `aea4bea498d5b49c373cd814b3a94a8b53e86c3a59e03881ff69056565711ada`；Linux包157,228,990B，SHA-256 `0dd3ceba648d0f2f72c690bdd57d08389042a0da7b6a516e89e2c731b38d8e70`。六项资产的远端digest/size与本地、CI一致；`release-provenance.json`和校验文件随Release发布，旧tag/资产未改写。
+
+本地于2026-09-08 **13:40:15 +08:00**完成原目录受控安装更新，不是零中断热替换。升级前枚举五引擎六workspace，确认其他任务全部终态，再交独立worker执行。`upgrade-result.json`记录ok=true、根恢复5/5、resume_consumed=true、管理员broker就绪；安装路径仍为`D:\Environment\mcp`，五个根及system权限保留。当前ChatGPT会话在短暂502后已经重新连接。
+
+已直接从实际安装EXE的冻结PYZ读取产品版本**0.8.9.1**，不是依赖源码的版本常量；EXE SHA `0e1f13618c653c489840af49e88c211f1949f87b9cac7c226a462d11712d206c`。安装内的升级脚本与审查源码hash相同。桌面PID12112、brokerPID33012。公网与loopback的URL/Header请求共四次均200且50工具fingerprint一致；正确URL加错误Bearer/Basic/空Header的六次请求均401。握手engine_version=0.29.0是CodexPro版本，不是桌面版本。真实读写自检为9pass/3warn/0fail，警告来自full bash和Git忽略目录中的写探针状态，不标成全项通过。
+
+## 安装后资源观察与尚未关闭的问题
+
+安装后两秒采样桌面RSS147.582MiB、13线程/793句柄，broker89.457MiB；安装前桌面198.480MiB、broker21.910MiB。缓存、进程生命周期和同期负载不同，不能据此宣称整体内存优化已达到某个比例，更不能把重启后内存下降当作泄漏修复证据。短采样CPU0.0%同样不代表长期零占用。
+
+`_internal`前后均2804文件，326,688,295→326,689,971B（约311.55MiB），五组重复dist-info仍存在。这次没有实际释放这些历史存量；落地的存储改进是约束今后Gateway诊断日志增长。没有盲删用户`installer/`、历史Release、额外进程或不能确认归属的依赖目录。
+
+**本轮全面审查不能标记PASS。** 收尾时读取到并发会话新增的 `tests/test_v0891_local_tool_concurrency.py`，本执行流复核源码并独立运行其中两项健康响应反例：任务`6951fbe8-68c5-4cf4-a842-99d1b6ae0e7c`结果 **2 failed / 2 deselected**。原因是 `_exec_local_tool` 在共享事件循环中同步执行 `run_command/run_program`，慢命令期间其他协程得不到调度。这项P1并未被此次发布修复，不能拿此前573项通过来覆盖新增失败，也不能据此把没有时间戳/trace的截图错误唯一归因到它。
+
+这一遗漏需要有界线程执行、取消等待后仍持有运行worker容量、异常与过载正确释放、权限/UAC及停止恢复验证；具体反例、方案和未完成门保留于`开发计划.md` §8.2.1。新测试未被覆盖/删除或偷偷加入已冻结发布；未重新移动tag或静默替换资产。当前耗时操作走既有`bash`加`wait_task/get_task`，不把需要回调同一Hub的脚本放在同步`run_program`中；这只是现有可用路径，不等于P1已经消失。
+
+因此，本轮准确状态为：**核心修复、正式发布、原目录安装及基本真实连接验证已完成；新增同步并发缺陷和原截图唯一根因尚未收口，最终总体审查非PASS。**
