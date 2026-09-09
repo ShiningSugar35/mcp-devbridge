@@ -28,7 +28,7 @@ The design combines patterns that converge across current platform and workflow 
 ### A. Request and stream liveness
 
 - Gateway SSE responses use a 12-second idle keepalive wrapper. DevBridge emits a comment-only frame only while the stream is at a complete SSE event boundary, so a JSON-RPC/SSE event split across network chunks can never be spliced by the keepalive. Upstream response ownership stays single-consumer.
-- `wait_task` emits request-tied progress notifications only when the MCP client supplied a `progressToken`. Without progress support one wait is capped at 30 seconds; with it, a request can wait up to 120 seconds and emits progress roughly every 8 seconds instead of leaving the request completely silent.
+- `wait_task` emits request-tied progress notifications only when the MCP client supplied a `progressToken`. Without progress support one wait is capped at 15 seconds; with it, a request can wait up to 120 seconds and emits progress roughly every 8 seconds instead of leaving the request completely silent. The 15-second no-progress cap limits only one status poll and never stops the background task; one response-header transport retry is allowed for this read-only status poll, while mutating tool calls remain non-replayed.
 - The long-lived GET notification stream is protected by the same Gateway SSE keepalive path.
 
 ### B. Reconnect/resume
