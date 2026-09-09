@@ -1850,7 +1850,14 @@ class OAuthGateway:
         except (TimeoutError, httpx.TimeoutException):
             return deadline_response("response_headers")
         except httpx.HTTPError as first_error:
-            safe_retry = request.method == "POST" and jsonrpc_method in {"initialize", "ping"}
+            # wait_task only observes an already-started background task and is read-only.
+            # A pooled loopback connection may die before response headers; one replay of
+            # this status poll cannot duplicate the underlying command. Mutations remain
+            # single-attempt because their outcome after a disconnect can be unknown.
+            safe_retry = request.method == "POST" and (
+                jsonrpc_method in {"initialize", "ping"}
+                or (jsonrpc_method == "tools/call" and affinity_tool == "wait_task")
+            )
             if safe_retry:
                 _write_diag_entry(
                     path=request.url.path,

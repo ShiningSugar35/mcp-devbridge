@@ -302,6 +302,59 @@ async def test_gateway_retries_one_safe_initialize_after_stale_connection(
 
 
 @pytest.mark.asyncio
+async def test_gateway_retries_read_only_wait_task_after_transient_read_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """wait_task is an idempotent status poll, so one stale read error is safe to replay."""
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    attempts = {"wait_task": 0}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        rpc = json.loads(request.content or b"{}")
+        if rpc.get("method") == "tools/call" and rpc.get("params", {}).get("name") == "wait_task":
+            attempts["wait_task"] += 1
+            if attempts["wait_task"] == 1:
+                raise httpx.ReadError("injected stale wait_task keepalive", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": rpc.get("id"),
+                    "result": {
+                        "content": [{"type": "text", "text": "running"}],
+                        "structuredContent": {"task_id": "fixture-task", "status": "running"},
+                    },
+                },
+            )
+        return httpx.Response(500, json={"error": "unexpected"})
+
+    gateway = OAuthGateway(
+        public_hostname="mcp.example.test",
+        upstream_url="http://upstream.test",
+        allow_local_anonymous=True,
+        transport=httpx.MockTransport(upstream),
+    )
+    transport = httpx.ASGITransport(app=gateway.app, client=("127.0.0.1", 12345))
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        response = await client.post(
+            "/mcp",
+            headers={"accept": "application/json, text/event-stream"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {
+                    "name": "wait_task",
+                    "arguments": {"task_id": "fixture-task", "wait_seconds": 30},
+                },
+            },
+        )
+    gateway.stop()
+    assert response.status_code == 200
+    assert attempts["wait_task"] == 2
+
+
+@pytest.mark.asyncio
 async def test_gateway_never_retries_side_effect_tools_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

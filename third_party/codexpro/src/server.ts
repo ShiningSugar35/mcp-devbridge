@@ -30,7 +30,10 @@ const TASK_DETAIL_COMMAND_PREVIEW_BYTES = 2_000;
 const TASK_LIST_MAX_ITEMS = 20;
 const TASK_LIST_COMMAND_PREVIEW_BYTES = 240;
 const WAIT_TASK_PROGRESS_HEARTBEAT_MS = 8_000;
-const WAIT_TASK_MAX_SECONDS_WITHOUT_PROGRESS = 30;
+// JSON-only clients cannot receive request-tied progress while a wait_task call is silent.
+// Keep each host-facing poll well below the 30s range observed in resume-stream incidents;
+// this limits only one status poll, never the background task execution itself.
+const WAIT_TASK_MAX_SECONDS_WITHOUT_PROGRESS = 15;
 const WAIT_TASK_MAX_SECONDS_WITH_PROGRESS = 120;
 const bashTasks = new BashTaskManager();
 
