@@ -40,7 +40,7 @@ ChatGPT / Gemini / MCP Client
 ### Windows
 
 1. 打开 [GitHub Releases](https://github.com/ShiningSugar35/mcp-devbridge/releases/latest)。
-2. 下载最新稳定版 `MCPDevBridge-Setup-<version>.exe`。`0.8.9.1` 使用一致的四段产品/安装包版本。旧 `v0.8.9-fixed` 的内部版本为 `0.8.9.post1`，其旧更新解析器不识别四段标签；首次升级到 `0.8.9.1` 需运行正式安装器，安装目录和配置保留。
+2. 下载最新稳定版 `MCPDevBridge-Setup-<version>.exe`。`0.8.9.2` 使用一致的四段产品/安装包版本；`0.8.9.1` 及更早四段版本可按正常版本顺序升级。旧 `v0.8.9-fixed` 的内部版本为 `0.8.9.post1`，其旧更新解析器不识别四段标签；若仍从该旧包直接升级，请运行当前正式安装器，安装目录和配置保留。
 3. 运行安装程序并选择安装目录。
 4. 启动 MCP DevBridge。
 

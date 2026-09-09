@@ -2,6 +2,13 @@
 
 All dates are local development dates.
 
+## 0.8.9.2 (2026-09-09) — long-task resume hardening
+
+- Harden the read-only `wait_task` observation path against one transient Gateway→CodexPro response-header failure: retry exactly once only for safe read-only wait calls (plus the existing initialize/ping recovery); never replay write or other side-effecting tools.
+- Reduce the no-progress long-poll observation window from roughly 30 seconds to 15 seconds while keeping background task lifetime independent from polling. When progress notifications are available, the longer progress-aware wait remains supported.
+- Preserve the stable 50-tool public catalog, route/permission boundaries, durable task facts and failure semantics. The patch does not claim control over ChatGPT host-side resume-stream state and does not identify MCP as the unique cause of an uncorrelated private host error.
+- Re-audit CPU/RSS/storage and complexity before release. The cached 50-tool catalog remains low-cost; process counts match the five active project engines plus bridge/tunnel. Record high-complexity Gateway functions, full-output subprocess capture and historical installed metadata as future work rather than mixing risky refactors or unproven deletions into this stability patch.
+
 ## 0.8.9.1 (2026-09-08) — owner-authorized same-version replacement
 
 - Preserve the exact product version `0.8.9.1`. The owner explicitly authorized replacing this release/tag and the local installation after validation. Preserve all prior artifacts, tag/source metadata and checksums for rollback; identify the replacement by its source commit, workflow run and asset SHA-256 in `release-provenance.json`. Other historical versions are unchanged. Semantic-version-only update discovery does not automatically detect this replacement on other computers.

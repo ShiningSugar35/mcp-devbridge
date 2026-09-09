@@ -154,7 +154,7 @@ def test_linux_build_version_gate_is_fail_closed_and_precedes_side_effects() -> 
     assert build_linux.index(gate) < build_linux.index("prepare_runtime_linux.sh")
 
     matching = subprocess.run(
-        [sys.executable, str(helper), "--expected", "0.8.9.1", "--root", str(root)],
+        [sys.executable, str(helper), "--expected", "0.8.9.2", "--root", str(root)],
         capture_output=True,
         text=True,
         check=False,
