@@ -100,21 +100,28 @@ class ProjectUnit:
     # ------------------------------------------------------------ state
     @property
     def state(self) -> EngineState:
+        # Project routing health is defined by the core CodexPro engine.
+        # Windows-MCP is an optional capability and must not make a healthy
+        # project disappear from the active-root registry. If the core is
+        # fully idle, however, a bridge stop failure must remain visible
+        # rather than pretending the whole ProjectUnit stopped cleanly.
         codex_state = self.codex.state
-        windows_state = self.windows.state
-        if codex_state in (EngineState.STARTING, EngineState.STOPPING, EngineState.ERROR):
+        if codex_state != EngineState.IDLE:
             return codex_state
-        if windows_state == EngineState.ERROR:
-            return EngineState.ERROR
-        if windows_state in (EngineState.STARTING, EngineState.STOPPING):
+        windows_state = self.windows.state
+        if windows_state in (EngineState.ERROR, EngineState.STOPPING):
             return windows_state
-        if codex_state == EngineState.READY:
-            return EngineState.READY
         return EngineState.IDLE
 
     @property
     def message(self) -> str | None:
-        return self.codex.error or self.windows.error
+        codex_error = self.codex.error
+        if codex_error:
+            return codex_error
+        windows_state = self.windows.state
+        if windows_state == EngineState.ERROR and self.windows.error:
+            return f"Windows 控制已降级：{self.windows.error}"
+        return None
 
     @property
     def is_running(self) -> bool:
@@ -180,20 +187,31 @@ class ProjectUnit:
         )
         if windows_enabled:
             assert windows_token is not None, "windows_enabled requires a windows token"
-            self.windows.start(windows_token)
-        else:
-            if self.windows.is_running:
-                self.windows.stop()
+            was_running = self.windows.is_running
+            try:
+                self.windows.start(windows_token)
+            except Exception as exc:  # noqa: BLE001 - optional bridge must not fail core start
+                if self.windows.state != EngineState.ERROR:
+                    self.windows._fail(
+                        f"Windows-MCP 启动失败：{type(exc).__name__}: {exc}"
+                    )
+            else:
+                if not was_running and self.windows.state == EngineState.STARTING:
+                    threading.Thread(
+                        target=self.windows.wait_ready,
+                        kwargs={"timeout_seconds": WINDOWS_START_TIMEOUT_SECONDS},
+                        name=f"MCPDevBridge-windows-ready-{self.project.id}",
+                        daemon=True,
+                    ).start()
+        elif self.windows.state != EngineState.IDLE or self.windows.is_running:
+            self.windows.stop()
 
     def wait_ready(self, timeout_seconds: float | None = None) -> bool:
-        if not self.codex.wait_ready(timeout_seconds=timeout_seconds):
-            return False
-        return not (
-            self.windows.is_running
-            and not self.windows.wait_ready(
-                timeout_seconds=timeout_seconds or WINDOWS_START_TIMEOUT_SECONDS
-            )
-        )
+        return self.codex.wait_ready(timeout_seconds=timeout_seconds)
+
+    def stop_codex(self, timeout_seconds: float = 8.0) -> None:
+        if self.codex.state != EngineState.IDLE or self.codex.is_running:
+            self.codex.stop(timeout_seconds=timeout_seconds)
 
     def stop(self, timeout_seconds: float = 8.0) -> None:
         errors: list[Exception] = []
@@ -544,7 +562,11 @@ class ProjectManager:
             )
             try:
                 if unit is not None:
-                    unit.stop()
+                    stop_codex = getattr(unit, "stop_codex", None)
+                    if callable(stop_codex):
+                        stop_codex()
+                    else:
+                        unit.stop()
                 project = self.get(project_id)
                 if project is None:
                     raise SpawnError(f"项目不存在：{project_id}")

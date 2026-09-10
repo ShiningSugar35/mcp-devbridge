@@ -425,3 +425,206 @@ def test_v081_drive_root_gets_nonempty_display_name(
     projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
     assert projects[0].display_name == "C:"
     assert load_projects()[0].display_name == "C:"
+
+
+
+def test_optional_windows_bridge_failure_does_not_override_core_project_state(
+    tmp_path: Path,
+) -> None:
+    from local_dev_mcp_bridge.project_manager import ProjectUnit
+
+    root = tmp_path / "bridge-state-project"
+    root.mkdir()
+    project = ProjectConfig(
+        id="bridge-state-project",
+        display_name="bridge-state-project",
+        root_path=str(root),
+        permission_mode="workspace",
+        codexpro_port=18787,
+        windows_bridge_port=28731,
+    )
+    unit = ProjectUnit(project, log_dir=tmp_path / "logs")
+
+    class FakeEngine:
+        def __init__(self, state: EngineState, error: str | None = None) -> None:
+            self.state = state
+            self.error = error
+            self.pid = 1234
+
+        @property
+        def is_running(self) -> bool:
+            return self.state in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
+
+    unit.codex = FakeEngine(EngineState.READY)
+    unit.windows = FakeEngine(EngineState.ERROR, "bridge failed")  # type: ignore[assignment]
+    assert unit.state == EngineState.READY
+
+
+def test_project_unit_ready_does_not_wait_for_optional_windows_bridge(
+    tmp_path: Path,
+) -> None:
+    from local_dev_mcp_bridge.project_manager import ProjectUnit
+
+    root = tmp_path / "bridge-wait-project"
+    root.mkdir()
+    project = ProjectConfig(
+        id="bridge-wait-project",
+        display_name="bridge-wait-project",
+        root_path=str(root),
+        permission_mode="workspace",
+        codexpro_port=18788,
+        windows_bridge_port=28732,
+    )
+    unit = ProjectUnit(project, log_dir=tmp_path / "logs")
+
+    class FakeCodex:
+        state = EngineState.READY
+        error = None
+        pid = 4321
+        is_running = True
+
+        def wait_ready(self, timeout_seconds: float | None = None) -> bool:
+            _ = timeout_seconds
+            return True
+
+    class FakeWindows:
+        state = EngineState.STARTING
+        error = None
+        is_running = True
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait_ready(self, timeout_seconds: float | None = None) -> bool:
+            _ = timeout_seconds
+            self.wait_calls += 1
+            return False
+
+    windows = FakeWindows()
+    unit.codex = FakeCodex()
+    unit.windows = windows  # type: ignore[assignment]
+    assert unit.wait_ready(timeout_seconds=0.1) is True
+    assert windows.wait_calls == 0
+
+
+def test_windows_start_failure_is_nonfatal_to_core_project_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_dev_mcp_bridge import project_manager
+    from local_dev_mcp_bridge.project_manager import ProjectUnit
+
+    root = tmp_path / "bridge-start-project"
+    root.mkdir()
+    project = ProjectConfig(
+        id="bridge-start-project",
+        display_name="bridge-start-project",
+        root_path=str(root),
+        permission_mode="workspace",
+        codexpro_port=18789,
+        windows_bridge_port=28733,
+    )
+    unit = ProjectUnit(project, log_dir=tmp_path / "logs")
+
+    class FakeCodex:
+        def __init__(self) -> None:
+            self.started = False
+            self.state = EngineState.IDLE
+            self.error = None
+            self.pid = 1111
+
+        @property
+        def is_running(self) -> bool:
+            return self.started
+
+        def start(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+            self.started = True
+            self.state = EngineState.STARTING
+
+    class FakeWindows:
+        state = EngineState.IDLE
+        error = None
+        is_running = False
+
+        def start(self, token: str) -> None:
+            _ = token
+            self.state = EngineState.ERROR
+            self.error = "port occupied"
+            raise SpawnError("Windows-MCP 本机端口 28733 已被其他进程占用。")
+
+    monkeypatch.setattr(project_manager, "IS_WINDOWS", True)
+    codex = FakeCodex()
+    unit.codex = codex
+    unit.windows = FakeWindows()  # type: ignore[assignment]
+    unit.start(
+        TOKEN,
+        permission_mode="workspace",
+        windows_token="w" * 32,
+        windows_enabled=True,
+        elevated=False,
+    )
+    assert codex.started is True
+    assert unit.windows.state == EngineState.ERROR
+
+
+def test_supervisor_core_recovery_does_not_full_stop_optional_windows_bridge(
+    manager: tuple[ProjectManager, Path],
+) -> None:
+    pm, tmp = manager
+    project = pm.add(str(tmp / "projA"))
+    project.windows_enabled = True
+    pm.update(project)
+    pm.start(project.id, codex_token=TOKEN, windows_token="w" * 32)
+    unit: Any = pm.unit(project.id)
+    assert unit is not None and unit.windows.started is True
+
+    calls: list[str] = []
+    original_stop = unit.stop
+
+    def stop_codex(timeout_seconds: float = 8.0) -> None:
+        _ = timeout_seconds
+        calls.append("codex")
+        unit.codex.started = False
+
+    def full_stop(timeout_seconds: float = 8.0) -> None:
+        calls.append("full")
+        original_stop(timeout_seconds=timeout_seconds)
+        unit.windows.started = False
+
+    unit.stop_codex = stop_codex
+    unit.stop = full_stop
+    pm._recover_project(project.id, "forced core recovery")
+    assert calls == ["codex"]
+    assert unit.windows.started is True
+
+
+
+def test_bridge_stop_error_remains_visible_after_core_is_idle(tmp_path: Path) -> None:
+    from local_dev_mcp_bridge.project_manager import ProjectUnit
+
+    root = tmp_path / "bridge-stop-error-project"
+    root.mkdir()
+    project = ProjectConfig(
+        id="bridge-stop-error-project",
+        display_name="bridge-stop-error-project",
+        root_path=str(root),
+        permission_mode="workspace",
+        codexpro_port=18790,
+        windows_bridge_port=28734,
+    )
+    unit = ProjectUnit(project, log_dir=tmp_path / "logs")
+
+    class FakeEngine:
+        def __init__(self, state: EngineState, error: str | None = None) -> None:
+            self.state = state
+            self.error = error
+            self.pid = 9191
+
+        @property
+        def is_running(self) -> bool:
+            return self.state in (EngineState.STARTING, EngineState.READY, EngineState.STOPPING)
+
+    unit.codex = FakeEngine(EngineState.IDLE)
+    unit.windows = FakeEngine(EngineState.ERROR, "tree cleanup failed")  # type: ignore[assignment]
+    assert unit.state == EngineState.ERROR
+    assert "Windows 控制已降级" in (unit.message or "")

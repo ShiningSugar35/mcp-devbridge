@@ -334,13 +334,13 @@ def kill_process_tree(pid: int) -> bool:
         return False
     if IS_WINDOWS:
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 timeout=30,
                 **run_platform_kwargs(),
             )
-            return True
+            return result.returncode == 0
         except Exception:
             return False
     try:

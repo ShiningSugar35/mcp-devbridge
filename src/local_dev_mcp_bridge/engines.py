@@ -36,7 +36,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from . import constants
-from .platform_support import popen_platform_kwargs, runtime_filename
+from .platform_support import IS_WINDOWS, popen_platform_kwargs, runtime_filename
 
 # 端口默认值集中维护（constants.DEFAULT_*_PORT）；下列为引擎层兼容别名。
 CODEXPRO_LOCAL_PORT = constants.DEFAULT_CODEXPRO_PORT
@@ -196,7 +196,40 @@ class BaseEngineProcess:
             except OSError:
                 pass
 
-    def stop(self, timeout_seconds: float = 8.0) -> None:
+    def stop(
+        self,
+        timeout_seconds: float = 8.0,
+        *,
+        terminate_descendants: bool = False,
+    ) -> None:
+        # Launcher-style processes such as uvx may have a live service several
+        # generations below them. On Windows, terminating only the launcher
+        # can orphan that service and leave its listener behind.
+        root_running = self._proc.poll() is None
+        if terminate_descendants and IS_WINDOWS:
+            # Never target a stale PID after the owned root has already exited.
+            # Windows can reuse process IDs, so descendant recovery without a live
+            # ownership anchor must fail safe rather than risk killing another app.
+            if not root_running:
+                return
+            from .shell import kill_process_tree
+
+            if not kill_process_tree(self._proc.pid):
+                raise RuntimeError(
+                    f"Failed to terminate owned process tree rooted at PID {self._proc.pid}."
+                )
+            try:
+                self._proc.wait(timeout=timeout_seconds)
+            except Exception as exc:
+                if self._proc.poll() is None:
+                    raise RuntimeError(
+                        f"Owned process tree rooted at PID {self._proc.pid} did not exit."
+                    ) from exc
+            if self._proc.poll() is None:
+                raise RuntimeError(
+                    f"Owned process tree rooted at PID {self._proc.pid} did not exit."
+                )
+            return
         if self._proc.poll() is not None:
             return
         try:
@@ -612,54 +645,105 @@ class WindowsBridgeManager(EngineManager):
         self.log_dir = Path(log_dir or constants.process_log_dir())
         self.port = port
         self.timeout = timeout_seconds
+        self._lifecycle_lock = threading.RLock()
 
     def start(self, token: str, extra_env: dict[str, str] | None = None) -> None:
-        if self.is_running:
-            return
-        if len(token or "") < 24:
-            self._fail("Windows 桥接令牌长度不足（至少 24 字节）。")
-            raise SpawnError("Windows 桥接令牌长度不足。")
-        cmd = [
-            self.executable,
-            "--from",
-            f"windows-mcp=={WINDOWS_MCP_PINNED_VERSION}",
-            "windows-mcp",
-            "serve",
-            "--transport",
-            "streamable-http",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(self.port),
-        ]
-        if port_listening(self.port):
-            self._fail(f"Windows-MCP 本机端口 {self.port} 已被其他进程占用。")
-            raise SpawnError(f"Windows-MCP 本机端口 {self.port} 已被其他进程占用。")
-        env = {
-            "ANONYMIZED_TELEMETRY": "false",
-            "WINDOWS_MCP_AUTH_KEY": token,
-            "PYTHONIOENCODING": "utf-8",
-            **(extra_env or {}),
-        }
-        self._set_state(EngineState.STARTING)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._spawn(cmd, env, (token,), self.log_dir / "windows_mcp.log")
+        with self._lifecycle_lock:
+            if self.is_running:
+                return
+            if len(token or "") < 24:
+                self._fail("Windows 桥接令牌长度不足（至少 24 字节）。")
+                raise SpawnError("Windows 桥接令牌长度不足。")
+            cmd = [
+                self.executable,
+                "--from",
+                f"windows-mcp=={WINDOWS_MCP_PINNED_VERSION}",
+                "windows-mcp",
+                "serve",
+                "--transport",
+                "streamable-http",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(self.port),
+            ]
+            if port_listening(self.port):
+                self._fail(f"Windows-MCP 本机端口 {self.port} 已被其他进程占用。")
+                raise SpawnError(f"Windows-MCP 本机端口 {self.port} 已被其他进程占用。")
+            env = {
+                "ANONYMIZED_TELEMETRY": "false",
+                "WINDOWS_MCP_AUTH_KEY": token,
+                "PYTHONIOENCODING": "utf-8",
+                **(extra_env or {}),
+            }
+            self._set_state(EngineState.STARTING)
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            self._spawn(cmd, env, (token,), self.log_dir / "windows_mcp.log")
 
-    def wait_ready(self, timeout_seconds: float | None = None) -> bool:
-        deadline = time.monotonic() + (timeout_seconds or self.timeout)
-        while time.monotonic() < deadline:
+    def _fail(self, message: str) -> None:
+        with self._lifecycle_lock:
+            self._set_state(EngineState.ERROR, message)
             proc = self._proc
             if proc is None:
-                return False
-            if not proc.is_running:
-                self._fail("Windows-MCP 进程提前退出。")
-                return False
+                return
+            try:
+                proc.stop(timeout_seconds=5, terminate_descendants=True)
+            except Exception as exc:
+                self._set_state(
+                    EngineState.ERROR,
+                    f"{message}；进程树清理失败：{type(exc).__name__}: {exc}",
+                )
+                proc.record_event(
+                    f"windows_tree_cleanup_failed pid={proc.pid} error={type(exc).__name__}"
+                )
+                return
+            if self._proc is proc:
+                self._proc = None
+
+    def wait_ready(self, timeout_seconds: float | None = None) -> bool:
+        with self._lifecycle_lock:
+            expected_proc = self._proc
+        if expected_proc is None:
+            return False
+        deadline = time.monotonic() + (timeout_seconds or self.timeout)
+        while time.monotonic() < deadline:
+            # A stop/start can replace the managed process while an older
+            # readiness waiter is still alive. A stale waiter must never
+            # publish state for, or terminate, the replacement generation.
+            with self._lifecycle_lock:
+                if self._proc is not expected_proc:
+                    return False
+                if not expected_proc.is_running:
+                    self._fail("Windows-MCP 进程提前退出。")
+                    return False
             if port_listening(self.port):
-                self._set_state(EngineState.READY)
-                return True
+                with self._lifecycle_lock:
+                    if self._proc is expected_proc:
+                        self._set_state(EngineState.READY)
+                        return True
+                    return False
             time.sleep(READY_POLL_INTERVAL_SECONDS)
-        self._fail(f"Windows-MCP 启动超时（{timeout_seconds or self.timeout} 秒）。")
+        with self._lifecycle_lock:
+            if self._proc is expected_proc:
+                self._fail(f"Windows-MCP 启动超时（{timeout_seconds or self.timeout} 秒）。")
         return False
+
+    def stop(self, timeout_seconds: float = 8.0) -> None:
+        with self._lifecycle_lock:
+            self._set_state(EngineState.STOPPING)
+            proc = self._proc
+            if proc is not None:
+                try:
+                    proc.stop(timeout_seconds=timeout_seconds, terminate_descendants=True)
+                except Exception as exc:
+                    self._set_state(
+                        EngineState.ERROR,
+                        f"Windows-MCP 进程树停止失败：{type(exc).__name__}: {exc}",
+                    )
+                    raise
+            if self._proc is proc:
+                self._proc = None
+            self._set_state(EngineState.IDLE)
 
 
 __all__ = [

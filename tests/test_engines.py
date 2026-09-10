@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import threading
 from pathlib import Path
 
 import pytest
@@ -234,3 +235,216 @@ class TestManagerErrors:
         manager = CodexProManager(node_exe="node")
         manager.stop()
         assert manager.state == EngineState.IDLE
+
+    def test_windows_bridge_stop_requests_owned_process_tree_cleanup(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.terminate_descendants = False
+
+            def stop(
+                self,
+                timeout_seconds: float = 8.0,
+                *,
+                terminate_descendants: bool = False,
+            ) -> None:
+                _ = timeout_seconds
+                self.terminate_descendants = terminate_descendants
+
+        manager = WindowsBridgeManager(uvx_exe="uvx")
+        fake = FakeProcess()
+        manager._proc = fake  # type: ignore[assignment]
+        manager._set_state(EngineState.READY)
+        manager.stop()
+        assert fake.terminate_descendants is True
+
+    def test_codex_stop_keeps_graceful_parent_only_default(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.terminate_descendants = False
+
+            def stop(
+                self,
+                timeout_seconds: float = 8.0,
+                *,
+                terminate_descendants: bool = False,
+            ) -> None:
+                _ = timeout_seconds
+                self.terminate_descendants = terminate_descendants
+
+        manager = CodexProManager(node_exe="node")
+        fake = FakeProcess()
+        manager._proc = fake  # type: ignore[assignment]
+        manager._set_state(EngineState.READY)
+        manager.stop()
+        assert fake.terminate_descendants is False
+
+
+    def test_windows_bridge_failure_requests_owned_process_tree_cleanup(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.terminate_descendants = False
+
+            def stop(
+                self,
+                timeout_seconds: float = 8.0,
+                *,
+                terminate_descendants: bool = False,
+            ) -> None:
+                _ = timeout_seconds
+                self.terminate_descendants = terminate_descendants
+
+        manager = WindowsBridgeManager(uvx_exe="uvx")
+        fake = FakeProcess()
+        manager._proc = fake  # type: ignore[assignment]
+        manager._set_state(EngineState.STARTING)
+        manager._fail("bridge failed")
+        assert fake.terminate_descendants is True
+        assert manager._proc is None
+        assert manager.state == EngineState.ERROR
+
+    def test_windows_bridge_stale_waiter_does_not_touch_replacement(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_dev_mcp_bridge import engines
+
+        class FakeProcess:
+            is_running = True
+
+        manager = WindowsBridgeManager(uvx_exe="uvx", timeout_seconds=0.05)
+        first = FakeProcess()
+        second = FakeProcess()
+        manager._proc = first  # type: ignore[assignment]
+        manager._set_state(EngineState.STARTING)
+        entered = threading.Event()
+        release = threading.Event()
+        results: list[bool] = []
+
+        def probe(_port: int) -> bool:
+            entered.set()
+            release.wait(timeout=1.0)
+            return False
+
+        monkeypatch.setattr(engines, "port_listening", probe)
+        waiter = threading.Thread(
+            target=lambda: results.append(manager.wait_ready(timeout_seconds=0.05)),
+            daemon=True,
+        )
+        waiter.start()
+        assert entered.wait(timeout=1.0)
+        manager._proc = second  # type: ignore[assignment]
+        manager._set_state(EngineState.STARTING)
+        release.set()
+        waiter.join(timeout=1.0)
+        assert results == [False]
+        assert manager._proc is second
+        assert manager.state == EngineState.STARTING
+
+
+    def test_tree_cleanup_does_not_target_exited_root_pid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_dev_mcp_bridge import engines, shell
+
+        class ExitedProcess:
+            pid = 424242
+
+            def poll(self) -> int:
+                return 0
+
+        wrapper = object.__new__(engines.BaseEngineProcess)
+        wrapper._proc = ExitedProcess()  # type: ignore[assignment]
+        calls: list[int] = []
+        monkeypatch.setattr(engines, "IS_WINDOWS", True)
+        monkeypatch.setattr(shell, "kill_process_tree", lambda pid: calls.append(pid) or True)
+        wrapper.stop(terminate_descendants=True)
+        assert calls == []
+
+
+    def test_tree_cleanup_failure_never_falls_back_to_parent_only_terminate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_dev_mcp_bridge import engines, shell
+
+        class RunningProcess:
+            pid = 515151
+
+            def __init__(self) -> None:
+                self.terminate_calls = 0
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def wait(self, timeout: float) -> None:
+                _ = timeout
+                raise TimeoutError("still running")
+
+        proc = RunningProcess()
+        wrapper = object.__new__(engines.BaseEngineProcess)
+        wrapper._proc = proc  # type: ignore[assignment]
+        monkeypatch.setattr(engines, "IS_WINDOWS", True)
+        monkeypatch.setattr(shell, "kill_process_tree", lambda _pid: False)
+        with pytest.raises(RuntimeError, match="process tree"):
+            wrapper.stop(terminate_descendants=True)
+        assert proc.terminate_calls == 0
+
+
+    def test_windows_bridge_failed_tree_cleanup_retains_process_ownership(self) -> None:
+        class FakeProcess:
+            pid = 626262
+
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            @property
+            def is_running(self) -> bool:
+                return True
+
+            def stop(
+                self,
+                timeout_seconds: float = 8.0,
+                *,
+                terminate_descendants: bool = False,
+            ) -> None:
+                _ = timeout_seconds, terminate_descendants
+                raise RuntimeError("tree cleanup failed")
+
+            def record_event(self, message: str) -> None:
+                self.events.append(message)
+
+        manager = WindowsBridgeManager(uvx_exe="uvx")
+        fake = FakeProcess()
+        manager._proc = fake  # type: ignore[assignment]
+        manager._set_state(EngineState.STARTING)
+        manager._fail("bridge failed")
+        assert manager._proc is fake
+        assert manager.state == EngineState.ERROR
+        assert fake.events and "windows_tree_cleanup_failed" in fake.events[-1]
+
+    def test_windows_bridge_explicit_stop_failure_retains_process_ownership(self) -> None:
+        class FakeProcess:
+            pid = 737373
+
+            @property
+            def is_running(self) -> bool:
+                return True
+
+            def stop(
+                self,
+                timeout_seconds: float = 8.0,
+                *,
+                terminate_descendants: bool = False,
+            ) -> None:
+                _ = timeout_seconds, terminate_descendants
+                raise RuntimeError("tree cleanup failed")
+
+        manager = WindowsBridgeManager(uvx_exe="uvx")
+        fake = FakeProcess()
+        manager._proc = fake  # type: ignore[assignment]
+        manager._set_state(EngineState.READY)
+        with pytest.raises(RuntimeError, match="tree cleanup failed"):
+            manager.stop()
+        assert manager._proc is fake
+        assert manager.state == EngineState.ERROR

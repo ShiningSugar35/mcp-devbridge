@@ -125,3 +125,19 @@ class TestShellHelpers:
         assert proc.poll() is None
         assert kill_process_tree(proc.pid)
         proc.wait(timeout=10)
+
+
+    def test_windows_taskkill_nonzero_is_reported_as_failure(
+        self, monkeypatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from local_dev_mcp_bridge import shell
+
+        monkeypatch.setattr(shell, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            shell.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=5),
+        )
+        assert shell.kill_process_tree(12345) is False
