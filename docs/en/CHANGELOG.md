@@ -2,6 +2,12 @@
 
 All dates are local development dates.
 
+## 0.8.9.4 (2026-09-10) — public tunnel precheck race repair
+
+- Repair a Cloudflare `auto` readiness race: a named tunnel no longer commits READY immediately on the first registered QUIC connection while the bundled cloudflared network precheck is still pending. It waits within the existing startup timeout budget for up to eight seconds; an explicit `suggested_protocol=http2` is then consumed by the existing bounded retry path so the next attempt uses `--protocol http2`. Older cloudflared builds that never emit a precheck marker still become ready when the caller's existing wait budget expires, and explicit HTTP/2 starts do not incur the auto-only grace.
+- Keep the incident attribution narrow. During the reported 2026-09-10 14:00–14:30 +08:00 ChatGPT-session failure window, the local Gateway observed no `/mcp` 401/403/429/5xx, no OAuth refresh endpoints, no tool-catalog drift, and no process/listener restart; it did observe one isolated public-MCP `Connection closed` shortly before the window while the local MCP path remained healthy. This patch removes a verified local transport reliability defect but does not claim that it caused ChatGPT's host-side “system disabled” state or that OpenAI risk controls were responsible.
+- Preserve OAuth and authorization policy unchanged. Current metadata continues to advertise `offline_access` and `refresh_token`, access/refresh issuance and rotation remain covered by tests, the stable 50-tool Hub contract is unchanged, and mutating tool calls are never automatically replayed.
+
 ## 0.8.9.3 (2026-09-10) — Windows control bridge contract repair
 
 - Distinguish per-project Windows control states explicitly: disabled projects perform no bridge probe, enabled projects require their own loopback endpoint and credential, and connection failures are reported separately from configuration/disabled states instead of falling through to another project's default port.

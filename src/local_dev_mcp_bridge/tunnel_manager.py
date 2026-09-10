@@ -27,6 +27,7 @@ NGROK_URL_RE = re.compile(
     r"https://[a-z0-9][a-z0-9.-]*\.(?:ngrok\.(?:app|io)|ngrok-free\.app)(?:/[a-z0-9/_-]*)?"
 )
 _CLOUDFLARE_PROTOCOLS = frozenset({"auto", "quic", "http2"})
+_CLOUDFLARE_AUTO_PRECHECK_GRACE_SECONDS = 8.0
 
 
 class ConnectionMethod(StrEnum):
@@ -198,6 +199,8 @@ class TunnelManager(EngineManager):
             self._set_state(EngineState.READY)
             return True
         deadline = time.monotonic() + (timeout_seconds or self.timeout)
+        pending_public_url = ""
+        auto_ready_seen_at: float | None = None
         while time.monotonic() < deadline:
             if self._ready_cancel.is_set():
                 return False
@@ -210,15 +213,11 @@ class TunnelManager(EngineManager):
                 self._fail("隧道进程提前退出。")
                 return False
             tail = proc.log.tail(200)
-            url = self._parse_public_url(tail)
-            if url:
-                self.public_url = url
-                self._set_state(EngineState.READY)
-                return True
-            if (
+            cloudflare_auto = (
                 self.kind == ConnectionMethod.CLOUDFLARE
                 and self._cloudflare_protocol == "auto"
-            ):
+            )
+            if cloudflare_auto:
                 protocol_hint = self._parse_cloudflare_protocol_hint(tail)
                 if protocol_hint:
                     self._recommended_protocol = protocol_hint
@@ -229,10 +228,38 @@ class TunnelManager(EngineManager):
                     )
                     self._last_exit_code = proc.returncode
                     return False
+            url = self._parse_public_url(tail)
+            if url:
+                pending_public_url = url
+                if cloudflare_auto and not self._cloudflare_precheck_complete(tail):
+                    now = time.monotonic()
+                    if auto_ready_seen_at is None:
+                        auto_ready_seen_at = now
+                    if now - auto_ready_seen_at < _CLOUDFLARE_AUTO_PRECHECK_GRACE_SECONDS:
+                        if self._ready_cancel.wait(READY_POLL_INTERVAL_SECONDS):
+                            return False
+                        continue
+                self.public_url = url
+                self._set_state(EngineState.READY)
+                return True
             if self._ready_cancel.wait(READY_POLL_INTERVAL_SECONDS):
                 return False
         if self._ready_cancel.is_set():
             return False
+        if pending_public_url:
+            # Compatibility fallback for older cloudflared builds that do not emit
+            # the network precheck marker: readiness never waits beyond the caller's
+            # existing timeout budget solely for the optional hint.
+            proc = self._proc
+            if proc is None or not proc.is_running:
+                if proc is not None:
+                    self._last_pid = proc.pid
+                    self._last_exit_code = proc.returncode
+                self._fail("隧道进程在 readiness 确认前退出。")
+                return False
+            self.public_url = pending_public_url
+            self._set_state(EngineState.READY)
+            return True
         proc = self._proc
         if proc is not None:
             self._last_pid = proc.pid
@@ -240,6 +267,10 @@ class TunnelManager(EngineManager):
         if proc is not None:
             self._last_exit_code = proc.returncode
         return False
+
+    @staticmethod
+    def _cloudflare_precheck_complete(tail: str) -> bool:
+        return "precheck complete" in tail.casefold()
 
     @staticmethod
     def _parse_cloudflare_protocol_hint(tail: str) -> str:
