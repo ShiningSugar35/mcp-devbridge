@@ -123,14 +123,16 @@ jobs:
           package=$(ls release/MCPDevBridge-Linux-x86_64-*.tar.gz)
           test -f "$package"
           sha256sum "$package"
-          rm -rf /tmp/mcp-release-check
-          mkdir -p /tmp/mcp-release-check
-          tar -xzf "$package" -C /tmp/mcp-release-check
-          test -x /tmp/mcp-release-check/MCPDevBridge/MCPDevBridge
-          test -x /tmp/mcp-release-check/MCPDevBridge/cloudflared
-          test -x /tmp/mcp-release-check/MCPDevBridge/_internal/runtime/node
-          test -x /tmp/mcp-release-check/MCPDevBridge/install.sh
-          test -x /tmp/mcp-release-check/MCPDevBridge/_internal/scripts/live_upgrade.sh
+          check_dir="$GITHUB_WORKSPACE/.ci-temp/mcp-release-check"
+          rm -rf "$check_dir"
+          mkdir -p "$check_dir"
+          trap 'rm -rf "$check_dir"' EXIT
+          tar -xzf "$package" -C "$check_dir"
+          test -x "$check_dir/MCPDevBridge/MCPDevBridge"
+          test -x "$check_dir/MCPDevBridge/cloudflared"
+          test -x "$check_dir/MCPDevBridge/_internal/runtime/node"
+          test -x "$check_dir/MCPDevBridge/install.sh"
+          test -x "$check_dir/MCPDevBridge/_internal/scripts/live_upgrade.sh"
       - name: Upload Linux / SteamOS package
         uses: actions/upload-artifact@v4
         with:

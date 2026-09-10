@@ -6,16 +6,54 @@ param(
     [string]$FallbackExe = "",
     [switch]$DryRun,
     [switch]$Worker,
-    [string]$RequestFile = ""
+    [string]$RequestFile = "",
+    [string]$ArtifactDirectory = "",
+    [switch]$PreserveShortcuts
 )
 
 $ErrorActionPreference = "Stop"
 $ConfigDir = Join-Path $env:LOCALAPPDATA "LocalDevMCPBridge"
-$LogFile = Join-Path $ConfigDir "upgrade.log"
+function Resolve-UpgradeArtifactDirectory {
+    param([string]$ProjectRoot, [string]$Directory)
+    if (-not $ProjectRoot -or -not $Directory) { throw "Explicit project and artifact directory are required." }
+    $root = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $target = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
+    if (-not $target.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Upgrade artifacts must be inside the selected project."
+    }
+    # Reject existing junction/symlink ancestors before creating anything.
+    $cursor = $target
+    while ($cursor -and $cursor.Length -ge $root.Length) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Upgrade artifact directory cannot traverse a file or reparse point."
+            }
+        }
+        if ([string]::Equals($cursor, $root, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $cursor = Split-Path -Parent $cursor
+    }
+    return $target
+}
+
+function Get-UpgradeInstallerArguments {
+    param([string]$InstallRoot, [bool]$PreserveShortcuts)
+    $arguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER")
+    if ($PreserveShortcuts) { $arguments += @('/NOICONS', '/TASKS=""') }
+    else { $arguments += '/TASKS=desktopicon' }
+    if ($InstallRoot) { $arguments += ('/DIR="{0}"' -f $InstallRoot) }
+    return $arguments
+}
+
+$RunDir = $ConfigDir
+if ($ArtifactDirectory) {
+    $RunDir = Resolve-UpgradeArtifactDirectory -ProjectRoot $ProjectRoot -Directory $ArtifactDirectory
+}
+$LogFile = Join-Path $RunDir "upgrade.log"
 
 function Write-UpgradeLog {
     param([string]$Message)
-    New-Item -ItemType Directory -Force $ConfigDir | Out-Null
+    New-Item -ItemType Directory -Force $RunDir | Out-Null
     $line = "[{0}] {1}`r`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
     [IO.File]::AppendAllText($LogFile, $line, [Text.Encoding]::UTF8)
 }
@@ -137,7 +175,7 @@ function New-DesktopShortcut {
 }
 
 if (-not $Worker) {
-    New-Item -ItemType Directory -Force $ConfigDir | Out-Null
+    New-Item -ItemType Directory -Force $RunDir | Out-Null
     if (-not $InstallerPath) { throw "InstallerPath is required." }
     $InstallerPath = [IO.Path]::GetFullPath($InstallerPath)
     if (-not (Test-Path -LiteralPath $InstallerPath)) { throw "Installer not found: $InstallerPath" }
@@ -202,6 +240,9 @@ if (-not $Worker) {
     $launcherElevated = Test-AdministratorToken
     $request = [ordered]@{
         installer_path = $InstallerPath
+        project_root = $ProjectRoot
+        artifact_directory = $ArtifactDirectory
+        preserve_shortcuts = [bool]$PreserveShortcuts
         resume_project_roots = @($resumeProjectRoots)
         resume_projects = @($resumeProjects)
         old_pid = $OldPid
@@ -212,14 +253,18 @@ if (-not $Worker) {
         task_name = "MCPDevBridge-LiveUpgrade-" + (Get-Date -Format "yyyyMMdd-HHmmss")
         requested_at = (Get-Date).ToString("o")
     }
-    $RequestFile = Join-Path $ConfigDir "upgrade-worker-request.json"
+    $RequestFile = Join-Path $RunDir "upgrade-worker-request.json"
     Write-JsonAtomic -Path $RequestFile -Value $request
 
-    $workerCmd = Join-Path $ConfigDir "upgrade-worker.cmd"
+    $workerCmd = Join-Path $RunDir "upgrade-worker.cmd"
     $scriptPath = [IO.Path]::GetFullPath($PSCommandPath)
+    $workerOptions = ""
+    if ($ArtifactDirectory) {
+        $workerOptions = " -ProjectRoot `"$ProjectRoot`" -ArtifactDirectory `"$RunDir`""
+    }
     @(
         "@echo off",
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Worker -RequestFile `"$RequestFile`""
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Worker -RequestFile `"$RequestFile`"$workerOptions"
     ) | Set-Content -LiteralPath $workerCmd -Encoding ASCII
 
     $when = (Get-Date).AddMinutes(1).ToString("HH:mm")
@@ -242,7 +287,7 @@ $request = Get-Content -LiteralPath $RequestFile -Raw -Encoding UTF8 | ConvertFr
 $taskName = [string]$request.task_name
 try {
     if ([bool]$request.dry_run) {
-        $resultPath = Join-Path $ConfigDir "upgrade-dryrun-result.json"
+        $resultPath = Join-Path $RunDir "upgrade-dryrun-result.json"
         Write-JsonAtomic -Path $resultPath -Value ([ordered]@{
             ok = $true
             worker_pid = $PID
@@ -325,10 +370,23 @@ try {
     }
     if (@($oldProcesses).Count -gt 0) { Start-Sleep -Seconds 2 }
 
-    $installArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/TASKS=desktopicon")
-    if ($installDir) { $installArgs += ('/DIR="{0}"' -f $installDir) }
+    $installArgs = @(Get-UpgradeInstallerArguments -InstallRoot $installDir -PreserveShortcuts ([bool]$request.preserve_shortcuts))
     Write-UpgradeLog "Installing: $installer; target=$installDir"
-    $install = Start-Process -FilePath $installer -ArgumentList $installArgs -PassThru -Wait
+    $previousTemp = $env:TEMP
+    $previousTmp = $env:TMP
+    try {
+        if ($ArtifactDirectory) {
+            $installTemp = Join-Path $RunDir "installer-temp"
+            New-Item -ItemType Directory -Force $installTemp | Out-Null
+            $env:TEMP = $installTemp
+            $env:TMP = $installTemp
+        }
+        $install = Start-Process -FilePath $installer -ArgumentList $installArgs -PassThru -Wait
+    }
+    finally {
+        $env:TEMP = $previousTemp
+        $env:TMP = $previousTmp
+    }
     if ($install.ExitCode -ne 0) {
         Write-UpgradeLog "Installer failed with exit code $($install.ExitCode)."
         if ($fallback -and (Test-Path -LiteralPath $fallback)) {
@@ -350,8 +408,13 @@ try {
         }
         throw "Installed executable not found: $installedExe"
     }
-    $shortcut = New-DesktopShortcut -TargetExe $installedExe
-    Write-UpgradeLog "Desktop shortcut replaced: $shortcut"
+    $shortcut = ""
+    if (-not [bool]$request.preserve_shortcuts) {
+        $shortcut = New-DesktopShortcut -TargetExe $installedExe
+        Write-UpgradeLog "Desktop shortcut replaced: $shortcut"
+    } else {
+        Write-UpgradeLog "Existing desktop and Start Menu shortcuts preserved."
+    }
 
     $newProcess = Start-Process -FilePath $installedExe -PassThru
     Write-UpgradeLog "Started new MCP DevBridge candidate: PID=$($newProcess.Id)"
@@ -390,7 +453,7 @@ try {
         }
     }
 
-    $resultPath = Join-Path $ConfigDir "upgrade-result.json"
+    $resultPath = Join-Path $RunDir "upgrade-result.json"
     Write-JsonAtomic -Path $resultPath -Value ([ordered]@{
         ok = $ready
         project_root = $projectRoot
@@ -415,7 +478,7 @@ try {
 }
 catch {
     Write-UpgradeLog "Upgrade worker failed: $($_.Exception.Message)"
-    $failurePath = Join-Path $ConfigDir "upgrade-result.json"
+    $failurePath = Join-Path $RunDir "upgrade-result.json"
     Write-JsonAtomic -Path $failurePath -Value ([ordered]@{
         ok = $false
         error = $_.Exception.Message
@@ -425,6 +488,6 @@ catch {
 finally {
     if ($taskName) { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null }
     Remove-Item -LiteralPath $RequestFile -Force -ErrorAction SilentlyContinue
-    $workerCmd = Join-Path $ConfigDir "upgrade-worker.cmd"
+    $workerCmd = Join-Path $RunDir "upgrade-worker.cmd"
     Remove-Item -LiteralPath $workerCmd -Force -ErrorAction SilentlyContinue
 }

@@ -321,6 +321,9 @@ def build_codex_env(
         "CODEXPRO_TOOL_MODE": tool,
         # Windows 桥接权限档位：完全访问 → 全部工具；其余 → desktop_ui 白名单。
         "CODEXPRO_WINDOWS_PROFILE": "system_full" if mode == "system" else "desktop_ui",
+        # Explicit in both normal and elevated launches; never probe another
+        # project's default bridge when this project's Windows control is off.
+        "CODEXPRO_WINDOWS_ENABLED": "1" if windows_token else "0",
         "CODEXPRO_TUNNEL_MODE": "0",
         "CODEXPRO_HOST": "127.0.0.1",
     }

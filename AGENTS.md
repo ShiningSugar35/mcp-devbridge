@@ -1,6 +1,6 @@
 # AGENTS.md — MCP DevBridge 开发与维护指南
 
-本文件是仓库内 AI/Agent 与工程师的开发入口。当前维护/发布目标版本为 `0.8.9.2`，维护分支为 `release/v0.8.9.2`；正式已安装构建与已发布源仍必须以 `进度验收.md` 的运行态证据及 Release provenance 为准，不能因源码版本已前推就提前宣称线上或本机已升级。历史 `v0.8.9.1` / `v0.8.9-fixed` / `v0.8.9` 保持不动，一般不得移动或改写已发布 tag/Release；唯一例外仍仅是本文件 §8 登记的 2026-09-08 所有者授权 `v0.8.9.1` 同版本重发。不得为了补功能把已经淘汰的多 Agent runtime 混回正式产品链。
+本文件是仓库内 AI/Agent 与工程师的开发入口。当前维护/发布目标版本为 `0.8.9.3`，维护分支为 `release/v0.8.9.3`；正式已安装构建与已发布源仍必须以 `进度验收.md` 的运行态证据及 Release provenance 为准，不能因源码版本已前推就提前宣称线上或本机已升级。历史 `v0.8.9.1` / `v0.8.9-fixed` / `v0.8.9` 保持不动，一般不得移动或改写已发布 tag/Release；唯一例外仍仅是本文件 §8 登记的 2026-09-08 所有者授权 `v0.8.9.1` 同版本重发。不得为了补功能把已经淘汰的多 Agent runtime 混回正式产品链。
 
 ## 1. 开工阅读顺序
 
@@ -22,6 +22,15 @@
 - 多阶段或预计超过约 2 分钟的长任务除维护上述三份文档外，还必须同步维护唯一 durable run。durable run 负责执行状态、checkpoint、后台 task、review/completion gate，不替代 `开发计划.md`、`项目架构.md` 或 `进度验收.md`。
 - 断连、新会话、Connector 重连、上下文压缩或聊天上下文丢失后，必须按 **`AGENTS.md → 项目架构.md → 开发计划.md → 进度验收.md → durable run`** 的顺序恢复事实和执行状态；随后再用当前代码、worktree 与可复现测试校验冲突。聊天记忆不是事实源，禁止要求用户重新编写/粘贴超长接管提示词来恢复项目状态。
 - 如果上述事实源之间不一致，禁止擅自把未验收事项提升为“已完成”；应保留其未完成/阻塞状态，先通过代码、日志、测试、构建或发布资产重新裁定并修正文档。
+
+### 1.2 项目内写入与任务收尾（所有任务的硬约束）
+
+**请勿在项目文件夹外有任何写入，如有请在完成任务后及时删除。**
+
+- 以用户本次指定的项目目录为写入边界；源码、文档、下载、测试夹具、日志、临时脚本、缓存和构建产物均应放在项目内。调用工具前显式核对目标路径与 cwd；运行测试/打包等工具前，把其可配置的 `TEMP` / `TMP`、依赖缓存和构建缓存重定向至本项目的专用临时子目录，不能依赖工具的系统默认位置。
+- 如发生项目外误写，立即记录本任务创建的精确路径及归属证据，在任务完成前清理并核验；只删除可证明由本任务生成且不再需要的文件。禁止把这条要求变成扫盘、清理未知历史文件或删除用户配置、凭据、其它项目/会话改动的理由。
+- 安装/热更新前检查副作用清单；无法在项目内完成的必要系统变更必须说明并取得明确授权，不能借“完全访问”自行扩大范围。用户已有的程序运行数据和操作系统正常维护数据不是可随意删除的临时产物。
+- 收尾须审计项目内外本任务输出；保留必要验收证据与正式发布资产，清理仅本任务可再生的临时产物，再执行最终 diff/worktree 检查。任何未能安全清理的例外须在验收记录和最终回复中明确列出，不能以口头“已清理”代替证据。
 
 ## 2. 所有开发任务必须执行的强制流水线
 
@@ -279,3 +288,15 @@ Linux release 以 Ubuntu 22.04 构建保持较旧 glibc 基线；SteamOS Desktop
 - 所有历史 tag/Release 均不可删除、移动、改写或 force-push。
 
 最终实测只写入 `进度验收.md`；完成任务从 `开发计划.md` 删除。
+
+## 9. Gemini 辅助 Agent 能力
+
+本机提供共享 Gemini 辅助 Agent 基础设施，权威调用协议位于 `D:\Environment\GeminiAgentBridge\AGENTS.md`。Codex/OpenCode 等主 Agent 可以把**边界清晰、可独立验收**的调查、代码 review、窄实现、测试设计或日志分析交给 Gemini worker/reviewer；Gemini 不是本项目 coordinator，不得取代主 Agent、durable run、发布门或终局裁决。
+
+- Coding / 技术分析首选 `gemini-flash-latest`；Antigravity Coding 快捷入口为 `agy-code`。Chat / 摘要 / 分类 / 抽取等轻量任务首选 `gemini-flash-lite-latest`；具体连接、环境变量与受控读写命令只以桥目录 `AGENTS.md` 为准。
+- 允许 Gemini 修改本仓库时，必须显式限定 `ProjectPath=D:\Environment\mcp` 和窄写入范围，并先确认不存在其它 Agent/会话对同一文件或同一区域的并发写入；严禁 reset、回退、覆盖当前未提交现场或跨项目写任务产物。
+- 对 §1.2“项目外不得写入”的唯一窄化说明：调用已部署的 `GeminiAgentBridge` 时，该共享服务自身在 `D:\Environment\GeminiAgentBridge` 下维护的既有 `logs/`、`run/`、`secrets/` 等**基础设施运行态**属于被本条显式允许的服务副作用，不得视为本项目任务产物；Gemini 子任务本身仍禁止在 `D:\Environment\mcp` 之外创建代码、补丁、临时文件、测试工件、报告或其它任务输出。
+- 多阶段/长任务仍只维护本仓库规定的**唯一 durable run**。Gemini 可以完成其中一个有边界的辅助步骤或独立 review，但不得另建平行 durable run、改写主计划状态、替主 Agent 调用 completion gate，或把自己的“已完成”作为最终证据。
+- Gemini 必须继承本仓库 PathGuard、workspace 路由、Windows/Linux 兼容、安全、版本、安装/升级、release provenance、历史 tag 不可变和 active-task drain 等全部硬约束；不得自行执行正式 release、tag 改写、全局服务切换或其它高风险动作，除非当前任务规范和主 Agent 明确授权。
+- 主 Agent 必须把 Gemini 产出的有价值结果重新纳入本仓库 `开发计划.md` / `进度验收.md` / 架构文档和分级测试流程；辅助 Agent 的 review 不能替代 defect-first Review、真实 smoke、构建、发布资产与远端 provenance 验证。
+- 禁止 Gemini 递归委派其它 Agent；禁止把真实 Google API Key、Cloudflare 凭据、Cookie、浏览器 Profile、MCP 密钥或其它秘密写入提示词、源码、日志或任务工件。

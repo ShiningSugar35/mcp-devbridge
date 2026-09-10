@@ -14,6 +14,7 @@ import local_dev_mcp_bridge.platform_support as ps
 import local_dev_mcp_bridge.secrets as secret_store
 import local_dev_mcp_bridge.shell as shell
 import local_dev_mcp_bridge.update_manager as updates
+from local_dev_mcp_bridge import __version__
 from local_dev_mcp_bridge.secrets import SecretsStore
 from local_dev_mcp_bridge.shell import ShellInfo
 
@@ -154,7 +155,7 @@ def test_linux_build_version_gate_is_fail_closed_and_precedes_side_effects() -> 
     assert build_linux.index(gate) < build_linux.index("prepare_runtime_linux.sh")
 
     matching = subprocess.run(
-        [sys.executable, str(helper), "--expected", "0.8.9.2", "--root", str(root)],
+        [sys.executable, str(helper), "--expected", __version__, "--root", str(root)],
         capture_output=True,
         text=True,
         check=False,

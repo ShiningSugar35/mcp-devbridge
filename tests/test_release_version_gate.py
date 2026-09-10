@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from local_dev_mcp_bridge import __version__
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = REPO_ROOT / "scripts" / "check_release_version.py"
 
@@ -50,7 +52,7 @@ def _write_fixture(root: Path, *, versions: dict[str, str]) -> None:
 
 def test_current_repository_release_versions_match() -> None:
     helper = _load_helper()
-    result = helper.check_release_versions(REPO_ROOT, "0.8.9.2")
+    result = helper.check_release_versions(REPO_ROOT, __version__)
     assert result.ok
     assert result.mismatches == ()
     assert set(result.observed) == {

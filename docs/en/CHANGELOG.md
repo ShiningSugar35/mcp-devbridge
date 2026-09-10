@@ -2,6 +2,15 @@
 
 All dates are local development dates.
 
+## 0.8.9.3 (2026-09-10) — Windows control bridge contract repair
+
+- Distinguish per-project Windows control states explicitly: disabled projects perform no bridge probe, enabled projects require their own loopback endpoint and credential, and connection failures are reported separately from configuration/disabled states instead of falling through to another project's default port.
+- Align the desktop UI bridge with the pinned `windows-mcp 0.8.2` inventory. Native `Screenshot`, `Move`, `Scroll`, `Shortcut`, `WaitFor`, `MultiSelect`, and `MultiEdit` are usable in the desktop profile while system/network tools remain denied; discovery now returns native input schemas and permission flags.
+- Add strict compatibility adapters for legacy `HotKey`, `MouseMove`, `MouseScroll`/`ScrollScreen`, `DoubleClick`, and `SearchWindow`. Adapters validate arguments against the current native schema, never replay a failed mutation, and prefer a native tool if the old name reappears. `SearchWindow` is implemented as a read-only title search over `Snapshot` opened-window data and never switches or launches a window.
+- Preserve native image/structured results, reuse one healthy Windows bridge client across status TTL refreshes, single-flight concurrent discovery, and bound inventory/result/window parsing memory. Add hermetic contract and real loopback HTTP/SDK smoke coverage.
+- Add a repository-wide development rule that task-owned files, caches, logs, build outputs and temporary artifacts stay inside the selected project whenever controllable; accidental external task output must be precisely attributed and removed without sweeping user/system data. The Windows live-upgrade path can keep task artifacts and installer TEMP/TMP inside the project while preserving existing shortcuts.
+- Update transitive `hono` and `qs` packages to currently patched releases; `npm audit` reports zero known vulnerabilities in the validated lockfile.
+
 ## 0.8.9.2 (2026-09-09) — long-task resume hardening
 
 - Harden the read-only `wait_task` observation path against one transient Gateway→CodexPro response-header failure: retry exactly once only for safe read-only wait calls (plus the existing initialize/ping recovery); never replay write or other side-effecting tools.
