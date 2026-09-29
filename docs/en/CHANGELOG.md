@@ -4,7 +4,7 @@ All dates are local development dates.
 
 ## 0.8.9.5 (2026-09-29) - Scheduled continuation and responsive project startup
 
-Source candidate; publication and installed availability require their own release provenance and runtime verification.
+Released from source `6cde7c9a91b6558f00689fdaf4c3c8f2a0e2396b` with Windows/Linux CI run `36540228276`; the Windows release asset has also been installed and verified locally with all five prior project roots restored.
 
 - Add bounded Scheduled continuation through the existing long-run tools: host-created hourly schedule requests and receipts, one 35-minute work window per invocation, a 30-minute closeout signal, same-run recovery, pause/re-enable of the same schedule and terminal disable requests. No private ChatGPT API, paid-model fallback or mandatory follow-up/native Tasks dependency is introduced.
 - Keep continuation control revisions separate from business review revisions. State replacement preserves the previous valid file on failure; guarded project-local locks serialize same-run writes and bound stale-owner recovery. Unknown external effects and task outcomes are reconciled, not replayed.

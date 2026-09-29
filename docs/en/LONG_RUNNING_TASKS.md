@@ -1,8 +1,8 @@
 # Long-running task orchestration
 
-## Scheduled continuation (0.8.9.5 source candidate)
+## Scheduled continuation (0.8.9.5)
 
-The source now supports a bounded continuation control record inside the existing long run. This section describes source behavior; installed availability must be verified against the actual runtime. The host owns Scheduled task creation: MCP supplies a request and receives the host's acknowledgement, not an undocumented OpenAI API call. Native MCP Tasks, browser-closed execution and UI follow-up are not prerequisites.
+Version 0.8.9.5 supports a bounded continuation control record inside the existing long run and has been verified in the installed Windows runtime. The host owns Scheduled task creation: MCP supplies a request and receives the host's acknowledgement, not an undocumented OpenAI API call. Native MCP Tasks, browser-closed execution and UI follow-up are not prerequisites.
 
 Use the existing stable `codexpro` wrapper with `action=long_run_update` and a dedicated `continuation` argument. Do not mix control updates with business step/evidence fields. `long_run_status` returns the current continuation revision, window, remaining seconds and `host_action_required`.
 

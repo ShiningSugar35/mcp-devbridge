@@ -113,8 +113,8 @@ P0/P1/P2 或任何会导致验收失败的 finding 一律 `FAIL → 返工 → �
 4. 清理**仅由本任务生成且可证明可再生**的临时脚本、一次性 smoke/test 输出、缓存、临时构建目录和编排副产物；禁止删除 `.env`、用户配置、release 正式资产、第三方源码、未知来源文件或其它会话的未提交改动；
 5. `git diff --check` + 最终 worktree 审计，确认既没有误删正式文件，也没有残留本任务临时垃圾；
 6. commit / push 当前工作分支；
-7. 仅 L3 正式版本发布才创建 annotated version tag；
-8. 仅 L3 正式版本发布才创建 GitHub Release，并要求 Windows/Linux 正式资产、checksum 来自同一源提交；
+7. 仅 L3 正式版本发布才创建 annotated version tag；当本轮 L3 门全部通过且用户已授权完成发布时，Agent 应直接自动发布全新版本的远端 tag，不再为这一正常发布动作额外请求人工确认。发布前必须验证当前 origin 仓库、`release/v<VERSION>` 远端 HEAD、CI head SHA、annotated tag peeled commit、release provenance `source_commit` 与正式资产 SHA 完全一致；远端同名 tag 不存在才允许首次创建，已存在时只允许精确幂等核验。始终禁止 force-push、删除/移动/覆盖历史 tag 或把 tag 指向不同提交。
+8. 仅 L3 正式版本发布才创建 GitHub Release，并要求 Windows/Linux 正式资产、checksum 来自同一源提交；满足上一条一致性门后，Agent 同样应自动创建/上传该全新版本的 Release 与已验收资产，不再额外等待人工确认。远端同名 Release 已存在时只能验证其 target 与资产 digest；任何不一致均 fail-closed，禁止覆盖历史资产或跨仓库发布。上述“release branch / tag / CI / provenance 同源”要求以正式发布源提交为准；tag/Release 成功且验证不可变后，纯文档/验收 closeout 可以继续前移维护分支，但不得移动 tag、修改 provenance 或替换已发布资产。
 9. 仅实际运行态受影响时，使用正式发布/构建资产升级或热更新当前 MCP，并恢复原本应运行的根服务。**计划内重启/热加载前必须先对目标项目引擎已打开的全部 workspace 执行 active-task drain 检查**：只要存在 `running/cancelling` background task，就必须延后该根重启，除非用户明确要求取消这些任务；禁止直接对承载活跃任务的 CodexPro PID 使用 `taskkill /T` 或等价整树终止。进程崩溃属于故障恢复，不以此规则掩盖，但必须依赖 durable terminal evidence fail-closed 恢复；
 10. 仅 L2/L3 运行态任务核验对应的快捷方式、进程、端口、local/public health、真实 MCP tool call；L0/L1 文档/局部任务不得为了“收尾”无意义重启；
 11. 最后执行 `long_run_review(pass)` + `long_run_complete`，再向用户声称完成。
