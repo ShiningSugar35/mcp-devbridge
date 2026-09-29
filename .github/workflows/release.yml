@@ -32,7 +32,7 @@ jobs:
       - name: Setup Python environment
         run: |
           uv venv --python 3.12
-          uv pip install -p .venv -e ".[dev,package]"
+          uv sync --locked --extra dev --extra package
       - name: Build CodexPro engine
         working-directory: third_party/codexpro
         run: npm ci && npm run build
@@ -106,7 +106,7 @@ jobs:
       - name: Setup Python environment
         run: |
           uv venv --python 3.12
-          uv pip install -p .venv -e ".[dev,package]"
+          uv sync --locked --extra dev --extra package
       - name: Install CodexPro dependencies
         working-directory: third_party/codexpro
         run: npm ci

@@ -4,6 +4,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_release_ci_installs_the_validated_lockfile() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert workflow.count("uv sync --locked --extra dev --extra package") == 2
+    assert "uv pip install" not in workflow
+
+
 def test_linux_build_uses_owned_temp_and_app_configuration() -> None:
     script = (ROOT / "scripts/build_linux.sh").read_text(encoding="utf-8")
     assert '/tmp/mcp-devbridge-linux-smoke.log' not in script
