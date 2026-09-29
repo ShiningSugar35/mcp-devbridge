@@ -68,6 +68,7 @@ from . import APP_NAME, __version__, constants
 from .app_state import ServiceCoordinator, StartOptions
 from .audit import AuditQuery, available_tool_names, query_logs
 from .backend_manager import port_in_use
+from .batch_lifecycle import run_start_batch
 from .config_store import (
     load_app_config,
     load_projects,
@@ -2328,6 +2329,7 @@ class MainWindow(QMainWindow):
     def _start_project_engine_for(self, project: ProjectConfig) -> None:
         access = self._ensure_workspace_credential(project.id)
         bridge = _bridge_token(ensure=project.windows_enabled)
+        options = self._current_options()
         self._set_project_busy(project.id, True)
         self._append_log(f"正在启动项目（{project.display_name}）…")
 
@@ -2341,7 +2343,6 @@ class MainWindow(QMainWindow):
                 elevated=bool(IS_WINDOWS and project.permission_mode == "system"),
             )
             if not self.coord.running:
-                options = self._current_options()
                 conflict = self._ports_conflict(options)
                 if conflict:
                     self.pm.stop(project.id)
@@ -2494,43 +2495,36 @@ class MainWindow(QMainWindow):
         self._poll_status()
 
         def run() -> str:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            connection_issue = ""
 
-            failures: list[str] = []
-            started_ids: list[str] = []
-            max_workers = min(len(projects), 8)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        self.pm.start,
-                        project.id,
-                        codex_token=access[project.id],
-                        permission_mode=project.permission_mode,
-                        execution_profile=PERMISSION_PROFILE.get(
-                            project.permission_mode, "full_system"
-                        ),
-                        windows_token=bridge,
-                        elevated=bool(IS_WINDOWS and project.permission_mode == "system"),
-                    ): project
-                    for project in projects
-                }
-                for future in as_completed(futures):
-                    project = futures[future]
-                    try:
-                        future.result()
-                        started_ids.append(project.id)
-                    except Exception as exc:  # noqa: BLE001
-                        failures.append(f"{project.display_name}: {exc}")
+            def start_one(project: ProjectConfig) -> Any:
+                return self.pm.start(
+                    project.id,
+                    codex_token=access[project.id],
+                    permission_mode=project.permission_mode,
+                    execution_profile=PERMISSION_PROFILE.get(
+                        project.permission_mode, "full_system"
+                    ),
+                    windows_token=bridge,
+                    elevated=bool(IS_WINDOWS and project.permission_mode == "system"),
+                )
+
+            def start_shared_connection() -> None:
+                if not self.coord.running:
+                    self.coord.start(options)
+
+            batch = run_start_batch(projects, start_one, on_first_success=start_shared_connection)
+            started_ids = [project.id for project, _view in batch.started]
+            failures = [f"{failure.item.display_name}: {failure.error}" for failure in batch.failures]
+            if batch.first_success_hook_error is not None:
+                connection_issue = (
+                    str(batch.first_success_hook_error)
+                    or type(batch.first_success_hook_error).__name__
+                )
             if not started_ids:
                 raise RuntimeError(
                     "没有任何项目成功启动。" + (f" {failures[0]}" if failures else "")
                 )
-            connection_issue = ""
-            if not self.coord.running:
-                try:
-                    self.coord.start(options)
-                except Exception as exc:  # noqa: BLE001
-                    connection_issue = str(exc) or type(exc).__name__
             if self.coord.state != EngineState.READY and not connection_issue:
                 connection_issue = self.coord.message or "连接服务未进入可用状态。"
             if (

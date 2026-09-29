@@ -325,7 +325,7 @@ def test_force_stop_broker_ends_task_and_clears_state(
     assert not state.exists()
 
 
-def test_elevated_manager_coalesces_status_ipc(
+def test_elevated_manager_state_is_cached_and_refresh_coalesces_status_ipc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = {"status": 0}
@@ -343,7 +343,12 @@ def test_elevated_manager_coalesces_status_ipc(
     manager._state = elevation.EngineState.READY
     assert manager.state == elevation.EngineState.READY
     assert manager.state == elevation.EngineState.READY
+    assert calls["status"] == 0
+
+    manager.refresh_status()
+    manager.refresh_status()
     assert calls["status"] == 1
+    assert manager.state == elevation.EngineState.READY
 
 
 def test_broker_running_child_count_uses_runtime_lock() -> None:

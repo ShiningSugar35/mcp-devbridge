@@ -26,6 +26,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from . import constants
+from .batch_lifecycle import run_start_batch
 from .config_store import (
     assign_project_ports,
     delete_project,
@@ -493,6 +494,11 @@ class ProjectManager:
             runtime_specs = list(self._runtime_specs.items())
         for project_id, spec in runtime_specs:
             unit = self.unit(project_id)
+            # Only this background observer performs elevated status IPC. GUI
+            # properties consume the cache and never share the slow request.
+            refresh = getattr(getattr(unit, "codex", None), "refresh_status", None)
+            if callable(refresh):
+                refresh()
             if unit is None:
                 ok, detail = False, "project unit missing"
             elif unit.state != EngineState.READY:
@@ -676,36 +682,33 @@ class ProjectManager:
     def start_enabled(
         self, *, codex_token: str, windows_token: str | None = None
     ) -> list[ProjectView]:
-        """Auto-restore: start engines of every enabled project in parallel."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        """Auto-restore enabled roots with the shared bounded batch policy."""
 
         enabled_projects = [p for p in self.list() if p.enabled]
         if not enabled_projects:
             return []
 
-        started: list[ProjectView] = []
-        max_workers = min(len(enabled_projects), 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    self.start,
-                    p.id,
-                    codex_token=codex_token,
-                    permission_mode=p.permission_mode,
-                    execution_profile="full_system"
-                    if p.permission_mode == "system"
-                    else "developer",
-                    windows_token=windows_token,
-                    elevated=bool(IS_WINDOWS and p.permission_mode == "system"),
-                ): p
-                for p in enabled_projects
-            }
-            for future in as_completed(futures):
-                try:
-                    started.append(future.result())
-                except (SpawnError, ValueError):
-                    continue
-        return started
+        def start_one(project: ProjectConfig) -> ProjectView:
+            return self.start(
+                project.id,
+                codex_token=codex_token,
+                permission_mode=project.permission_mode,
+                execution_profile=(
+                    "full_system" if project.permission_mode == "system" else "developer"
+                ),
+                windows_token=windows_token,
+                elevated=bool(IS_WINDOWS and project.permission_mode == "system"),
+            )
+
+        result = run_start_batch(enabled_projects, start_one)
+        unexpected = [
+            failure.error
+            for failure in result.failures
+            if not isinstance(failure.error, (SpawnError, ValueError))
+        ]
+        if unexpected:
+            raise unexpected[0]
+        return [view for _project, view in result.started]
 
     # --------------------------------------------------------------- views
     def view(self, project_id: str) -> ProjectView:

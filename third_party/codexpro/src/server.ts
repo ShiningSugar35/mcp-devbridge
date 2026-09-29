@@ -21,6 +21,7 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { registerWindowsBridgeTools } from "./windowsBridge.js";
 import { LongRunStore, summarizeLongRun, type LongRunState, type LongRunTaskObservation, type LongRunTaskTerminalStatus } from "./longRunOps.js";
 import { observeLongRunTasks as observeDurableLongRunTasks } from "./longRunTaskObservation.js";
+import { continuationSummary } from "./continuationOps.js";
 import { longRunDetail, longRunDetailRetrievalHint, taskDetailRetrievalHint, taskOutputDetail } from "./detailRetrieval.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -1291,6 +1292,14 @@ export function createCodexProServer(
           const task = bashTasks.get(workspace, String(childArgs.task_id ?? ""));
           const detail = taskOutputDetail(task, childArgs);
           result = textResult(detail.text, { workspace_id: workspace.id, root: workspace.root, ...detail.structured });
+        } else if (requestedAction === "long_run_update" && childArgs.continuation && typeof childArgs.continuation === "object" && !Array.isArray(childArgs.continuation)) {
+          const workspace = workspaces.getWorkspace(typeof childArgs.workspace_id === "string" ? childArgs.workspace_id : undefined);
+          const { workspace_id: _workspaceId, run_id: runId, continuation, ...mixed } = childArgs;
+          if (Object.keys(mixed).length) throw new CodexProError("Continuation control cannot be mixed with ordinary long_run_update fields.");
+          let state = await longRuns.read(workspace, String(runId ?? ""));
+          state = await longRuns.updateContinuation(workspace, state.runId, continuation, observeLongRunTasks(workspace, state));
+          const summary = continuationSummary(state);
+          result = textResult(JSON.stringify(summary, null, 2), { workspace_id: workspace.id, root: workspace.root, run_id: state.runId, ...summary });
         } else if (requestedAction === "run_detail") {
           const workspace = workspaces.getWorkspace(typeof childArgs.workspace_id === "string" ? childArgs.workspace_id : undefined);
           const state = await longRuns.read(workspace, String(childArgs.run_id ?? ""));

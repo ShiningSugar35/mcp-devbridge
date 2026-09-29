@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { hasSecretValue } from "./redact.js";
+import { continuationSchema, continuationSummary, transitionContinuation, type ContinuationState } from "./continuationOps.js";
 
 export const LONG_RUN_SCHEMA_VERSION = 1;
 export const LONG_RUN_MAX_STEPS = 50;
@@ -78,6 +79,7 @@ export interface LongRunState {
   taskResolutions: Record<string, LongRunTaskResolution>;
   reviews: LongRunReview[];
   completion?: { completedAt: string; summary: string };
+  continuation?: ContinuationState;
 }
 
 export interface LongRunTaskObservation {
@@ -144,7 +146,8 @@ const taskResolutionSchema = z.object({
 });
 
 const longRunSchema = z.object({
-  schemaVersion: z.literal(LONG_RUN_SCHEMA_VERSION),
+  // v2 is written only for opted-in continuation runs. Old binaries reject it.
+  schemaVersion: z.union([z.literal(LONG_RUN_SCHEMA_VERSION), z.literal(2)]),
   runId: z.string(),
   workspaceId: z.string(),
   workspaceRoot: z.string(),
@@ -162,7 +165,8 @@ const longRunSchema = z.object({
   taskIds: z.array(z.string()),
   taskResolutions: z.record(z.string(), taskResolutionSchema),
   reviews: z.array(reviewSchema),
-  completion: z.object({ completedAt: z.string(), summary: z.string() }).optional()
+  completion: z.object({ completedAt: z.string(), summary: z.string() }).optional(),
+  continuation: continuationSchema.optional()
 });
 
 function nowIso(): string {
@@ -236,15 +240,41 @@ function runFileName(runId: string): string {
 async function atomicReplace(absPath: string, content: string): Promise<void> {
   const dir = path.dirname(absPath);
   const tmp = path.join(dir, `.${path.basename(absPath)}.${process.pid}.${randomUUID()}.tmp`);
-  await fsp.writeFile(tmp, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
   try {
-    await fsp.rename(tmp, absPath);
-  } catch (error: any) {
-    if (!["EEXIST", "EPERM", "ENOTEMPTY"].includes(String(error?.code ?? ""))) throw error;
-    await fsp.rm(absPath, { force: true });
-    await fsp.rename(tmp, absPath);
+    const handle = await fsp.open(tmp, "wx", 0o600);
+    try {
+      await handle.writeFile(content, { encoding: "utf8" });
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    // Preserve the last valid checkpoint even on a Windows sharing violation.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await fsp.rename(tmp, absPath);
+        return;
+      } catch (error: any) {
+        if (attempt > 0 || !["EEXIST", "EPERM", "EBUSY", "ENOTEMPTY"].includes(String(error?.code ?? ""))) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+    }
   } finally {
     await fsp.rm(tmp, { force: true }).catch(() => undefined);
+  }
+}
+
+
+const RUN_LOCK_ATTEMPTS = 40;
+const RUN_LOCK_RETRY_MS = 25;
+const RUN_LOCK_STALE_MS = 60_000;
+
+function pidLooksAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: any) {
+    return String(error?.code ?? "") === "EPERM";
   }
 }
 
@@ -252,6 +282,93 @@ export class LongRunStore {
   private readonly runLocks = new Map<string, Promise<void>>();
 
   constructor(private readonly contextDir: string, private readonly guard: PathGuard) {}
+
+  private async withProcessRunLock<T>(workspace: Workspace, runId: string, fn: () => Promise<T>): Promise<T> {
+    await this.ensureDir(workspace);
+    const guarded = (rel: string) => this.guard.resolve(workspace, rel, { forWrite: true }).absPath;
+    const lockDirRel = `${this.dirRel()}/.locks`;
+    await fsp.mkdir(guarded(lockDirRel), { recursive: true, mode: 0o700 });
+    const lockRel = `${lockDirRel}/${runFileName(runId)}.lock`;
+    const lockToken = randomUUID();
+
+    const reapStale = async (): Promise<boolean> => {
+      const stat = await fsp.lstat(guarded(lockRel));
+      if (!stat.isFile() || stat.size > 1024 || Date.now() - stat.mtimeMs < RUN_LOCK_STALE_MS) return false;
+      const observed = await fsp.readFile(guarded(lockRel), "utf8");
+      let raw: { pid?: number };
+      try { raw = JSON.parse(observed); } catch { return false; }
+      if (!raw || !Number.isInteger(raw.pid) || Number(raw.pid) <= 0 || pidLooksAlive(Number(raw.pid))) return false;
+
+      // Keep a single-use claim for each dead owner's identity. A delayed second
+      // reaper must never rename a fresh lock after the first reaper replaced it.
+      const recoveryRel = `${lockDirRel}/${runFileName(runId)}.recoveries`;
+      await fsp.mkdir(guarded(recoveryRel), { recursive: true, mode: 0o700 });
+      let claims = 0;
+      for await (const _entry of await fsp.opendir(guarded(recoveryRel))) {
+        if (++claims >= 64) throw new CodexProError(`Long run ${runId} recovery claim limit reached; reconcile while all writers are stopped.`);
+      }
+      const identity = createHash("sha256").update(observed).digest("hex");
+      const claimRel = `${recoveryRel}/${identity}.claim`;
+      try {
+        await fsp.mkdir(guarded(claimRel), { mode: 0o700 });
+      } catch (error: any) {
+        if (String(error?.code ?? "") === "EEXIST") return false;
+        throw error;
+      }
+      // Claims are deliberately retained. An interrupted reaper needs explicit
+      // reconciliation, not a second unaudited deletion of the same identity.
+      if (await fsp.readFile(guarded(lockRel), "utf8") !== observed) return false;
+      const quarantine = guarded(`${lockDirRel}/.${runFileName(runId)}.${randomUUID()}.stale`);
+      await fsp.rename(guarded(lockRel), quarantine);
+      await fsp.rm(quarantine, { force: true }).catch(() => undefined);
+      return true;
+    };
+
+    for (let attempt = 0; attempt < RUN_LOCK_ATTEMPTS; attempt += 1) {
+      let handle;
+      try {
+        handle = await fsp.open(guarded(lockRel), "wx", 0o600);
+      } catch (error: any) {
+        if (String(error?.code ?? "") !== "EEXIST") throw error;
+        try {
+          if (await reapStale()) continue;
+        } catch (staleError: any) {
+          if (String(staleError?.code ?? "") === "ENOENT") continue;
+          throw staleError;
+        }
+        if (attempt + 1 >= RUN_LOCK_ATTEMPTS) {
+          throw new CodexProError(`Long run ${runId} is busy or requires lock reconciliation; do not remove another writer's lock.`);
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, RUN_LOCK_RETRY_MS));
+        continue;
+      }
+
+      let initialized = false;
+      let ownedStat: { ino: number; dev: number } | undefined;
+      try {
+        try {
+          ownedStat = await handle.stat();
+          await handle.writeFile(JSON.stringify({ pid: process.pid, token: lockToken, createdAt: nowIso() }), "utf8");
+          await handle.sync();
+          initialized = true;
+        } finally {
+          await handle.close();
+        }
+        return await fn();
+      } finally {
+        try {
+          const current = await fsp.lstat(guarded(lockRel));
+          if (ownedStat && current.isFile() && current.ino === ownedStat.ino && current.dev === ownedStat.dev && current.size <= 1024) {
+            const sameOwner = !initialized || (JSON.parse(await fsp.readFile(guarded(lockRel), "utf8")) as { token?: string }).token === lockToken;
+            if (sameOwner) await fsp.rm(guarded(lockRel), { force: true });
+          }
+        } catch {
+          // Unknown/changed ownership stays fail-closed; never delete by guessed identity.
+        }
+      }
+    }
+    throw new CodexProError(`Long run ${runId} lock acquisition exhausted.`);
+  }
 
   private async withRunLock<T>(workspace: Workspace, runId: string, fn: () => Promise<T>): Promise<T> {
     const key = `${workspace.id}:${runId}`;
@@ -262,7 +379,7 @@ export class LongRunStore {
     this.runLocks.set(key, queued);
     await previous.catch(() => undefined);
     try {
-      return await fn();
+      return await this.withProcessRunLock(workspace, runId, fn);
     } finally {
       release();
       if (this.runLocks.get(key) === queued) this.runLocks.delete(key);
@@ -319,6 +436,29 @@ export class LongRunStore {
     }
     await atomicReplace(absPath, content);
     return normalized;
+  }
+
+  async continuationStatus(workspace: Workspace, runId: string): Promise<Record<string, unknown>> {
+    return continuationSummary(await this.read(workspace, runId));
+  }
+
+  async updateContinuation(
+    workspace: Workspace,
+    runId: string,
+    input: unknown,
+    observations: LongRunTaskObservation[] = [],
+    now = new Date()
+  ): Promise<LongRunState> {
+    return this.withRunLock(workspace, runId, async () => {
+      const state = await this.read(workspace, runId);
+      const next = transitionContinuation(state, input, observations, now);
+      if (state.continuation && next.revision === state.continuation.revision) return state;
+      state.continuation = next;
+      state.schemaVersion = 2;
+      // Control bookkeeping must not invalidate a review of unchanged business work.
+      state.updatedAt = now.toISOString();
+      return this.write(workspace, state);
+    });
   }
 
   async start(
@@ -697,6 +837,7 @@ export function summarizeLongRun(state: LongRunState, taskObservations: LongRunT
     })),
     created_at: state.createdAt,
     updated_at: state.updatedAt,
+    continuation: state.continuation ? continuationSummary(state) : null,
     completion: state.completion
       ? { ...state.completion, summary: compactLongRunText(state.completion.summary, 1_200) }
       : null,

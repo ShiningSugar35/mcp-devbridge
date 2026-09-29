@@ -41,14 +41,14 @@ def control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_transient_query_does_not_poison_state_and_later_recovers(control) -> None:
     manager, probe, clock = control
-    assert manager.state == EngineState.READY
+    assert manager.refresh_status() == EngineState.READY
     assert manager.pid == 123
     assert manager.error is not None
     assert manager.state == EngineState.READY
     assert probe.calls == 1  # Backoff: another getter must not retry immediately.
     clock[0] += 2
     probe.fail = False
-    assert manager.state == EngineState.READY
+    assert manager.refresh_status() == EngineState.READY
     assert manager.error is None
     assert probe.calls == 2
 
@@ -57,14 +57,14 @@ def test_confirmed_exit_is_still_a_hard_error(control) -> None:
     manager, probe, _clock = control
     probe.fail = False
     probe.running = False
-    assert manager.state == EngineState.ERROR
+    assert manager.refresh_status() == EngineState.ERROR
     assert manager.error == "process exited"
 
 
 def test_starting_query_failure_never_fabricates_ready(control) -> None:
     manager, _probe, _clock = control
     manager._state = EngineState.STARTING
-    assert manager.state == EngineState.STARTING
+    assert manager.refresh_status() == EngineState.STARTING
 
 
 @pytest.mark.parametrize("data_healthy", [True, False])

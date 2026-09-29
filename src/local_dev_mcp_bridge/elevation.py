@@ -375,10 +375,17 @@ class _BrokerRuntime:
         self.auth_value = auth_value
         self.children: dict[str, CodexProManager] = {}
         self.lock = threading.RLock()
+        self._project_locks: dict[str, threading.RLock] = {}
+        self._starting_projects: set[str] = set()
+        self._closing = False
         self.last_activity = time.monotonic()
         self.shutdown_requested = threading.Event()
         self._job: Any | None = None
         self._init_kill_on_close_job()
+
+    def _project_lock(self, project_id: str) -> threading.RLock:
+        with self.lock:
+            return self._project_locks.setdefault(project_id, threading.RLock())
 
     def _init_kill_on_close_job(self) -> None:
         if not IS_WINDOWS:
@@ -417,15 +424,40 @@ class _BrokerRuntime:
             pass
 
     def touch(self) -> None:
-        self.last_activity = time.monotonic()
+        with self.lock:
+            self.last_activity = time.monotonic()
 
     def has_running_children(self) -> bool:
         with self.lock:
-            return any(manager.is_running for manager in self.children.values())
+            return bool(self._starting_projects) or any(
+                manager.is_running for manager in self.children.values()
+            )
 
     def running_child_count(self) -> int:
         with self.lock:
-            return sum(1 for manager in self.children.values() if manager.is_running)
+            return len(self._starting_projects | {
+                project_id for project_id, manager in self.children.items() if manager.is_running
+            })
+
+    def request_shutdown_if_idle(self, *, idle_seconds: float = 0.0) -> bool:
+        """Close admission atomically with the idle check; never race a new spawn."""
+        with self.lock:
+            if self.has_running_children():
+                return False
+            if time.monotonic() - self.last_activity < idle_seconds:
+                return False
+            self._closing = True
+            self.shutdown_requested.set()
+            return True
+
+    def _stop_owned(self, project_id: str, manager: CodexProManager) -> None:
+        """Caller holds the project lock. Retain ownership if cleanup fails."""
+        manager.stop()
+        if manager.is_running:
+            raise SpawnError("Owned project process remains running after stop.")
+        with self.lock:
+            if self.children.get(project_id) is manager:
+                self.children.pop(project_id, None)
 
     def spawn_codex(self, payload: dict[str, Any]) -> dict[str, Any]:
         project_id = str(payload.get("project_id") or "").strip()
@@ -449,74 +481,95 @@ class _BrokerRuntime:
             for k, v in extra_raw.items()
             if str(k) == "CODEXPRO_WINDOWS_BRIDGE_URL" and len(str(v)) <= 2048
         }
-        with self.lock:
-            current = self.children.get(project_id)
-            if current is not None and current.is_running:
+        with self._project_lock(project_id):
+            with self.lock:
+                if self._closing or self.shutdown_requested.is_set():
+                    raise SpawnError("Broker is shutting down; project admission is closed.")
+                self._starting_projects.add(project_id)
+                current = self.children.get(project_id)
+            try:
+                if current is not None and current.is_running:
+                    return {
+                        "ok": True,
+                        "pid": current.pid,
+                        "state": current.state.value,
+                        "elevated": _token_is_elevated(),
+                    }
+                if current is not None:
+                    self._stop_owned(project_id, current)
+                manager = CodexProManager(
+                    log_dir=constants.process_log_dir() / project_id,
+                    port=port,
+                )
+                with self.lock:
+                    self.children[project_id] = manager
+                try:
+                    manager.start(
+                        root,
+                        access_value,
+                        permission_mode="system",
+                        windows_token=bridge_value,
+                        execution_profile="full_system",
+                        extra_env=extra_env,
+                    )
+                    pid = manager.pid or 0
+                    if pid:
+                        self._assign_pid_to_job(pid)
+                    if not manager.wait_ready():
+                        raise SpawnError(manager.error or "elevated CodexPro did not become ready")
+                except Exception as exc:
+                    try:
+                        self._stop_owned(project_id, manager)
+                    except Exception as cleanup_error:
+                        raise SpawnError(
+                            f"Project start failed ({type(exc).__name__}); owned cleanup failed "
+                            f"({type(cleanup_error).__name__})."
+                        ) from exc
+                    raise
+                self.touch()
                 return {
                     "ok": True,
-                    "pid": current.pid,
-                    "state": current.state.value,
+                    "pid": pid,
+                    "state": manager.state.value,
                     "elevated": _token_is_elevated(),
                 }
-            if current is not None:
-                with contextlib.suppress(Exception):
-                    current.stop()
-            manager = CodexProManager(
-                log_dir=constants.process_log_dir() / project_id,
-                port=port,
-            )
-            manager.start(
-                root,
-                access_value,
-                permission_mode="system",
-                windows_token=bridge_value,
-                execution_profile="full_system",
-                extra_env=extra_env,
-            )
-            if not manager.wait_ready():
-                raise SpawnError(manager.error or "elevated CodexPro did not become ready")
-            self.children[project_id] = manager
-            pid = manager.pid or 0
-            if pid:
-                self._assign_pid_to_job(pid)
-            self.touch()
-            return {
-                "ok": True,
-                "pid": pid,
-                "state": manager.state.value,
-                "elevated": _token_is_elevated(),
-            }
+            finally:
+                with self.lock:
+                    self._starting_projects.discard(project_id)
 
     def child_status(self, project_id: str) -> dict[str, Any]:
         with self.lock:
             manager = self.children.get(project_id)
+            starting = project_id in self._starting_projects
             if manager is None:
                 return {
                     "ok": True,
-                    "exists": False,
-                    "running": False,
-                    "state": EngineState.IDLE.value,
+                    "exists": starting,
+                    "running": starting,
+                    "state": (EngineState.STARTING if starting else EngineState.IDLE).value,
                 }
             return {
                 "ok": True,
                 "exists": True,
-                "running": manager.is_running,
-                "state": manager.state.value,
+                "running": starting or manager.is_running,
+                "state": (EngineState.STARTING if starting else manager.state).value,
                 "pid": manager.pid,
                 "error": manager.error or "",
             }
 
     def stop_child(self, project_id: str) -> dict[str, Any]:
-        with self.lock:
-            manager = self.children.pop(project_id, None)
-        if manager is not None:
-            manager.stop()
+        with self._project_lock(project_id):
+            with self.lock:
+                manager = self.children.get(project_id)
+            if manager is not None:
+                self._stop_owned(project_id, manager)
         self.touch()
         return {"ok": True}
 
     def log_tail(self, project_id: str, count: int) -> dict[str, Any]:
-        with self.lock:
-            manager = self.children.get(project_id)
+        with self._project_lock(project_id):
+            with self.lock:
+                manager = self.children.get(project_id)
             text = manager.log_tail(max(1, min(count, 400))) if manager else "(尚无输出)"
         return {"ok": True, "text": _bounded_text(text)}
 
@@ -564,11 +617,18 @@ class _BrokerRuntime:
 
     def stop_all(self) -> None:
         with self.lock:
-            managers = list(self.children.values())
-            self.children.clear()
-        for manager in managers:
-            with contextlib.suppress(Exception):
-                manager.stop()
+            self._closing = True
+            self.shutdown_requested.set()
+            project_ids = sorted(set(self.children) | self._starting_projects)
+        errors: list[Exception] = []
+        for project_id in project_ids:
+            try:
+                # Acquiring the per-project lock drains any pre-spawn admission.
+                self.stop_child(project_id)
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise SpawnError(f"Could not stop {len(errors)} owned project(s).") from errors[0]
 
 
 class _BrokerHandler(BaseHTTPRequestHandler):
@@ -634,11 +694,10 @@ class _BrokerHandler(BaseHTTPRequestHandler):
             elif action == "execute":
                 result = self.runtime.execute(payload)
             elif action == "shutdown_if_idle":
-                if self.runtime.has_running_children():
-                    result = {"ok": False, "busy": True}
-                else:
-                    self.runtime.shutdown_requested.set()
+                if self.runtime.request_shutdown_if_idle():
                     result = {"ok": True, "shutting_down": True}
+                else:
+                    result = {"ok": False, "busy": True}
             else:
                 raise ValueError("unsupported broker action")
             self._json(200, result)
@@ -929,30 +988,47 @@ class ElevatedCodexProManager:
         self._error: str | None = None
         self._pid: int | None = None
         self._status_deadline = 0.0
+        self._status_lock = threading.Lock()
+        self._cache_lock = threading.Lock()
+        self._lifecycle_generation = 0
 
     @property
     def state(self) -> EngineState:
-        if (
-            self._state in {EngineState.STARTING, EngineState.READY}
-            and time.monotonic() >= self._status_deadline
-        ):
+        # Reading state must remain pure even while a worker is refreshing it.
+        with self._cache_lock:
+            return self._state
+
+    def refresh_status(self) -> EngineState:
+        with self._status_lock:
+            with self._cache_lock:
+                if self._state not in {EngineState.STARTING, EngineState.READY}:
+                    return self._state
+                if time.monotonic() < self._status_deadline:
+                    return self._state
+                generation = self._lifecycle_generation
+            error: str | None = None
+            status: dict[str, Any] = {}
             try:
                 status = self._controller.child_status(self.project_id)
-                if not status.get("running"):
-                    self._state = EngineState.ERROR
-                    self._error = str(status.get("error") or "高权限 CodexPro 进程已退出。")
-                else:
-                    if self._state == EngineState.STARTING:
-                        self._state = EngineState.READY
-                    self._error = None
-                self._status_deadline = time.monotonic() + 0.25
             except RuntimeError as exc:
-                # A failed control-plane observation is not a confirmed child
-                # exit. Preserve the last state so the supervisor still checks
-                # the authenticated HTTP/MCP data plane before restarting.
-                self._error = str(exc)
-                self._status_deadline = time.monotonic() + 1.0
-        return self._state
+                error = str(exc)
+            with self._cache_lock:
+                if generation != self._lifecycle_generation:
+                    return self._state
+                if error is not None:
+                    # Loss of observation is not proof that the child exited.
+                    self._error = error
+                    self._status_deadline = time.monotonic() + 1.0
+                else:
+                    if not status.get("running"):
+                        self._state = EngineState.ERROR
+                        self._error = str(status.get("error") or "高权限 CodexPro 进程已退出。")
+                    else:
+                        if status.get("state") == EngineState.READY.value:
+                            self._state = EngineState.READY
+                        self._error = None
+                    self._status_deadline = time.monotonic() + 0.25
+                return self._state
 
     @property
     def error(self) -> str | None:
@@ -979,8 +1055,10 @@ class ElevatedCodexProManager:
         del permission_mode, execution_profile
         if self.is_running:
             return
-        self._state = EngineState.STARTING
-        self._status_deadline = 0.0
+        with self._cache_lock:
+            self._lifecycle_generation += 1
+            self._state = EngineState.STARTING
+            self._status_deadline = 0.0
         try:
             result = self._controller.spawn_codex(
                 project_id=self.project_id,
@@ -990,15 +1068,19 @@ class ElevatedCodexProManager:
                 bridge_value=windows_token,
                 extra_env=extra_env,
             )
-            self._pid = int(result.get("pid") or 0) or None
             if result.get("elevated") is not True:
                 raise SpawnError("CodexPro broker process is not elevated")
-            self._state = EngineState.READY
-            self._error = None
-            self._status_deadline = time.monotonic() + 0.25
+            with self._cache_lock:
+                self._lifecycle_generation += 1
+                self._pid = int(result.get("pid") or 0) or None
+                self._state = EngineState.READY
+                self._error = None
+                self._status_deadline = time.monotonic() + 0.25
         except Exception as exc:
-            self._state = EngineState.ERROR
-            self._error = str(exc)
+            with self._cache_lock:
+                self._lifecycle_generation += 1
+                self._state = EngineState.ERROR
+                self._error = str(exc)
             raise SpawnError(str(exc)) from exc
 
     def wait_ready(self, timeout_seconds: float | None = None) -> bool:
@@ -1007,17 +1089,23 @@ class ElevatedCodexProManager:
 
     def stop(self, timeout_seconds: float = 8.0) -> None:
         del timeout_seconds
-        self._state = EngineState.STOPPING
+        with self._cache_lock:
+            self._lifecycle_generation += 1
+            self._state = EngineState.STOPPING
         try:
             self._controller.stop_child(self.project_id)
         except RuntimeError as exc:
-            self._state = EngineState.ERROR
-            self._error = f"停止高权限 CodexPro 失败：{exc}"
+            with self._cache_lock:
+                self._lifecycle_generation += 1
+                self._state = EngineState.ERROR
+                self._error = f"停止高权限 CodexPro 失败：{exc}"
             raise SpawnError(self._error) from exc
-        self._state = EngineState.IDLE
-        self._error = None
-        self._pid = None
-        self._status_deadline = 0.0
+        with self._cache_lock:
+            self._lifecycle_generation += 1
+            self._state = EngineState.IDLE
+            self._error = None
+            self._pid = None
+            self._status_deadline = 0.0
 
     def log_tail(self, count: int = 200) -> str:
         return self._controller.log_tail(self.project_id, count)
@@ -1053,15 +1141,14 @@ def broker_main() -> int:
     try:
         while not runtime.shutdown_requested.is_set():
             server.handle_request()
-            if (
-                not runtime.has_running_children()
-                and time.monotonic() - runtime.last_activity >= BROKER_IDLE_SECONDS
-            ):
+            if runtime.request_shutdown_if_idle(idle_seconds=BROKER_IDLE_SECONDS):
                 break
     finally:
-        runtime.stop_all()
-        server.server_close()
-        _clear_state_if_ours(epoch)
+        try:
+            runtime.stop_all()
+        finally:
+            server.server_close()
+            _clear_state_if_ours(epoch)
     return 0
 
 
