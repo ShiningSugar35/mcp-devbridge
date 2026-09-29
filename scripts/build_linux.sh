@@ -16,6 +16,20 @@ python3 scripts/check_release_version.py --root "$ROOT" --expected "$VERSION"
 PY="$ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || { echo "Missing .venv/bin/python" >&2; exit 2; }
 
+# Isolate only this build's temporary output and frozen-app configuration.
+# The version gate runs before creating any build-owned directory.
+BUILD_TEMP="$(mktemp -d "$ROOT/.build-temp-${VERSION}.XXXXXX")"
+trap 'rm -rf -- "$BUILD_TEMP"' EXIT
+export TMPDIR="$BUILD_TEMP" TEMP="$BUILD_TEMP" TMP="$BUILD_TEMP"
+export UV_CACHE_DIR="$BUILD_TEMP/uv-cache" npm_config_cache="$BUILD_TEMP/npm-cache"
+export RUFF_CACHE_DIR="$BUILD_TEMP/ruff-cache" PYINSTALLER_CONFIG_DIR="$BUILD_TEMP/pyinstaller"
+export XDG_CONFIG_HOME="$BUILD_TEMP/config" XDG_DATA_HOME="$BUILD_TEMP/data"
+export XDG_CACHE_HOME="$BUILD_TEMP/cache"
+# Synthetic non-Git fixtures under this project must not inherit the parent repo.
+export GIT_CEILING_DIRECTORIES="$ROOT"
+export LOCALDEV_MCP_CONFIG_DIR="$BUILD_TEMP/app-config"
+SMOKE_LOG="$BUILD_TEMP/frozen-smoke.log"
+
 DIST_ROOT="$ROOT/dist/staging-$VERSION"
 DIST_DIR="$DIST_ROOT/MCPDevBridge"
 WORK_DIR="$ROOT/build/staging-$VERSION-linux"
@@ -53,11 +67,11 @@ chmod 0755 "$DIST_DIR/install.sh" "$DIST_DIR/MCPDevBridge" "$DIST_DIR/cloudflare
   "$DIST_DIR/_internal/runtime/node" "$DIST_DIR/_internal/scripts/live_upgrade.sh"
 
 echo "== Linux 6/7 frozen headless smoke =="
-QT_QPA_PLATFORM=offscreen timeout 8s "$DIST_DIR/MCPDevBridge" >/tmp/mcp-devbridge-linux-smoke.log 2>&1 &
+QT_QPA_PLATFORM=offscreen timeout 8s "$DIST_DIR/MCPDevBridge" >"$SMOKE_LOG" 2>&1 &
 SMOKE_PID=$!
 sleep 3
 if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
-  wait "$SMOKE_PID" || { cat /tmp/mcp-devbridge-linux-smoke.log >&2; exit 7; }
+  wait "$SMOKE_PID" || { cat "$SMOKE_LOG" >&2; exit 7; }
 else
   kill "$SMOKE_PID" 2>/dev/null || true
   wait "$SMOKE_PID" 2>/dev/null || true

@@ -2,6 +2,16 @@
 
 All dates are local development dates.
 
+## 0.8.9.5 (2026-09-29) - Scheduled continuation and responsive project startup
+
+Source candidate; publication and installed availability require their own release provenance and runtime verification.
+
+- Add bounded Scheduled continuation through the existing long-run tools: host-created hourly schedule requests and receipts, one 35-minute work window per invocation, a 30-minute closeout signal, same-run recovery, pause/re-enable of the same schedule and terminal disable requests. No private ChatGPT API, paid-model fallback or mandatory follow-up/native Tasks dependency is introduced.
+- Keep continuation control revisions separate from business review revisions. State replacement preserves the previous valid file on failure; guarded project-local locks serialize same-run writes and bound stale-owner recovery. Unknown external effects and task outcomes are reconciled, not replayed.
+- Remove slow startup/readiness work from the elevated broker's global registry lock. Per-project lifecycle serialization, pending-child reservations and exact-manager cleanup prevent duplicate or lost child ownership during stop/start races.
+- Make elevated state reads cached; explicit bounded refresh rejects stale generations. Freeze Qt configuration before worker execution. Batch startup and auto-restore share a bounded helper (default two, maximum four workers), and the first healthy project can bring up the shared connection without waiting for the slowest project.
+- Preserve existing workspace routing, permissions, optional Windows-control isolation and the stable public Hub tool catalogue. Real Scheduled callbacks and source regression evidence are separate from formal installation evidence.
+
 ## 0.8.9.4 (2026-09-10) — public tunnel precheck race repair
 
 - Repair a Cloudflare `auto` readiness race: a named tunnel no longer commits READY immediately on the first registered QUIC connection while the bundled cloudflared network precheck is still pending. It waits within the existing startup timeout budget for up to eight seconds; an explicit `suggested_protocol=http2` is then consumed by the existing bounded retry path so the next attempt uses `--protocol http2`. Older cloudflared builds that never emit a precheck marker still become ready when the caller's existing wait budget expires, and explicit HTTP/2 starts do not incur the auto-only grace.

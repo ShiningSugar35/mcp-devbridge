@@ -1,4 +1,32 @@
-# Long-running task orchestration (v0.8.7)
+# Long-running task orchestration
+
+## Scheduled continuation (0.8.9.5 source candidate)
+
+The source now supports a bounded continuation control record inside the existing long run. This section describes source behavior; installed availability must be verified against the actual runtime. The host owns Scheduled task creation: MCP supplies a request and receives the host's acknowledgement, not an undocumented OpenAI API call. Native MCP Tasks, browser-closed execution and UI follow-up are not prerequisites.
+
+Use the existing stable `codexpro` wrapper with `action=long_run_update` and a dedicated `continuation` argument. Do not mix control updates with business step/evidence fields. `long_run_status` returns the current continuation revision, window, remaining seconds and `host_action_required`.
+
+```json
+{
+  "action": "long_run_update",
+  "args": {
+    "workspace_id": "<explicit workspace handle>",
+    "run_id": "<existing run id>",
+    "continuation": {
+      "operation": "request_schedule",
+      "expected_revision": 0
+    }
+  }
+}
+```
+
+Read the returned revision and request ID. The ChatGPT host first reconciles existing schedules by run/request marker, creates at most one hourly task when absent, then uses `bind_schedule` with `request_id`, `automation_id`, `cadence_minutes=60` and the current `expected_revision`. A successful bind only records a host-reported receipt; a later real Scheduled invocation is separate evidence. Unknown creation outcomes must be reconciled, not blindly recreated. Reuse the same task and run on subsequent invocations; never create child schedules.
+
+At admission, call `open_window` with the current revision, a stable `invocation_id` and `source=chat|scheduled`. Scheduled admission requires a bound scheduler. Repeating the same active invocation does not extend its deadline. Windows have a 35-minute budget and a 30-minute closeout signal; these are engineering limits, not an OpenAI SLA. Save business evidence as usual, then `yield_window` with the matching invocation ID and an exact `next_checkpoint`. Active or unknown attached tasks prevent a new window until reconciled; terminal tasks do not. Existing background work retains its task identity. Continuation ownership coordinates control state and is explicitly not a filesystem fence for arbitrary shell processes.
+
+Control revisions do not invalidate the business work revision's review. `pause` requests disabling the bound task; `resume` requests re-enabling that same ID after a disable receipt. Report actual host outcomes with `scheduler_disabled` or `scheduler_enabled`. Terminal runs can still reconcile outstanding scheduler receipts, but cannot resume business execution. Completing a run requests disabling only its bound task; notification or disable failure does not reopen completed work.
+
+State files use versioned schema protection, safe replacement retaining the old file on failure, and project-contained process locks. Stale lock recovery is guarded and bounded; ambiguous recovery requires reconciliation. Old binary versions must not write newer state. All existing path, permission, evidence, terminal-receipt and final-review gates remain in force. The sections below retain the background-task and same-turn fallback contract; scheduled mode bounds each turn rather than extending it indefinitely.
 
 ## Problem
 
