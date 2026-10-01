@@ -567,6 +567,102 @@ def test_windows_start_failure_is_nonfatal_to_core_project_start(
     assert unit.windows.state == EngineState.ERROR
 
 
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("TimeoutError: timed out", True),
+        ("URLError: <urlopen error timed out>", True),
+        ("MCP canary failed: request timeout", True),
+        ("ConnectionRefusedError: connection refused", False),
+        ("URLError: <urlopen error [WinError 10061] connection refused>", False),
+        ("state=error", False),
+    ],
+)
+def test_transient_health_timeout_classification(detail: str, expected: bool) -> None:
+    from local_dev_mcp_bridge.project_manager import _is_transient_health_timeout
+
+    assert _is_transient_health_timeout(detail) is expected
+
+
+def test_supervisor_tolerates_two_consecutive_timeout_only_health_failures(
+    manager: tuple[ProjectManager, Path],
+) -> None:
+    pm, tmp = manager
+    project = pm.add(str(tmp / "projA"))
+    pm.start(project.id, codex_token=TOKEN)
+    unit: Any = pm.unit(project.id)
+    assert unit is not None
+
+    outcomes = iter(
+        [
+            (False, "TimeoutError: timed out"),
+            (False, "TimeoutError: timed out"),
+            (False, "TimeoutError: timed out"),
+        ]
+    )
+    unit.data_plane_health = lambda _token: next(outcomes)
+    recovered: list[tuple[str, str]] = []
+    pm._recover_project = lambda project_id, reason: recovered.append((project_id, reason))
+
+    pm._supervisor_tick()
+    pm._supervisor_tick()
+    assert recovered == []
+
+    pm._supervisor_tick()
+    assert recovered == [(project.id, "TimeoutError: timed out")]
+
+
+def test_supervisor_timeout_streak_resets_after_success(
+    manager: tuple[ProjectManager, Path],
+) -> None:
+    pm, tmp = manager
+    project = pm.add(str(tmp / "projA"))
+    pm.start(project.id, codex_token=TOKEN)
+    unit: Any = pm.unit(project.id)
+    assert unit is not None
+
+    outcomes = iter(
+        [
+            (False, "TimeoutError: timed out"),
+            (True, "ok"),
+            (False, "TimeoutError: timed out"),
+            (False, "TimeoutError: timed out"),
+        ]
+    )
+    unit.data_plane_health = lambda _token: next(outcomes)
+    recovered: list[tuple[str, str]] = []
+    pm._recover_project = lambda project_id, reason: recovered.append((project_id, reason))
+
+    for _ in range(4):
+        pm._supervisor_tick()
+    assert recovered == []
+
+
+def test_supervisor_keeps_fast_recovery_for_hard_health_failures(
+    manager: tuple[ProjectManager, Path],
+) -> None:
+    pm, tmp = manager
+    project = pm.add(str(tmp / "projA"))
+    pm.start(project.id, codex_token=TOKEN)
+    unit: Any = pm.unit(project.id)
+    assert unit is not None
+
+    outcomes = iter(
+        [
+            (False, "ConnectionRefusedError: connection refused"),
+            (False, "ConnectionRefusedError: connection refused"),
+        ]
+    )
+    unit.data_plane_health = lambda _token: next(outcomes)
+    recovered: list[tuple[str, str]] = []
+    pm._recover_project = lambda project_id, reason: recovered.append((project_id, reason))
+
+    pm._supervisor_tick()
+    assert recovered == []
+    pm._supervisor_tick()
+    assert recovered == [(project.id, "ConnectionRefusedError: connection refused")]
+
+
 def test_supervisor_core_recovery_does_not_full_stop_optional_windows_bridge(
     manager: tuple[ProjectManager, Path],
 ) -> None:

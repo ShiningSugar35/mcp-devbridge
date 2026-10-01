@@ -32,9 +32,32 @@ def _assert_stable_contract(payload: bytes) -> None:
 
 
 def test_embedded_contract_payload_matches_frozen_release_identity() -> None:
-    assert HUB_TOOL_CONTRACT_VERSION == 1
+    assert HUB_TOOL_CONTRACT_VERSION == 2
     assert HUB_TOOL_COUNT == 50
     _assert_stable_contract(_stable_tools_list_payload("release-contract"))
+
+
+def test_codexpro_tool_contract_does_not_depend_on_hidden_selected_workspace() -> None:
+    server_source = (
+        Path(__file__).resolve().parents[1] / "third_party" / "codexpro" / "src" / "server.ts"
+    ).read_text(encoding="utf-8")
+    assert "Omit to use the workspace selected for this MCP session." not in server_source
+    assert "Omit to use the selected workspace." not in server_source
+    assert "stateless/multi-root" in server_source
+    assert "workspace_id returned by open_workspace" in server_source
+    assert "Later tool calls may omit workspace_id" not in server_source
+    assert "opened in this MCP session" not in server_source
+
+
+def test_frozen_hub_contract_exposes_stateless_workspace_guidance() -> None:
+    payload = json.loads(_stable_tools_list_payload("workspace-contract"))
+    tools = payload["result"]["tools"]
+    by_name = {tool["name"]: tool for tool in tools}
+    assert "stateless/multi-root" in by_name["open_workspace"]["description"]
+    assert "Later tool calls may omit workspace_id" not in by_name["open_workspace"]["description"]
+    read_workspace = by_name["read"]["inputSchema"]["properties"]["workspace_id"]
+    assert "workspace_id returned by open_workspace" in read_workspace["description"]
+    assert "hidden selected-session state" in read_workspace["description"]
 
 
 @pytest.mark.parametrize("permission_mode", ["read_only", "workspace", "system"])

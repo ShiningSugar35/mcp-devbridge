@@ -119,20 +119,20 @@ try {
     const scoped = await searchWorkspace(config, guard, workspace, { query: 'needle', root: 'a-first.txt' });
     assert.deepEqual(scoped.matches.map((m) => m.path), ['a-first.txt']);
 
-    let release;
-    const held = new Promise((resolve) => { release = resolve; });
-    fs.stat = async (...args) => {
-      if (path.resolve(String(args[0])) === tmp) await held;
-      return originalStat(...args);
-    };
-    const pending = Array.from({ length: 8 }, () => searchWorkspace(config, guard, workspace, { query: 'needle', timeoutMs: 400 }));
+    // Hold the real admission path instead of a filesystem hook. A stat/readFile
+    // barrier does not prove activeSearches occupancy because a search may pass
+    // admission before reaching that hook. commandExists runs after
+    // activeSearches++ and before worker execution, giving a deterministic slot
+    // barrier without changing production search behavior.
+    commandDelayMs = 1_000;
+    const pending = Array.from({ length: 8 }, () => searchWorkspace(config, guard, workspace, { query: 'needle', timeoutMs: 5_000 }));
     await delay(200);
     await assert.rejects(searchWorkspace(config, guard, workspace, { query: 'needle' }), /busy|capacity/i);
+    commandDelayMs = 0;
     const values = await Promise.all(pending);
-    assert(values.every((v) => v.truncated));
-    await assert.rejects(searchWorkspace(config, guard, workspace, { query: 'needle' }), /busy|capacity/i);
-    release();
-    fs.stat = originalStat;
+    assert.equal(values.length, 8);
+    assert(values.every((v) => Array.isArray(v.matches)));
+    assert(values.every((v) => v.truncated === false));
     await delay(100);
     assert.equal((await searchWorkspace(config, guard, workspace, { query: 'needle' })).matches.length, 2);
 

@@ -95,6 +95,7 @@ def test_supervisor_checks_data_plane_before_restarting(
         "fixture": cast(Any, SimpleNamespace(codex_token="[REDACTED_SECRET]"))
     }
     supervisor._health_failures = {"fixture": 1}
+    supervisor._transient_health_failures = {"fixture": 0}
     supervisor._last_restart = {}
     unit = Unit()
     monkeypatch.setattr(ProjectManager, "unit", lambda *_: unit)

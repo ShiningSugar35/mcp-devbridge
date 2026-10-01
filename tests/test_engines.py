@@ -216,6 +216,7 @@ class TestManagerErrors:
     def test_windows_bridge_cmd_pins_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
         manager = WindowsBridgeManager(uvx_exe="uvx")
         spawned: list[list[str]] = []
+        monkeypatch.setattr("local_dev_mcp_bridge.engines.port_listening", lambda _port: False)
         monkeypatch.setattr(manager, "_spawn", lambda cmd, env, secrets, log_file: spawned.append(cmd))
         manager.start("t" * 32)
         assert spawned

@@ -1270,6 +1270,9 @@ def test_v081_stateless_route_hint_survives_transport_recreation(
 
     unrouted = call("transport-session-three", route=None)
     assert unrouted.json()["error"]["code"] == -32006
+    message = unrouted.json()["error"]["message"]
+    assert "workspace_id returned by open_workspace" in message
+    assert "absolute path/cwd" in message
     assert routed_to == [18788, 18788]
 
 

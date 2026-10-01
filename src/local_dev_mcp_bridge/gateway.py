@@ -1535,7 +1535,8 @@ class OAuthGateway:
                         -32006,
                         "当前有多个运行中的工作区，但本次调用缺少可验证的 "
                         "path/cwd/task/workspace 路由；已拒绝静默使用 bootstrap 根目录。"
-                        "请传入绝对路径、有效 workspace_id/task_id，或 "
+                        "stateless/multi-root 后续调用请携带 workspace_id returned by "
+                        "open_workspace；也可提供 absolute path/cwd、task_id 或 "
                         "devbridge_workspace_id。",
                     )
                 )

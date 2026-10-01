@@ -463,7 +463,7 @@ async def test_gateway_tools_list_uses_stable_hub_contract_not_upstream_schema(
 
 def test_frozen_hub_contract_payload_matches_versioned_constants() -> None:
     summary = _tools_response_summary(_stable_tools_list_payload("contract-check"))
-    assert HUB_TOOL_CONTRACT_VERSION == 1
+    assert HUB_TOOL_CONTRACT_VERSION == 2
     assert summary == {
         "outcome": "tools_result",
         "count": HUB_TOOL_COUNT,

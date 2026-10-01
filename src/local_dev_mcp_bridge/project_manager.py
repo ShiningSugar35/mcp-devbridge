@@ -51,7 +51,19 @@ PROJECT_HEALTH_INTERVAL_SECONDS = 10.0
 PROJECT_HEALTH_TIMEOUT_SECONDS = 2.0
 PROJECT_MCP_PROBE_INTERVAL_SECONDS = 60.0
 PROJECT_HEALTH_FAILURE_THRESHOLD = 2
+PROJECT_TRANSIENT_HEALTH_FAILURE_THRESHOLD = 3
 PROJECT_RESTART_COOLDOWN_SECONDS = 30.0
+
+
+def _is_transient_health_timeout(detail: str) -> bool:
+    normalized = str(detail or "").strip().casefold()
+    if normalized.startswith("timeouterror:"):
+        return True
+    if normalized.startswith("urlerror:") and "timed out" in normalized:
+        return True
+    return normalized.startswith("mcp canary failed:") and (
+        "timed out" in normalized or "timeout" in normalized
+    )
 
 
 @dataclass
@@ -301,6 +313,7 @@ class ProjectManager:
         self._operation_locks: dict[str, threading.RLock] = {}
         self._runtime_specs: dict[str, _RuntimeStartSpec] = {}
         self._health_failures: dict[str, int] = {}
+        self._transient_health_failures: dict[str, int] = {}
         self._last_restart: dict[str, float] = {}
         self._supervisor_stop = threading.Event()
         self._supervisor_thread: threading.Thread | None = None
@@ -377,6 +390,7 @@ class ProjectManager:
             self._units.pop(project_id, None)
             self._operation_locks.pop(project_id, None)
             self._health_failures.pop(project_id, None)
+            self._transient_health_failures.pop(project_id, None)
             self._last_restart.pop(project_id, None)
         project = self.get(project_id)
         if project is not None:
@@ -508,18 +522,32 @@ class ProjectManager:
             if ok:
                 with self._lock:
                     self._health_failures[project_id] = 0
+                    self._transient_health_failures[project_id] = 0
                 continue
+            transient_timeout = _is_transient_health_timeout(detail)
             with self._lock:
                 failures = self._health_failures.get(project_id, 0) + 1
                 self._health_failures[project_id] = failures
+                if transient_timeout:
+                    transient_failures = self._transient_health_failures.get(project_id, 0) + 1
+                else:
+                    transient_failures = 0
+                self._transient_health_failures[project_id] = transient_failures
                 last_restart = self._last_restart.get(project_id, 0.0)
+            threshold = (
+                PROJECT_TRANSIENT_HEALTH_FAILURE_THRESHOLD
+                if transient_timeout and transient_failures == failures
+                else PROJECT_HEALTH_FAILURE_THRESHOLD
+            )
             self._write_supervisor_event(
                 "project_probe_failed",
                 project_id=project_id,
                 failures=failures,
+                failure_kind="timeout" if transient_timeout else "hard",
+                threshold=threshold,
                 detail=detail[:500],
             )
-            if failures < PROJECT_HEALTH_FAILURE_THRESHOLD:
+            if failures < threshold:
                 continue
             now = time.monotonic()
             if now - last_restart < PROJECT_RESTART_COOLDOWN_SECONDS:
@@ -580,6 +608,7 @@ class ProjectManager:
                 view = self._start_unit_from_spec(project, spec)
                 with self._lock:
                     self._health_failures[project_id] = 0
+                    self._transient_health_failures[project_id] = 0
                 self._write_supervisor_event(
                     "project_restart_ok",
                     project_id=project_id,
@@ -652,6 +681,7 @@ class ProjectManager:
             with self._lock:
                 self._runtime_specs[project_id] = spec
                 self._health_failures[project_id] = 0
+                self._transient_health_failures[project_id] = 0
             self._start_supervisor()
             return view
 
@@ -661,6 +691,7 @@ class ProjectManager:
             with self._lock:
                 self._runtime_specs.pop(project_id, None)
                 self._health_failures.pop(project_id, None)
+                self._transient_health_failures.pop(project_id, None)
                 unit = self._units.get(project_id)
             if unit is not None:
                 unit.stop()

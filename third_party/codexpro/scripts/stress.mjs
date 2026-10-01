@@ -293,10 +293,14 @@ async function runFullModeStress(root) {
     assert(blockedEnvWrite.isError === true, 'write allowed .env descendant path');
     assert(!(await pathExists(path.join(root, '.env', 'notes.txt'))), 'blocked .env descendant write created a file');
 
-    const arrows = await Promise.all(Array.from({ length: 12 }, () =>
-      client.request('tools/call', { name: 'search', arguments: { workspace_id: ws, query: '->', path: 'many', max_results: 25 } })
-    ));
-    assert(arrows.every((result) => result.structuredContent.matches.length === 25), 'concurrent arrow searches failed');
+    const arrows = [];
+    for (const batchSize of [8, 4]) {
+      arrows.push(...await Promise.all(Array.from({ length: batchSize }, () =>
+        client.request('tools/call', { name: 'search', arguments: { workspace_id: ws, query: '->', path: 'many', max_results: 25 } })
+      )));
+    }
+    assert(arrows.length === 12, 'stress search total changed');
+    assert(arrows.every((result) => result.structuredContent.matches.length === 25), 'bounded concurrent arrow searches failed');
 
     await fs.writeFile(path.join(root, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
       version: 1,

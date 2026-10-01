@@ -103,7 +103,9 @@ if ($LASTEXITCODE -ne 0) { throw "CodexPro production runtime preparation failed
 # --- 2. Unit tests ----------------------------------------------------------
 if (-not $SkipTests) {
     Step "2/6 unit tests (pytest)"
-    & $script:py -m pytest tests/ -q
+    $pytestTemp = Join-Path $script:root (".ai-bridge\tmp\pytest-build-" + $script:version)
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $pytestTemp) | Out-Null
+    & $script:py -m pytest tests/ -q --basetemp $pytestTemp
     if ($LASTEXITCODE -ne 0) { throw "pytest failed" }
 }
 
