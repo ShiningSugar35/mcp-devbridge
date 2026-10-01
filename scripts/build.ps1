@@ -153,6 +153,25 @@ if (-not $SkipInstaller) {
         )
         $script:iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     }
+    if (-not $script:iscc) {
+        $registryRoots = @(
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        )
+        foreach ($registryRoot in $registryRoots) {
+            $entry = Get-ItemProperty $registryRoot -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -like "Inno Setup version *" -and $_.InstallLocation } |
+                Select-Object -First 1
+            if ($entry) {
+                $candidate = Join-Path $entry.InstallLocation "ISCC.exe"
+                if (Test-Path $candidate) {
+                    $script:iscc = $candidate
+                    break
+                }
+            }
+        }
+    }
     if (-not $script:iscc -or -not (Test-Path $script:iscc)) {
         throw "ISCC.exe not found. Install Inno Setup 6 (winget install JRSoftware.InnoSetup) or set env ISCC"
     }
