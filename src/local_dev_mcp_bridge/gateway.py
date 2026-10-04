@@ -3025,7 +3025,7 @@ class OAuthGateway:
             return False
         with self._session_lock:
             handle_workspace = self._workspace_handle_roots.get(workspace_handle, "")
-        return handle_workspace != target_workspace
+        return bool(handle_workspace and handle_workspace != target_workspace)
 
     def _infer_workspace_for_call(
         self,

@@ -13,6 +13,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -1484,6 +1485,7 @@ def test_v082_workspace_handle_affinity_survives_followup_without_path(
 ) -> None:
     """A CodexPro workspace_id returned by open_workspace must keep its root affinity."""
     routed_to: list[int] = []
+    forwarded_payloads: list[dict[str, Any]] = []
 
     class _Router(httpx.AsyncHTTPTransport):
         async def handle_async_request(self, request):
@@ -1492,6 +1494,7 @@ def test_v082_workspace_handle_affinity_survives_followup_without_path(
             port = urlparse(str(request.url)).port or 18787
             routed_to.append(port)
             payload = json.loads(request.content.decode("utf-8")) if request.content else {}
+            forwarded_payloads.append(payload)
             tool = str((payload.get("params") or {}).get("name") or "")
             if tool == "open_workspace":
                 return httpx.Response(
@@ -1550,6 +1553,33 @@ def test_v082_workspace_handle_affinity_survives_followup_without_path(
     )
     assert followed.status_code == 200, followed.text
     assert routed_to[-1] == 18788
+
+    wrapped = mw_env.client.post(
+        "/mcp",
+        content=json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 203,
+                "method": "tools/call",
+                "params": {
+                    "name": "codexpro",
+                    "arguments": {
+                        "action": "read",
+                        "args": {
+                            "workspace_id": "ws-beta-child",
+                            "path": "README.md",
+                        },
+                    },
+                },
+            }
+        ),
+        headers=headers,
+    )
+    assert wrapped.status_code == 200, wrapped.text
+    assert "error" not in wrapped.json()
+    assert routed_to[-1] == 18788
+    wrapped_args = forwarded_payloads[-1]["params"]["arguments"]
+    assert wrapped_args["args"]["workspace_id"] == "ws-beta-child"
 
 
 def test_open_workspace_updates_only_matching_legacy_session_soft_anchor(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -406,6 +406,102 @@ def test_codexpro_wrapper_strips_nested_stale_workspace_handle(
     forwarded_args = forwarded["params"]["arguments"]["args"]
     assert forwarded_args["path"] == str(target_b)
     assert "workspace_id" not in forwarded_args
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "workspace_arg"),
+    [
+        (
+            "read",
+            {
+                "workspace_id": "ws-mcpdevbridge",
+                "path": "README.md",
+                "devbridge_workspace_id": "d-root",
+            },
+            "workspace_id",
+        ),
+        (
+            "codexpro",
+            {
+                "action": "read",
+                "args": {"workspace_id": "ws-mcpdevbridge", "path": "README.md"},
+                "devbridge_workspace_id": "d-root",
+            },
+            "nested",
+        ),
+    ],
+)
+def test_explicit_devbridge_route_preserves_unknown_opaque_workspace_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, Any],
+    workspace_arg: str,
+) -> None:
+    """A project route selects the engine; it must not erase an opaque sub-workspace handle."""
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root_d = tmp_path / "d-root"
+    root_d.mkdir()
+    gateway = _gateway_for_roots(tmp_path, {"d-root": root_d})
+    forwarded: list[dict[str, Any]] = []
+    routed_ports: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        routed_ports.append(urlparse(str(request.url)).port or 0)
+        forwarded.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": 1, "result": {"content": []}},
+        )
+
+    gateway._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TestClient(gateway.app, raise_server_exceptions=False)
+    response = client.post(
+        "/mcp",
+        content=json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments},
+            }
+        ),
+        headers={
+            "Authorization": "Bearer hub-credential",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert routed_ports == [19000]
+    forwarded_args = forwarded[0]["params"]["arguments"]
+    assert "devbridge_workspace_id" not in forwarded_args
+    if workspace_arg == "nested":
+        assert forwarded_args["args"]["workspace_id"] == "ws-mcpdevbridge"
+    else:
+        assert forwarded_args["workspace_id"] == "ws-mcpdevbridge"
+
+
+def test_codexpro_wrapper_known_handle_scopes_ambiguous_relative_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wrapper follow-up carrying an open_workspace handle must not become -32602."""
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "cfg"))
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "same.md").write_text("a", encoding="utf-8")
+    (root_b / "same.md").write_text("b", encoding="utf-8")
+    gateway = _gateway_for_roots(tmp_path, {"a": root_a, "b": root_b})
+    gateway._workspace_handle_roots["ws-b-child"] = "b"
+
+    arguments = {
+        "action": "read",
+        "args": {"workspace_id": "ws-b-child", "path": "same.md"},
+    }
+    assert gateway._infer_workspace_for_call("codexpro", arguments) == "b"
+    assert gateway._workspace_handle_targets_other_root("codexpro", arguments, "b") is False
 
 
 def test_path_bearing_tools_cover_read_write_edit_search_shell_git_and_patch(
