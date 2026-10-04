@@ -2,6 +2,13 @@
 
 All dates are local development dates.
 
+## 0.8.9.6 (2026-10-04) - Verified local Windows build; formal release pending
+
+- Preserve opaque workspace handles unless the Gateway positively knows they belong to another project root. Keep persisted route validation fail-closed and verify public open_workspace followed by both direct and wrapper reads.
+- Clarify stateless workspace handle threading in tool descriptions. Require three consecutive transient timeout failures before recovery while retaining the two-failure hard-error policy.
+- Discover registered nonstandard Inno Setup installations and keep build pytest temporary files in the project. Respect the existing eight-search admission limit in the stress harness while retaining twelve total searches and separate over-capacity coverage.
+- Source `63d966b` built and installed locally on Windows; fresh full regression: 673 passed / 3 skipped. All four drive roots, local/public MCP contracts, twelve public D-root probes and 2,775 installed payload hashes passed. This is a local deployment receipt; no new public GitHub Release or same-source Linux CI completion is claimed.
+
 ## 0.8.9.5 (2026-09-29) - Scheduled continuation and responsive project startup
 
 Released from source `6cde7c9a91b6558f00689fdaf4c3c8f2a0e2396b` with Windows/Linux CI run `36540228276`; the Windows release asset has also been installed and verified locally with all five prior project roots restored.
