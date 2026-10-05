@@ -566,3 +566,76 @@ def test_cloudflare_http2_hint_is_used_on_next_bounded_retry(
         for item in events
     )
     assert coord.state == EngineState.READY
+
+
+def test_runtime_rebuild_preserves_working_http2() -> None:
+    class ProtocolTunnel(FakeTunnel):
+        current_protocol = "http2"
+        recommended_protocol = ""
+
+        def start(self, **kwargs) -> None:
+            super().start(**kwargs)
+            self.current_protocol = str(kwargs.get("cloudflare_protocol") or "auto")
+
+    tunnel = ProtocolTunnel()
+    coord = ServiceCoordinator(tunnel=tunnel)  # type: ignore[arg-type]
+    options = StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="mcp.example.com")
+    coord._active_options = options
+    ok, _, _ = coord._start_public_tunnel_with_retry(options, phase="runtime_rebuild")
+    assert ok
+    assert tunnel.starts[0]["cloudflare_protocol"] == "http2"
+
+
+def test_last_attempt_hint_survives_next_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    class LateHintTunnel(FakeTunnel):
+        current_protocol = "auto"
+        recommended_protocol = ""
+
+        def start(self, **kwargs) -> None:
+            super().start(**kwargs)
+            self.current_protocol = str(kwargs.get("cloudflare_protocol") or "auto")
+            self.recommended_protocol = ""
+
+        def wait_ready(self) -> bool:
+            if len(self.starts) <= 3:
+                self.recommended_protocol = "http2" if len(self.starts) == 3 else ""
+                self.error = "cloudflare_protocol_fallback:http2" if self.recommended_protocol else "timeout"
+                self.is_running = False
+                return False
+            return super().wait_ready()
+
+    monkeypatch.setattr(app_state, "TUNNEL_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    tunnel = LateHintTunnel()
+    coord = ServiceCoordinator(tunnel=tunnel)  # type: ignore[arg-type]
+    options = StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="mcp.example.com")
+    coord._active_options = options
+    assert not coord._start_public_tunnel_with_retry(options, phase="runtime_rebuild")[0]
+    assert len(tunnel.starts) == 3
+    assert coord._start_public_tunnel_with_retry(options, phase="runtime_rebuild")[0]
+    assert tunnel.starts[3]["cloudflare_protocol"] == "http2"
+
+
+@pytest.mark.parametrize("change", ["hostname", "credential", "port"])
+def test_http2_preference_does_not_cross_transport_config(change: str) -> None:
+    class ProtocolTunnel(FakeTunnel):
+        current_protocol = "http2"
+
+    tunnel = ProtocolTunnel()
+    coord = ServiceCoordinator(tunnel=tunnel)  # type: ignore[arg-type]
+    coord._cloudflare_retry_protocol = "http2"
+    coord._active_options = StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="old.example.com", tunnel_token="old")
+    new_options = StartOptions(
+        connection=ConnectionMethod.CLOUDFLARE,
+        public_hostname="new.example.com" if change == "hostname" else "old.example.com",
+        tunnel_token="new" if change == "credential" else "old",
+        gateway_port=19916 if change == "port" else constants.DEFAULT_GATEWAY_PORT,
+    )
+    assert coord._start_public_tunnel_with_retry(new_options, phase="runtime_rebuild")[0]
+    assert tunnel.starts[0]["cloudflare_protocol"] == "auto"
+
+
+def test_explicit_stop_resets_http2_preference() -> None:
+    coord = make_coord()
+    coord._cloudflare_retry_protocol = "http2"
+    coord.stop_callable()
+    assert coord._cloudflare_retry_protocol == "auto"

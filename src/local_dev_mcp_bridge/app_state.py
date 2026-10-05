@@ -142,6 +142,7 @@ class ServiceCoordinator:
         self._active_options: StartOptions | None = None
         self._transport_stop = threading.Event()
         self._tunnel_retry_stop = threading.Event()
+        self._cloudflare_retry_protocol = "auto"
         self._transport_thread: threading.Thread | None = None
         self._transport_failures = 0
         self._last_transport_restart = 0.0
@@ -299,6 +300,18 @@ class ServiceCoordinator:
         last_category = "unknown_process_failure"
         retried = False
         cloudflare_protocol = "auto"
+        if (
+            phase == "runtime_rebuild"
+            and options.connection == ConnectionMethod.CLOUDFLARE
+            and self._active_options is not None
+            and self._same_transport_options(self._active_options, options)
+            and self._active_options.tunnel_token == options.tunnel_token
+            and (
+                self._cloudflare_retry_protocol == "http2"
+                or getattr(self.tunnel, "current_protocol", "") == "http2"
+            )
+        ):
+            cloudflare_protocol = "http2"
         for attempt, delay in enumerate(TUNNEL_RETRY_BACKOFF_SECONDS, start=1):
             if self._tunnel_retry_stop.is_set():
                 return False, retried, "cancelled"
@@ -328,6 +341,8 @@ class ServiceCoordinator:
                     start_kwargs["cloudflare_protocol"] = cloudflare_protocol
                 self.tunnel.start(**start_kwargs)
                 if self.tunnel.wait_ready():
+                    if options.connection == ConnectionMethod.CLOUDFLARE:
+                        self._cloudflare_retry_protocol = cloudflare_protocol
                     self._write_transport_health(
                         event="tunnel_start_attempt_ok",
                         phase=phase,
@@ -361,6 +376,10 @@ class ServiceCoordinator:
                 protocol=current_protocol,
                 recommended_protocol=recommended_protocol,
             )
+            # Preserve an explicit precheck hint even when this round has no
+            # attempts left; the next bounded rebuild must not relearn it.
+            if options.connection == ConnectionMethod.CLOUDFLARE and recommended_protocol == "http2":
+                self._cloudflare_retry_protocol = "http2"
             if (
                 options.connection == ConnectionMethod.CLOUDFLARE
                 and recommended_protocol == "http2"
@@ -472,6 +491,7 @@ class ServiceCoordinator:
                     return
                 raise SpawnError("Hub 已使用不同连接配置启动；请先停止后再切换连接配置。")
             self._tunnel_retry_stop.clear()
+            self._cloudflare_retry_protocol = "auto"
             self._active_options = options
             self._start_once(options)
             if self.state == EngineState.READY:
@@ -578,6 +598,7 @@ class ServiceCoordinator:
         if self.tunnel.is_running:
             self.tunnel.stop()
         self._active_options = None
+        self._cloudflare_retry_protocol = "auto"
         self._transport_failures = 0
         self._gateway_failures = 0
         self._gateway_mcp_failures = 0
