@@ -578,6 +578,7 @@ def test_runtime_rebuild_preserves_working_http2() -> None:
             self.current_protocol = str(kwargs.get("cloudflare_protocol") or "auto")
 
     tunnel = ProtocolTunnel()
+    tunnel.state = EngineState.READY
     coord = ServiceCoordinator(tunnel=tunnel)  # type: ignore[arg-type]
     options = StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="mcp.example.com")
     coord._active_options = options
@@ -639,3 +640,30 @@ def test_explicit_stop_resets_http2_preference() -> None:
     coord._cloudflare_retry_protocol = "http2"
     coord.stop_callable()
     assert coord._cloudflare_retry_protocol == "auto"
+
+
+def test_failed_preferred_http2_rechecks_auto_after_network_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ChangedNetworkTunnel(FakeTunnel):
+        current_protocol = "http2"
+        recommended_protocol = ""
+
+        def start(self, **kwargs) -> None:
+            super().start(**kwargs)
+            self.current_protocol = str(kwargs.get("cloudflare_protocol") or "auto")
+
+        def wait_ready(self) -> bool:
+            if self.current_protocol == "http2":
+                self.state = EngineState.ERROR
+                self.error = "TCP connection timeout after network change"
+                self.is_running = False
+                return False
+            return super().wait_ready()
+
+    monkeypatch.setattr(app_state, "TUNNEL_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    tunnel = ChangedNetworkTunnel()
+    coord = ServiceCoordinator(tunnel=tunnel)  # type: ignore[arg-type]
+    options = StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="mcp.example.com")
+    coord._active_options = options
+    coord._cloudflare_retry_protocol = "http2"
+    assert coord._start_public_tunnel_with_retry(options, phase="runtime_rebuild")[0]
+    assert [s["cloudflare_protocol"] for s in tunnel.starts] == ["http2", "auto"]

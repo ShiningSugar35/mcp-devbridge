@@ -308,7 +308,10 @@ class ServiceCoordinator:
             and self._active_options.tunnel_token == options.tunnel_token
             and (
                 self._cloudflare_retry_protocol == "http2"
-                or getattr(self.tunnel, "current_protocol", "") == "http2"
+                or (
+                    getattr(self.tunnel, "current_protocol", "") == "http2"
+                    and getattr(self.tunnel, "state", None) == EngineState.READY
+                )
             )
         ):
             cloudflare_protocol = "http2"
@@ -380,6 +383,12 @@ class ServiceCoordinator:
             # attempts left; the next bounded rebuild must not relearn it.
             if options.connection == ConnectionMethod.CLOUDFLARE and recommended_protocol == "http2":
                 self._cloudflare_retry_protocol = "http2"
+            elif options.connection == ConnectionMethod.CLOUDFLARE and current_protocol == "http2" and retryable:
+                # A network change can make previously working TCP unavailable.
+                # Recheck auto within the existing budget instead of pinning a
+                # stale preference through all future recovery rounds.
+                self._cloudflare_retry_protocol = "auto"
+                cloudflare_protocol = "auto"
             if (
                 options.connection == ConnectionMethod.CLOUDFLARE
                 and recommended_protocol == "http2"
