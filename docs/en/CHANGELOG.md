@@ -2,6 +2,12 @@
 
 All dates are local development dates.
 
+## 0.8.9.6 maintenance (2026-10-05) - Local upgrade verified; public stability pending
+
+- Retain a validated or explicitly suggested Cloudflare HTTP/2 protocol across recovery of the same transport configuration and credentials. Clear stale HTTP/2 preference after a retryable failure and recheck auto within the existing retry budget; explicit stop and a new lifecycle reset the preference.
+- Source `5ccad41` passed 680 Python tests / 3 skipped, Ruff and Windows/Linux Pyright, then built and installed on Windows. All four roots and 2,775 payload hashes passed; the unchanged 50-tool schema, explicit workspace direct/wrapper reads and real Connector calls worked.
+- Post-upgrade local probes passed 12/12; public probes passed 11/12 with one ConnectTimeout. Overall public stability remains unaccepted. System proxy settings were preserved as requested; no formal Release or Linux binary/CI provenance completion is claimed.
+
 ## 0.8.9.6 (2026-10-04) - Verified local Windows build; formal release pending
 
 - Preserve opaque workspace handles unless the Gateway positively knows they belong to another project root. Keep persisted route validation fail-closed and verify public open_workspace followed by both direct and wrapper reads.
