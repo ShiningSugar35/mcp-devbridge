@@ -2,6 +2,11 @@
 
 All dates are local development dates.
 
+## Local configuration maintenance (2026-10-07) - D-root SSH enabled
+
+- At the user's explicit choice, switch only the installed D-root permission profile from workspace/developer to system/full with the existing elevated broker. Keep C/E profiles, the existing F engine, proxy settings and credentials.
+- Real MCP `ssh opencode-server true` completed with exit0; an independent command confirmed administrator privileges. Local/public MCP initialization, the unchanged 50-tool schema and explicit workspace wrapper reads passed. No allowlist workaround, code/build/Release change or SouthBird sampling execution was performed.
+
 ## 0.8.9.6 maintenance (2026-10-05) - Local upgrade verified; public stability pending
 
 - Retain a validated or explicitly suggested Cloudflare HTTP/2 protocol across recovery of the same transport configuration and credentials. Clear stale HTTP/2 preference after a retryable failure and recheck auto within the existing retry budget; explicit stop and a new lifecycle reset the preference.
