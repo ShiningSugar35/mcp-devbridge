@@ -49,6 +49,10 @@ New desktop projects intentionally default to full access. The first actual use 
 
 `system/full_system` permits system-level work such as registry or environment configuration when requested. It does not disable hard blocks for known destructive disk/boot/system command patterns. Path restrictions on a tool’s working directory also remain separate from what an explicitly-authorized system command is allowed to do.
 
+Short-command preflight distinguishes ordinary data parameters from executable text only for simple static calls to known data-consuming tools. For example, `Write-Output 'format'` and a literal `git log` output format are data. Direct program calls preserve the executable/argument-array boundary in both Gateway and administrator broker. Shell/remote wrappers, interpreter inline code, Git execution configuration, dynamic expressions, operators and uncertain quoting retain conservative whole-payload checks. This preflight is not a sandbox for arbitrary programs or scripts; it does not change project permissions or the CodexPro developer allowlist.
+
+Short-command results expose bounded `execution_status`, `exit_code` and `timed_out` metadata. Gateway audit distinguishes policy denial, invalid arguments, administrator capability absence, worker saturation, spawn failure, timeout, nonzero exit and execution exceptions. These new audit fields contain fixed categories and numeric/boolean values, never stdout/stderr or arbitrary exception messages. Existing JSON-RPC error codes and the public input schema remain compatible.
+
 ## Shell task security
 
 Every public CodexPro `bash` invocation uses the same PathGuard, workspace selection, Bash session policy, execution profile, destructive-command checks, and environment sanitization before spawning.

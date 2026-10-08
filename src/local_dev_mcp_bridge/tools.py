@@ -29,6 +29,7 @@ from .execution_profile import (
     DEFAULT_EXECUTION_PROFILE,
     ExecutionProfileError,
     check_execution,
+    check_program_execution,
     enforce_full_system_confirmation,
 )
 from .models import ProjectConfig
@@ -303,7 +304,7 @@ class LocalDevTools:
     def _excluded_set(self, ctx: Context | None = None) -> frozenset[str]:
         return self._session_state(ctx).excluded
 
-    def _guard_command(self, command: str) -> None:
+    def _guard_command(self, command: str, *, args: list[str] | None = None) -> None:
         """Approve a command against the active execution profile.
 
         Destructive/system-modifying commands are rejected in every profile;
@@ -316,7 +317,10 @@ class LocalDevTools:
             )
         except ExecutionProfileError as exc:
             raise PermissionDeniedError(str(exc)) from None
-        allowed, reason = check_execution(command, self.execution_profile)
+        allowed, reason = (
+            check_execution(command, self.execution_profile) if args is None
+            else check_program_execution(command, args, self.execution_profile)
+        )
         if not allowed:
             raise PermissionDeniedError(
                 f"命令被执行档位拒绝：{reason}\n命令：{command[:200]}"
@@ -1077,8 +1081,7 @@ class LocalDevTools:
         self._require("command", ctx)
         if not executable.strip():
             raise ValueError("executable 不能为空。")
-        full = executable + (" " + " ".join(args or []) if args else "")
-        self._guard_command(full)
+        self._guard_command(executable, args=args or [])
         timeout = _clamp_int(timeout_seconds, constants.DEFAULT_COMMAND_TIMEOUT_SECONDS)
         workspace = self._workspace(ctx)
         workdir = self._resolve(cwd, ctx) if cwd.strip() else workspace
@@ -1107,7 +1110,7 @@ class LocalDevTools:
         self._require("process", ctx)
         if not executable.strip():
             raise ValueError("executable 不能为空。")
-        self._guard_command(executable + (" " + " ".join(args or []) if args else ""))
+        self._guard_command(executable, args=args or [])
         workspace = self._workspace(ctx)
         workdir = self._resolve(cwd, ctx) if cwd.strip() else workspace
         if not workdir.is_dir():

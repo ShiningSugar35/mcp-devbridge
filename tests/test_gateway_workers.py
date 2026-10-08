@@ -80,7 +80,7 @@ async def test_http_error_audit_is_not_success(gateway, monkeypatch):
         response = await client.post("/mcp", json=call("run_command", command=""))
     assert response.json()["error"]["code"] == -32602
     assert len(audit) == 1 and audit[0]["success"] is False
-    assert audit[0]["error_type"] == "local_tool_error"
+    assert audit[0]["error_type"] == "invalid_arguments"
     await gateway._http.aclose()
 
 
@@ -298,11 +298,60 @@ async def test_failed_command_is_error_and_audited(gateway, monkeypatch, name, t
     result.timed_out, result.exit_code = timed_out, code
     monkeypatch.setattr(gm, name, lambda *_a, **_kw: result)
     audit = []
-    monkeypatch.setattr(gateway, "_audit_gateway_tool", lambda *args, **kw: audit.append(args[5]))
+    monkeypatch.setattr(gateway, "_audit_gateway_tool", lambda *args, **kw: audit.append({"success": args[5], **kw}))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://127.0.0.1") as client:
         response = await client.post("/mcp", json=call(name))
     assert response.json()["result"]["isError"] is True
-    assert audit == [False]
+    expected = "timed_out" if timed_out else "command_failed"
+    assert audit[0]["success"] is False
+    assert audit[0]["error_type"] == expected
+    assert audit[0]["execution"] == {"execution_status": expected, "exit_code": code, "timed_out": timed_out}
+    assert response.json()["result"]["structuredContent"] == audit[0]["execution"]
+    await gateway._http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command, expected", [("echo 'format'", "success"), ("format C:", "policy_denied")])
+async def test_literal_and_policy_error_have_distinct_audit(gateway, monkeypatch, command, expected):
+    executed, audit = [], []
+    monkeypatch.setattr(gm, "run_command", lambda *_a, **_kw: executed.append(True) or output())
+    monkeypatch.setattr(gateway, "_audit_gateway_tool", lambda *args, **kw: audit.append(kw))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://127.0.0.1") as client:
+        response = await client.post("/mcp", json=call("run_command", command=command))
+    assert bool(executed) == (expected == "success")
+    assert audit[0]["execution"]["execution_status"] == expected
+    assert audit[0]["error_type"] == ("" if expected == "success" else expected)
+    assert ("error" in response.json()) == (expected == "policy_denied")
+    await gateway._http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_execution_exception_audit_does_not_store_free_text(gateway, monkeypatch):
+    audit = []
+    def fail(*_a, **_kw):
+        raise RuntimeError("password=do-not-log-this")
+    monkeypatch.setattr(gm, "run_command", fail)
+    monkeypatch.setattr(gateway, "_audit_gateway_tool", lambda *args, **kw: audit.append(kw))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://127.0.0.1") as client:
+        response = await client.post("/mcp", json=call("run_command"))
+    assert audit[0]["error_type"] == "execution_error"
+    assert "do-not-log-this" not in json.dumps(audit) + response.text
+    await gateway._http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_output_is_not_added_to_audit(gateway, monkeypatch):
+    result, audit = output(), []
+    result.exit_code = 7
+    result.stdout = "token=secret-output"
+    result.stderr = "password=secret-error"
+    monkeypatch.setattr(gm, "run_command", lambda *_a, **_kw: result)
+    monkeypatch.setattr(gateway._audit, "log_tool_call", lambda **kw: audit.append(kw))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://127.0.0.1") as client:
+        await client.post("/mcp", json=call("run_command"))
+    assert audit[0]["exit_code"] == 7 and audit[0]["error_type"] == "command_failed"
+    assert audit[0]["extra"] == {"device_id": "", "execution_status": "command_failed", "exit_code": 7, "timed_out": False}
+    assert "secret-output" not in json.dumps(audit) and "secret-error" not in json.dumps(audit)
     await gateway._http.aclose()
 
 

@@ -55,6 +55,7 @@ from . import constants
 from .audit import AuditLogger
 from .constants import LOG_DIR as _LOG_DIR
 from .device_hub import DeviceRegistry
+from .execution_profile import ExecutionProfileError
 from .flight_recorder import FlightRecorder
 from .gateway_diagnostics import scrub_body, write_entry
 from .gateway_protocol import McpRequestError, parse_mcp_envelope, read_mcp_body
@@ -70,6 +71,10 @@ from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_
 from .routing_state import load_workspace_routes, save_workspace_routes
 from .secrets import SecretsStore
 from .shell import run_command, run_program
+
+
+class _AdministratorUnavailable(ValueError):
+    """A fixed classification, distinct from user argument validation."""
 
 _DEVICE_TOOL_NAMES = frozenset(
     {
@@ -1599,6 +1604,7 @@ class OAuthGateway:
             ):
                 local_started = time.monotonic()
                 success, error_type = False, "local_tool_error"
+                execution: dict[str, Any] = {}
                 try:
                     result = await self._exec_local_tool(
                         tool_name, rpc, params, workspace_id, session_id
@@ -1606,6 +1612,21 @@ class OAuthGateway:
                     payload = json.loads(bytes(result.body))
                     success = "error" not in payload and not payload.get("result", {}).get("isError")
                     error_type = "" if success else "local_tool_error"
+                    metadata = payload.get("result", {}).get("structuredContent", {})
+                    if "error" in payload:
+                        metadata = payload["error"].get("data", {})
+                    category = metadata.get("execution_status") if isinstance(metadata, dict) else None
+                    if isinstance(category, str) and category in {
+                        "success", "command_failed", "timed_out", "spawn_failed",
+                        "policy_denied", "invalid_arguments", "administrator_unavailable",
+                        "execution_error", "worker_busy",
+                    }:
+                        error_type = "" if success else category
+                        execution = {"execution_status": category}
+                        if type(metadata.get("exit_code")) is int:
+                            execution["exit_code"] = metadata["exit_code"]
+                        if type(metadata.get("timed_out")) is bool:
+                            execution["timed_out"] = metadata["timed_out"]
                     return result
                 except asyncio.CancelledError:
                     error_type = "waiter_cancelled_execution_unknown"
@@ -1615,6 +1636,7 @@ class OAuthGateway:
                         request, rpc, tool_name, workspace_id, device_id, bool(success),
                         duration_ms=int((time.monotonic() - local_started) * 1000),
                         error_type=error_type,
+                        execution=execution,
                     )
 
         if remote is None and rpc is not None and jsonrpc_method == "tools/call" and workspace_id:
@@ -2127,11 +2149,15 @@ class OAuthGateway:
                 lambda: self._exec_local_tool_sync(name, rpc, params, workspace_id, session_id)
             )
         except LocalToolBusy as exc:
-            return JSONResponse(_jsonrpc_error(rpc.get("id"), -32005, str(exc)))
+            payload = _jsonrpc_error(rpc.get("id"), -32005, str(exc))
+            payload["error"]["data"] = {"execution_status": "worker_busy"}
+            return JSONResponse(payload)
         except Exception as exc:
-            return JSONResponse(_jsonrpc_error(
+            payload = _jsonrpc_error(
                 rpc.get("id"), -32603, f"工具执行失败: {type(exc).__name__}"
-            ))
+            )
+            payload["error"]["data"] = {"execution_status": "execution_error"}
+            return JSONResponse(payload)
 
     def _exec_local_tool_sync(
         self,
@@ -2151,7 +2177,9 @@ class OAuthGateway:
                 policy_error = self._workspace_tool_policy_error(name, arguments, workspace_id)
                 if policy_error is not None:
                     _kind, code, message = policy_error
-                    return JSONResponse(_jsonrpc_error(rpc_id, code, message))
+                    payload = _jsonrpc_error(rpc_id, code, message)
+                    payload["error"]["data"] = {"execution_status": "policy_denied"}
+                    return JSONResponse(payload)
             if name == "run_command":
                 command = str(arguments.get("command", ""))
                 if not command.strip():
@@ -2164,14 +2192,14 @@ class OAuthGateway:
                     command, "full_system" if system_access else "safe"
                 )
                 if not allowed:
-                    raise ValueError(reason)
+                    raise ExecutionProfileError(reason)
                 timeout = max(1, min(int(arguments.get("timeout_seconds") or 10), 20))
                 if system_access and os.name == "nt":
                     from .elevation import get_elevation_controller
 
                     elevation = get_elevation_controller()
                     if not elevation.is_registered():
-                        raise ValueError(
+                        raise _AdministratorUnavailable(
                             "Windows full-system administrator capability is not authorized; complete the one-time UAC broker registration first."
                         )
                     res = elevation.execute_command(command, cwd, timeout)
@@ -2188,6 +2216,7 @@ class OAuthGateway:
                     _jsonrpc_result(rpc_id, {
                         "content": [{"type": "text", "text": text}],
                         "isError": bool(res.timed_out or res.exit_code != 0),
+                        "structuredContent": self._execution_metadata(res),
                     })
                 )
             elif name == "run_program":
@@ -2197,21 +2226,20 @@ class OAuthGateway:
                 args = [str(a) for a in (arguments.get("args") or [])]
                 cwd_rel = str(arguments.get("cwd", "")).strip()
                 cwd = self._local_tool_cwd(workspace, cwd_rel, system_access=system_access)
-                from .execution_profile import check_execution
+                from .execution_profile import check_program_execution
 
-                command_line = " ".join([executable, *args])
-                allowed, reason = check_execution(
-                    command_line, "full_system" if system_access else "safe"
+                allowed, reason = check_program_execution(
+                    executable, args, "full_system" if system_access else "safe"
                 )
                 if not allowed:
-                    raise ValueError(reason)
+                    raise ExecutionProfileError(reason)
                 timeout = max(1, min(int(arguments.get("timeout_seconds") or 10), 20))
                 if system_access and os.name == "nt":
                     from .elevation import get_elevation_controller
 
                     elevation = get_elevation_controller()
                     if not elevation.is_registered():
-                        raise ValueError(
+                        raise _AdministratorUnavailable(
                             "Windows full-system administrator capability is not authorized; complete the one-time UAC broker registration first."
                         )
                     res = elevation.execute_program(executable, args, cwd, timeout)
@@ -2228,6 +2256,7 @@ class OAuthGateway:
                     _jsonrpc_result(rpc_id, {
                         "content": [{"type": "text", "text": text}],
                         "isError": bool(res.timed_out or res.exit_code != 0),
+                        "structuredContent": self._execution_metadata(res),
                     })
                 )
             elif name == "shell_self_test":
@@ -2302,10 +2331,30 @@ class OAuthGateway:
                 )
             else:
                 raise ValueError(f"未知的本地工具: {name}")
+        except ExecutionProfileError as exc:
+            payload = _jsonrpc_error(rpc_id, -32602, str(exc))
+            payload["error"]["data"] = {"execution_status": "policy_denied"}
+            return JSONResponse(payload)
+        except _AdministratorUnavailable as exc:
+            payload = _jsonrpc_error(rpc_id, -32602, str(exc))
+            payload["error"]["data"] = {"execution_status": "administrator_unavailable"}
+            return JSONResponse(payload)
         except ValueError as exc:
-            return JSONResponse(_jsonrpc_error(rpc_id, -32602, str(exc)))
+            payload = _jsonrpc_error(rpc_id, -32602, str(exc))
+            payload["error"]["data"] = {"execution_status": "invalid_arguments"}
+            return JSONResponse(payload)
         except Exception as exc:
-            return JSONResponse(_jsonrpc_error(rpc_id, -32603, f"工具执行失败: {exc}"))
+            payload = _jsonrpc_error(rpc_id, -32603, f"工具执行失败: {type(exc).__name__}")
+            payload["error"]["data"] = {"execution_status": "execution_error"}
+            return JSONResponse(payload)
+
+    @staticmethod
+    def _execution_metadata(res: Any) -> dict[str, Any]:
+        status = (
+            "timed_out" if res.timed_out else "spawn_failed" if res.exit_code == -1
+            else "command_failed" if res.exit_code != 0 else "success"
+        )
+        return {"execution_status": status, "exit_code": res.exit_code, "timed_out": res.timed_out}
 
     # ----------------------------------------------------------- device helpers
     def _local_device_online(self) -> bool:
@@ -2398,6 +2447,7 @@ class OAuthGateway:
         *,
         duration_ms: int = 0,
         error_type: str = "",
+        execution: dict[str, Any] | None = None,
     ) -> None:
         params = (rpc or {}).get("params") or {}
         arguments = params.get("arguments") if isinstance(params, dict) else {}
@@ -2417,7 +2467,8 @@ class OAuthGateway:
             duration_ms=max(0, duration_ms),
             success=success,
             error_type=error_type or None,
-            extra={"device_id": device_id},
+            exit_code=(execution or {}).get("exit_code"),
+            extra={"device_id": device_id, **(execution or {})},
         )
 
     # -------------------------------------------------------- workspace helpers

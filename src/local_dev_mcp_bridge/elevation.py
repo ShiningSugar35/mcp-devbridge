@@ -26,7 +26,7 @@ from urllib import request as urllib_request
 
 from . import constants
 from .engines import CodexProManager, EngineState, SpawnError
-from .execution_profile import check_execution
+from .execution_profile import check_execution, check_program_execution
 from .platform_support import IS_WINDOWS, run_platform_kwargs
 from .secrets import generate_token, get_store
 from .shell import run_command, run_program
@@ -600,7 +600,7 @@ class _BrokerRuntime:
             args = [str(item) for item in (payload.get("args") or [])]
             if len(args) > 256 or any(len(arg) > 16_384 for arg in args):
                 raise ValueError("program arguments exceed broker limits")
-            allowed, reason = check_execution(" ".join([executable, *args]), "full_system")
+            allowed, reason = check_program_execution(executable, args, "full_system")
             if not allowed:
                 raise ValueError(reason)
             result = run_program(executable, args, cwd=cwd, timeout_seconds=timeout)

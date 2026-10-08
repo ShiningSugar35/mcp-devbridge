@@ -252,6 +252,27 @@ def test_broker_execute_rejects_missing_cwd(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("kind", ["command", "program"])
+def test_broker_uses_same_literal_data_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    from types import SimpleNamespace
+    runtime = elevation._BrokerRuntime("x" * 40)
+    executed = []
+    def execute(*args, **kwargs):
+        executed.append(args)
+        return SimpleNamespace(shell="fixture", command="fixture", exit_code=0,
+                               duration_seconds=0.0, timed_out=False, stdout="format", stderr="")
+    monkeypatch.setattr(elevation, "run_command", execute)
+    monkeypatch.setattr(elevation, "run_program", execute)
+    payload = {"kind": kind, "cwd": str(tmp_path), "command": "Write-Output 'format'",
+               "executable": "git", "args": ["log", "--pretty=format: %h"]}
+    assert runtime.execute(payload)["exit_code"] == 0
+    assert len(executed) == 1
+    payload.update(command="format C:", executable="format.exe", args=["C:"])
+    with pytest.raises(ValueError, match="格式化|危险命令"):
+        runtime.execute(payload)
+    assert len(executed) == 1
+
+
 def test_controller_refuses_false_elevation(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = elevation.ElevationController()
     monkeypatch.setattr(controller, "health", lambda: {"ok": True, "elevated": False})

@@ -15,6 +15,7 @@ from local_dev_mcp_bridge.execution_profile import (
     DEFAULT_EXECUTION_PROFILE,
     ExecutionProfileError,
     check_execution,
+    check_program_execution,
     enforce_full_system_confirmation,
     normalize_first_word,
 )
@@ -101,6 +102,42 @@ def test_full_system_requires_confirmation_at_boundary():
 def test_check_full_system_pure():
     allowed, _ = check_execution("cmd /c dir", "full_system")
     assert allowed
+
+
+@pytest.mark.parametrize("command", [
+    "Write-Output 'format'", 'Write-Host "shutdown"', "echo reg delete",
+    'git log "--pretty=format: %h"', "python format.py",
+    "Get-Content 'D:\\project\\format\\report.txt'",
+    'Get-Content "D:\\project\\format\\report.txt"',
+    "echo 'Remove-Item -Recurse C:\\Windows'",
+])
+def test_literal_data_is_not_a_dangerous_command(command):
+    assert check_execution(command, "full_system")[0]
+
+
+@pytest.mark.parametrize("command", [
+    "echo ok; shutdown /s", 'Write-Output "$(format C:)"',
+    "& 'format' C:", "cmd /c 'format C:'", "pwsh -Command 'shutdown /s'",
+    "bash -c 'rm -rf /'", "ssh server 'shutdown /s'",
+    'python -c "import os; os.system(\'format C:\')"',
+    'node --eval="shutdown /s"', 'node -p "shutdown /s"',
+    "unknown_runner 'format C:'", "echo 'format'junk", "echo 'format",
+])
+def test_uncertain_and_executable_payloads_remain_conservative(command):
+    assert not check_execution(command, "full_system")[0]
+
+
+def test_program_preserves_literal_argv_and_executable_boundary():
+    assert check_program_execution("python", ["format.py", "shutdown"], "full_system")[0]
+    assert check_program_execution("git", ["log", "--pretty=format: %h"], "developer")[0]
+    assert not check_program_execution("format.exe", ["C:"], "full_system")[0]
+    assert not check_program_execution("cmd", ["/c", "format C:"], "full_system")[0]
+    assert not check_program_execution("ssh", ["server", "shutdown /s"], "full_system")[0]
+    assert not check_program_execution("rm", ["-rf", "/"], "full_system")[0]
+    assert not check_program_execution(r"D:\test tools\rm.exe", ["-rf", "/"], "full_system")[0]
+    assert not check_program_execution("git", ["-c", "alias.x=!shutdown /s", "x"], "full_system")[0]
+    assert not check_program_execution("git", ["-calias.x=!shutdown /s", "x"], "full_system")[0]
+    assert not check_program_execution("ssh", ["server", "true"], "developer")[0]
 
 
 def test_normalize_first_word():
