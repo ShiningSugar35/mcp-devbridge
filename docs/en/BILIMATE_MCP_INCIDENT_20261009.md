@@ -65,3 +65,9 @@ Added a diagnostic checkpoint to existing run lr_mv08dswr_4816b55fc2f1; did not 
 6. The polls can continue currently permitted product-input/interaction work and read-only interface work in their original owned scopes. They must preserve the refused operations and pending commit.
 
 The failure/result representation follows [MCP tool errors and structured content](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
+
+## Follow-up: independently proven metadata false positives
+
+The maintainer reproduced credential-free TOKENIZER_NAME and MAX_TOKENS assignments being rejected and redacted. Source 0ad900b fixes this generic identifier-substring defect; f2c2b4b strengthens the existing durable callback smoke to distinguish genuine persistence retries from callbacks after success. These are new independent fixtures, not the original denied inputs. Full tests and isolated real HTTP ordinary configuration round-trips / credential rejection passed; final build/deployment status remains in 进度验收.md and the durable run lr_mv0bzwqp_3a1306a2beb6.
+
+This proves a detector false-positive class exists. It does not identify the two original matched rules, restore the absent services, explain the original Push, or authorize a replay. The original three blocked operations remain unresolved.
