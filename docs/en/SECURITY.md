@@ -75,6 +75,14 @@ Native MCP Tasks may later provide a protocol-level handle when the client adver
 
 ## Secrets storage
 
+### Content checks and source-code metadata
+
+CodexPro checks write/edit/patch and durable-plan input before persistence and redacts tool output. Generic assignment/field candidates qualify credential names by snake/kebab/camel/acronym components (`token`, `secret`, `password`, `api` + `key`, `private` + `key`) and common joined suffixes such as `authtoken` or `dbpassword`. Substrings in `TOKENIZER_NAME`, `MAX_TOKENS`, or `tokenizationAlgorithm` do not by themselves identify credentials. Generic detection and redaction share this qualification, so ordinary configuration remains usable after read-back.
+
+Known provider signatures, Bearer headers, credential flags/query parameters and `codexpro_token` remain independent. A metadata name cannot exempt a recognizable credential, and ignored outer literals are rescanned for embedded credential bindings. Existing thresholds, placeholder handling, detector priority and redaction order remain. These are bounded heuristics, not a complete source-language parser or proof that arbitrary input contains no secrets; ambiguous credential components still trigger rejection.
+
+Refusals retain `isError` and safe `content_check` rule/input-location metadata without the matched value. The source fix does not override host approvals, replay denied writes/Push, or alter PathGuard. Installed behavior depends on the deployed payload; see `进度验收.md` for actual runtime evidence.
+
 ### Windows
 
 Protected values prefer Windows Credential Manager. The existing encrypted DPAPI file is retained as the fallback. Secrets are not plaintext fields in `projects.json`.

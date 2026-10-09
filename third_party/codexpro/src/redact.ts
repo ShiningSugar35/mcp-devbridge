@@ -12,6 +12,45 @@ const SECRET_FIELD_PATTERN = /(["']?[A-Za-z0-9_]{0,64}(?:API[_-]?KEY|TOKEN|SECRE
 const SECRET_PATTERNS = [OPENAI_SECRET_PATTERN, COMMON_TOKEN_PATTERN, BEARER_TOKEN_PATTERN, CLI_TOKEN_PATTERN, QUERY_TOKEN_PATTERN, CODEXPRO_TOKEN_ASSIGNMENT_PATTERN, CODEXPRO_TOKEN_FIELD_PATTERN, SECRET_ASSIGNMENT_PATTERN, SECRET_FIELD_PATTERN];
 const SECRET_RULE_IDS = ["openai_secret", "common_token", "bearer_token", "cli_token", "query_token", "codexpro_token_assignment", "codexpro_token_field", "secret_assignment", "secret_field"] as const;
 
+// Generic field heuristics must recognize credential words, not substrings such
+// as TOKENIZER or TOKENS. Signature/Bearer/CLI/query rules remain independent.
+function isCredentialBinding(match: string): boolean {
+  const identifier = /^["']?([A-Za-z0-9_-]+)["']?\s*[:=]/.exec(match)?.[1];
+  if (!identifier) return true; // Unknown syntax remains conservative.
+  const words = identifier
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase().split(/[_-]+/);
+  if (words.some(word => word === "token" || word === "secret" || word === "password")) return true;
+  if (words.some((word, i) => (word === "api" || word === "private") && words[i + 1] === "key")) return true;
+  // Retain common concatenated spellings (authtoken, dbpassword, publicapikey).
+  return /(?:token|secret|password|apikey|privatekey)$/i.test(identifier);
+}
+
+function advancePastBinding(pattern: RegExp, match: RegExpExecArray): void {
+  // An ignored outer literal may contain a real credential assignment. Resume
+  // inside its value, not after it. Candidate literals remain capped at 512.
+  pattern.lastIndex = match.index + match[0].search(/[:=]/) + 1;
+}
+
+function redactCredentialBindings(text: string, pattern: RegExp, field: boolean): string {
+  pattern.lastIndex = 0;
+  const parts: string[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (!isCredentialBinding(match[0])) {
+      advancePastBinding(pattern, match);
+      continue;
+    }
+    if (isPlaceholderSecret(match[0])) continue;
+    parts.push(text.slice(cursor, match.index), field ? `${match[1]}[REDACTED_SECRET]` : redactSecretAssignment(match[0]));
+    cursor = pattern.lastIndex;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join("");
+}
+
 export interface SecretContentMatch {
   ruleId: typeof SECRET_RULE_IDS[number];
   // Coordinates refer to the checked input (the patch text for apply_patch).
@@ -24,6 +63,10 @@ function findSecretMatch(text: string): { ruleId: SecretContentMatch["ruleId"]; 
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(text)) !== null) {
+      if ((pattern === SECRET_ASSIGNMENT_PATTERN || pattern === SECRET_FIELD_PATTERN) && !isCredentialBinding(match[0])) {
+        advancePastBinding(pattern, match);
+        continue;
+      }
       if (!isPlaceholderSecret(match[0])) return { ruleId: SECRET_RULE_IDS[i]!, index: match.index };
     }
   }
@@ -71,12 +114,12 @@ export function hasSecretValue(text: string): boolean {
 }
 
 export function redactSensitiveText(text: string): string {
-  return text
+  const specific = text
     .replace(CODEXPRO_TOKEN_ASSIGNMENT_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
     .replace(CODEXPRO_TOKEN_FIELD_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
-    .replace(CLI_TOKEN_PATTERN, (match, prefix) => isPlaceholderSecret(match) ? match : `${prefix}[REDACTED_SECRET]`)
-    .replace(SECRET_ASSIGNMENT_PATTERN, (match) => isPlaceholderSecret(match) ? match : redactSecretAssignment(match))
-    .replace(SECRET_FIELD_PATTERN, (match, prefix) => isPlaceholderSecret(match) ? match : `${prefix}[REDACTED_SECRET]`)
+    .replace(CLI_TOKEN_PATTERN, (match, prefix) => isPlaceholderSecret(match) ? match : `${prefix}[REDACTED_SECRET]`);
+  const generic = redactCredentialBindings(redactCredentialBindings(specific, SECRET_ASSIGNMENT_PATTERN, false), SECRET_FIELD_PATTERN, true);
+  return generic
     .replace(BEARER_TOKEN_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
     .replace(QUERY_TOKEN_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
     .replace(OPENAI_SECRET_PATTERN, (match) => isPlaceholderSecret(match) ? match : "[REDACTED_SECRET]")

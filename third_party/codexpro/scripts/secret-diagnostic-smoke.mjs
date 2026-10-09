@@ -5,7 +5,32 @@ import { spawn } from 'node:child_process';
 
 // This fixture is independent of the denied BiliMate payloads. No production
 // file, original rejected request, credential or Git push is replayed.
-const root = path.resolve(process.env.SECRET_DIAGNOSTIC_ROOT);
+const root = path.resolve(process.env.SECRET_DIAGNOSTIC_ROOT || path.join('.ai-bridge', 'tmp', `secret-diagnostic-${process.pid}`));
+const { hasSecretValue, inspectSecretContent, redactSensitiveText } = await import('../dist/redact.js');
+const ordinaryNames = ['TOKENIZER_NAME', 'MAX_TOKENS', 'tokenizerName', 'maxTokens', 'tokenizationAlgorithm', 'SECRETARIAT_NAME'];
+for (const name of ordinaryNames) {
+  for (const text of [`${name} = "bert-base-chinese"`, `"${name}": "bert-base-chinese"`]) {
+    assert.equal(hasSecretValue(text), false, `ordinary configuration rejected: ${name}`);
+    assert.equal(inspectSecretContent(text), undefined);
+    assert.equal(redactSensitiveText(text), text, `ordinary configuration changed: ${name}`);
+  }
+}
+const credentialNames = ['api_key', 'apiKey', 'myAPIKey', 'publicapikey', 'API-KEY', 'AUTH_TOKEN', 'accessToken', 'githubtoken', 'TOKEN_VALUE', 'DB_PASSWORD', 'authSecret', 'privateKey'];
+for (const name of credentialNames) {
+  for (const text of [`${name} = "synthetic-credential-for-test-only"`, `"${name}": "synthetic-credential-for-test-only"`]) {
+    assert.equal(hasSecretValue(text), true, `credential name missed: ${name}`);
+    assert.match(redactSensitiveText(text), /REDACTED_SECRET/);
+    assert.equal(redactSensitiveText(text).includes('synthetic-credential-for-test-only'), false);
+  }
+}
+// A metadata-looking name must never exempt an independently identifiable credential.
+const recognizable = 'sk-' + 'abcdefghijklmno';
+assert.equal(hasSecretValue(`TOKENIZER_NAME = "${recognizable}"`), true);
+assert.equal(redactSensitiveText(`TOKENIZER_NAME = "${recognizable}"`).includes(recognizable), false);
+const nested = `TOKENIZER_NAME = "api_key = 'synthetic-credential-for-test-only'"`;
+assert.equal(hasSecretValue(nested), true);
+assert.equal(redactSensitiveText(nested).includes('synthetic-credential-for-test-only'), false);
+assert.equal(inspectSecretContent('TOKENIZER_NAME = "bert-base-chinese"\napi_key = "synthetic-credential-for-test-only"').inputLine, 2);
 await fs.mkdir(root, { recursive: true });
 const child = spawn(process.execPath, ['dist/stdio.js', '--root', root, '--allow-root', root, '--tool-mode', 'full'], {
   cwd: path.resolve('.'),
@@ -63,6 +88,22 @@ try {
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
   ws = (await request('tools/call', { name: 'open_workspace', arguments: { root, include_tree: false } })).structuredContent.workspace_id;
   assert.ok(ws);
+  const source = 'TOKENIZER_NAME = "bert-base-chinese"\nMAX_TOKENS = "unlimited-context"\n';
+  assert.notEqual((await call('write', { path: 'config.py', content: source })).isError, true);
+  assert.equal(await fs.readFile(path.join(root, 'config.py'), 'utf8'), source);
+  let readResult = await call('read', { path: 'config.py' });
+  assert.equal(readResult.structuredContent.text.includes('bert-base-chinese'), true);
+  assert.equal(readResult.structuredContent.text.includes('unlimited-context'), true);
+  assert.equal(readResult.content[0].text.includes('bert-base-chinese'), true);
+  assert.notEqual((await call('edit', { path: 'config.py', old_text: 'bert-base-chinese', new_text: 'bert-base-english' })).isError, true);
+  assert.equal(await fs.readFile(path.join(root, 'config.py'), 'utf8'), source.replace('bert-base-chinese', 'bert-base-english'));
+  assert.notEqual((await call('apply_patch', { patch: '--- /dev/null\n+++ b/config-patch.py\n@@ -0,0 +1 @@\n+tokenizerName = "bert-base-chinese"\n' })).isError, true);
+  assert.equal((await fs.readFile(path.join(root, 'config-patch.py'), 'utf8')).replace(/\r\n/g, '\n'), 'tokenizerName = "bert-base-chinese"\n');
+  assert.notEqual((await request('tools/call', { name: 'codexpro', arguments: { action: 'write', args: { workspace_id: ws, path: 'config-wrapper.py', content: source } } })).isError, true);
+  assert.equal(await fs.readFile(path.join(root, 'config-wrapper.py'), 'utf8'), source);
+  readResult = await request('tools/call', { name: 'codexpro', arguments: { action: 'read', args: { workspace_id: ws, path: 'config-wrapper.py' } } });
+  assert.equal(readResult.structuredContent.text.includes('bert-base-chinese'), true);
+  assert.equal(readResult.content[0].text.includes('bert-base-chinese'), true);
   rejected(await call('write', { path: 'blocked.txt', content }), 'write');
   assert.equal(await fs.stat(path.join(root, 'blocked.txt')).then(() => true, () => false), false);
   assert.notEqual((await call('write', { path: 'ordinary.py', content: 'print("fixture")\n' })).isError, true);
@@ -76,7 +117,6 @@ try {
   const wrapped = await request('tools/call', { name: 'codexpro', arguments: { action: 'write', args: { workspace_id: ws, path: 'blocked-wrapper.txt', content } } });
   rejected(wrapped, 'write');
   assert.equal(await fs.stat(path.join(root, 'blocked-wrapper.txt')).then(() => true, () => false), false);
-  const { hasSecretValue, inspectSecretContent, redactSensitiveText } = await import('../dist/redact.js');
   const cases = [
     ['openai_secret', 'sk-' + 'abcdefghijklmno'],
     ['common_token', 'ghp_' + 'abcdefghijklmnopqrstuvwxyz'],
@@ -99,7 +139,7 @@ try {
     assert.equal(hasSecretValue(text), false);
     assert.equal(inspectSecretContent(text), undefined);
   }
-  console.log('PASS: write/edit/patch/wrapper rejection metadata, no mutation/no leak, ordinary create/edit, 9 detector families and placeholder compatibility');
+  console.log('PASS: ordinary snake/camel/acronym configuration roundtrip, credential names/signatures, write/edit/patch/wrapper/read, refusal metadata, no mutation/no leak, 9 detector families and placeholder compatibility');
 } finally {
   child.kill();
 }
