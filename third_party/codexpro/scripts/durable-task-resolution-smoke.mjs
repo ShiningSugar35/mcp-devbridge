@@ -23,6 +23,7 @@ const store = new LongRunStore(".ai-bridge", guard);
 const tasks = new BashTaskManager(undefined, 4);
 const startedTasks = [];
 const callbackCounts = new Map();
+const callbackFailures = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,8 +78,16 @@ function terminalResolver(runId) {
         `exitCode=${snapshot.exitCode ?? "null"}; signal=${snapshot.signal ?? "null"}; ` +
         `finishedAt=${snapshot.finishedAt ?? "unknown"}.`,
     };
-    await store.update(workspace, runId, resolutionUpdate);
-    await store.update(workspace, runId, resolutionUpdate);
+    try {
+      await store.update(workspace, runId, resolutionUpdate);
+      await store.update(workspace, runId, resolutionUpdate);
+    } catch (error) {
+      callbackFailures.set(snapshot.taskId, (callbackFailures.get(snapshot.taskId) ?? 0) + 1);
+      // No free-text exception/payload: preserve only safe transient-failure evidence.
+      console.log(JSON.stringify({ event: 'terminal_callback_failed', taskId: snapshot.taskId,
+        errorType: error?.name, code: error?.code }));
+      throw error;
+    }
   };
 }
 
@@ -117,14 +126,30 @@ try {
   tasks.cancel(workspace, cancelledId);
   await waitForResolution(run.runId, cancelledId, "cancelled");
 
+  const terminalIds = [completedId, failedId, cancelledId];
+  const beforeObservation = new Map();
+  for (const id of terminalIds) {
+    const task = await waitForTaskDurableState(tasks, id, "persisted");
+    assert.equal(callbackCounts.get(id), (callbackFailures.get(id) ?? 0) + 1,
+      "every additional callback must follow an actual failed persistence attempt");
+    assert.equal(task.durableResolutionAttempts, callbackCounts.get(id));
+    beforeObservation.set(id, callbackCounts.get(id));
+  }
+
   // Observation calls after terminal completion must not append duplicate durable resolutions.
   tasks.get(workspace, completedId);
   await tasks.wait(workspace, completedId, 100);
   tasks.list(workspace);
   await sleep(100);
-  assert.equal(callbackCounts.get(completedId), 1);
-  assert.equal(callbackCounts.get(failedId), 1);
-  assert.equal(callbackCounts.get(cancelledId), 1);
+  for (const id of terminalIds) {
+    assert.equal(callbackCounts.get(id), beforeObservation.get(id),
+      "observation after persistence must not call the resolver again");
+  }
+  const terminalState = await store.read(workspace, run.runId);
+  for (const id of terminalIds) {
+    assert.equal(terminalState.checkpoints.filter(item => item.type === 'task' && item.taskId === id && item.message.startsWith('Resolved task ')).length, 1,
+      "retries and observations must persist exactly one terminal receipt");
+  }
 
   if (process.platform === "win32") {
     for (let index = 0; index < 5; index += 1) {
