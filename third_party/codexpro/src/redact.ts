@@ -1,3 +1,5 @@
+import { CodexProError } from "./guard.js";
+
 const OPENAI_SECRET_PATTERN = /\bsk-[A-Za-z0-9_-]{10,}\b/g;
 const COMMON_TOKEN_PATTERN = /\b(?:sk-ant-[A-Za-z0-9_-]{10,}|gh[opsru]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9_-]{20,})\b/g;
 const BEARER_TOKEN_PATTERN = /\b(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi;
@@ -8,16 +10,64 @@ const CODEXPRO_TOKEN_FIELD_PATTERN = /(["']?codexpro_token["']?\s*:\s*)(?:"[^"\r
 const SECRET_ASSIGNMENT_PATTERN = /\b[A-Za-z0-9_]{0,64}(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)[A-Za-z0-9_]{0,64}\s*=\s*(?:"[^"\r\n]{12,512}"|'[^'\r\n]{12,512}'|`[^`\r\n]{12,512}`|[A-Za-z0-9_./+=-]{20,512})/gi;
 const SECRET_FIELD_PATTERN = /(["']?[A-Za-z0-9_]{0,64}(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)[A-Za-z0-9_]{0,64}["']?\s*:\s*)(?:"[^"\r\n]{12,512}"|'[^'\r\n]{12,512}'|`[^`\r\n]{12,512}`|[A-Za-z0-9_./+=-]{20,512})/gi;
 const SECRET_PATTERNS = [OPENAI_SECRET_PATTERN, COMMON_TOKEN_PATTERN, BEARER_TOKEN_PATTERN, CLI_TOKEN_PATTERN, QUERY_TOKEN_PATTERN, CODEXPRO_TOKEN_ASSIGNMENT_PATTERN, CODEXPRO_TOKEN_FIELD_PATTERN, SECRET_ASSIGNMENT_PATTERN, SECRET_FIELD_PATTERN];
+const SECRET_RULE_IDS = ["openai_secret", "common_token", "bearer_token", "cli_token", "query_token", "codexpro_token_assignment", "codexpro_token_field", "secret_assignment", "secret_field"] as const;
 
-export function hasSecretValue(text: string): boolean {
-  for (const pattern of SECRET_PATTERNS) {
+export interface SecretContentMatch {
+  ruleId: typeof SECRET_RULE_IDS[number];
+  // Coordinates refer to the checked input (the patch text for apply_patch).
+  inputLine: number;
+  inputColumn: number;
+}
+
+function findSecretMatch(text: string): { ruleId: SecretContentMatch["ruleId"]; index: number } | undefined {
+  for (const [i, pattern] of SECRET_PATTERNS.entries()) {
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(text)) !== null) {
-      if (!isPlaceholderSecret(match[0])) return true;
+      if (!isPlaceholderSecret(match[0])) return { ruleId: SECRET_RULE_IDS[i]!, index: match.index };
     }
   }
-  return false;
+  return undefined;
+}
+
+// Safe, read-only diagnostics: never return the match, value, content or hash.
+export function inspectSecretContent(text: string): SecretContentMatch | undefined {
+  const match = findSecretMatch(text);
+  if (!match) return undefined;
+  const prefix = text.slice(0, match.index);
+  return {
+    ruleId: match.ruleId,
+    inputLine: prefix.split("\n").length,
+    inputColumn: match.index - prefix.lastIndexOf("\n")
+  };
+}
+
+export class SecretContentError extends CodexProError {
+  readonly contentCheck;
+
+  constructor(operation: "write" | "edit" | "apply_patch", match: SecretContentMatch) {
+    const hint = operation === "apply_patch"
+      ? "Use placeholders such as [REDACTED_SECRET]."
+      : "Use placeholders such as [REDACTED_SECRET] in handoff files.";
+    super(`Secret-looking content is blocked from ${operation}. ${hint} ` +
+      `[codexpro/content_check; rule=${match.ruleId}; inputLine=${match.inputLine}; inputColumn=${match.inputColumn}]`);
+    this.contentCheck = {
+      layer: "codexpro/content_check" as const,
+      code: "SECRET_CONTENT_BLOCKED" as const,
+      operation,
+      ...match,
+      occurredBeforeMutation: true as const
+    };
+  }
+}
+
+export function assertNoSecretContent(text: string, operation: "write" | "edit" | "apply_patch"): void {
+  const match = inspectSecretContent(text);
+  if (match) throw new SecretContentError(operation, match);
+}
+
+export function hasSecretValue(text: string): boolean {
+  return findSecretMatch(text) !== undefined;
 }
 
 export function redactSensitiveText(text: string): string {

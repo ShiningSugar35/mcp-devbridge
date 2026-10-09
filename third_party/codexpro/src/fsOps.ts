@@ -6,7 +6,7 @@ import { minimatch } from "minimatch";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, displayPath, normalizeRelPath, PathGuard } from "./guard.js";
-import { hasSecretValue, redactSensitiveText } from "./redact.js";
+import { assertNoSecretContent, redactSensitiveText } from "./redact.js";
 
 export interface TreeOptions {
   path?: string;
@@ -410,9 +410,7 @@ export async function writeTextFile(
   if (contentBytes > config.maxWriteBytes) {
     throw new CodexProError(`Write content is too large (${contentBytes} bytes). Limit: ${config.maxWriteBytes} bytes.`);
   }
-  if (hasSecretValue(content)) {
-    throw new CodexProError("Secret-looking content is blocked from write. Use placeholders such as [REDACTED_SECRET] in handoff files.");
-  }
+  assertNoSecretContent(content, "write");
 
   const releaseWriteLock = await acquireFileWriteLock(resolved.absPath);
   try {
@@ -488,9 +486,7 @@ export async function editTextFile(
     if (afterBytes > config.maxWriteBytes) {
       throw new CodexProError(`Edited file would be too large (${afterBytes} bytes). Limit: ${config.maxWriteBytes} bytes.`);
     }
-    if (hasSecretValue(after)) {
-      throw new CodexProError("Secret-looking content is blocked from edit. Use placeholders such as [REDACTED_SECRET] in handoff files.");
-    }
+    assertNoSecretContent(after, "edit");
 
     const diff = makeUnifiedDiff(before, after, resolved.relPath);
     await writeText(resolved.absPath, after, before, resolved.relPath);
