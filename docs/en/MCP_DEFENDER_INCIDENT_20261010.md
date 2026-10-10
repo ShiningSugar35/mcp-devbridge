@@ -36,3 +36,18 @@ Microsoft references:
 
 - [Protection History in Windows Security](https://support.microsoft.com/en-us/windows/security/windows-security/protection-history-in-the-windows-security-app)
 - [Address false positives and negatives](https://learn.microsoft.com/en-us/defender-endpoint/defender-endpoint-false-positives-negatives)
+
+## Authorized recovery update — 2026-10-11 00:18
+
+The preceding investigation snapshot is retained as history. The user subsequently restored the old executable manually, authorized a new version, and explicitly requested a Defender whitelist. The restored file was freshly verified against the recorded old SHA-256 (`24966ae18081d7da5f6ec65cb9eb2b967bec27fccac4908debdbd0ec5d558a7d`).
+
+- New maintenance source: `d8e1c3b76b0cd41f18a06bedb81e75f2982650f1`, version 0.8.9.7. Includes the previously tested command/content diagnostic and ordinary-configuration false-positive repairs, plus Windows executable version/product resources. Metadata is not a code signature and does not establish that the old alert was a false positive.
+- Fresh local gates: pytest 708 passed / 3 skipped; Ruff, Windows/Linux Pyright and TypeScript build exit 0; complete npm smoke exit 0 (186.094 seconds). The first local build failed because inherited PowerShell 7 module paths confused Windows PowerShell 5.1. Only the build child's module environment was corrected; repeat Windows build exit 0 (306.109 seconds). Both receipts are retained.
+- Same-source CI [38066123655](https://github.com/ShiningSugar35/mcp-devbridge/actions/runs/38066123655): Windows and Linux success; Windows pytest 708/3, Linux pytest 699/12. Canonical installer and Linux archive came from this CI, independently of the local rebuild.
+- Frozen CI verification: 3 policy checks, 7 content checks, version/product resources and an isolated eight-second GUI smoke. CI EXE SHA-256 `9546b403e4873b8f7dd20531df9442bd3f916e3e23c71df941ef3a46dad5c6f1`; Windows installer SHA-256 `250d05b4c7e950c7ad0d8390ab23c2ed7cdbeb785bb2790a5b80839c78d96503`; Linux archive SHA-256 `853350f73f079119413ea04a96e0671a9ddf13f1922f2c1220288d46b9f15b69`.
+- Defender custom scans of the CI EXE and installer **outside exclusion paths** both completed with no threats and exit 0.
+- With explicit user authorization and Windows administrator confirmation, exact-file exclusions were added and verified for `D:\mcp-devbridge\MCP DevBridge\MCPDevBridge.exe` and `D:\mcp-devbridge\MCP DevBridge-0.8.9.7\MCPDevBridge.exe`. Real-time protection remains enabled. No directory or process exclusion was added. The first UAC request was cancelled; the user explicitly requested the second attempt, which succeeded.
+- New version installed into `D:\mcp-devbridge\MCP DevBridge-0.8.9.7` using the CI installer, exit 0. All 2713 CI payload files match installed hashes. The separate directory and installer no-close/no-restart flags preserve surviving old service files/processes. Original C/E Node PIDs 18100/17144 and Windows backend listeners remain intact. The current old GUI PID 49864 is idle; it has not been stopped.
+- New-version elevated broker registration UAC was cancelled. The user was asked to choose another confirmation or manual startup from the new GUI. Hub/D/F are still offline; no claim of recovered MCP or completed release is made. New version tag/Release publication remains pending live acceptance.
+
+Evidence is retained under `.ai-bridge/incident-20261010/`, including Defender event records, exclusions, scans, independent gate receipts, CI logs, installation logs and payload manifest. The existing maintenance durable run `lr_mv0bzwqp_3a1306a2beb6` is updated without modifying the psychology project's run. Existing policy-blocked cleanup directories remain untouched.
