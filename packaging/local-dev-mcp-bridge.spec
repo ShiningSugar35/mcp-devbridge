@@ -9,8 +9,33 @@ from shutil import copy2
 import sys
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.8.9.6"
+PROJECT_VERSION = "0.8.9.7"
 IS_WINDOWS = sys.platform == "win32"
+version_info = None
+if IS_WINDOWS:
+    from PyInstaller.utils.win32.versioninfo import (
+        FixedFileInfo, StringFileInfo, StringStruct, StringTable,
+        VarFileInfo, VarStruct, VSVersionInfo,
+    )
+    version_info = VSVersionInfo(
+        ffi=FixedFileInfo(
+            filevers=tuple(int(part) for part in PROJECT_VERSION.split('.')),
+            prodvers=tuple(int(part) for part in PROJECT_VERSION.split('.')),
+            mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0),
+        ),
+        kids=[
+            StringFileInfo([StringTable('040904B0', [
+                StringStruct('CompanyName', 'MCP DevBridge'),
+                StringStruct('FileDescription', 'MCP DevBridge desktop connection service'),
+                StringStruct('FileVersion', PROJECT_VERSION),
+                StringStruct('InternalName', 'MCPDevBridge'),
+                StringStruct('OriginalFilename', 'MCPDevBridge.exe'),
+                StringStruct('ProductName', 'MCP DevBridge'),
+                StringStruct('ProductVersion', PROJECT_VERSION),
+            ])]),
+            VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+        ],
+    )
 TOOLS = ROOT / ".tools"
 RUNTIME = TOOLS if IS_WINDOWS else TOOLS / "linux"
 CODEXPRO_RUNTIME = ROOT / "build" / "codexpro-runtime"
@@ -83,6 +108,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="MCPDevBridge",
+    version=version_info,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
