@@ -987,10 +987,18 @@ class MainWindow(QMainWindow):
                     "诊断调用显式绑定当前项目，没有使用默认项目",
                 )
 
-                recovery = self.coord.recovery_snapshot()
+                all_transport_ok = bool(local_result and local_result.ok) and (
+                    method == ConnectionMethod.LOCAL
+                    or bool(public_result and public_result.ok)
+                )
+                # A restart timestamp is an attempt, not proof of recovery.
+                # Failed live probes also need not wait on a rebuilding service.
+                recovery = self.coord.recovery_snapshot() if all_transport_ok else {}
                 gateway_age = recovery.get("gateway_restart_seconds_ago")
                 public_age = recovery.get("public_restart_seconds_ago")
-                if gateway_age is None and public_age is None:
+                if not all_transport_ok:
+                    set_layer(11, "未恢复", "当前连接未通过实际 MCP 调用，最近重建不能作为恢复证据")
+                elif gateway_age is None and public_age is None:
                     set_layer(11, "正常", "本次运行尚无自动恢复记录")
                 elif public_age is None or (
                     gateway_age is not None and gateway_age <= public_age
@@ -1007,10 +1015,6 @@ class MainWindow(QMainWindow):
                         f"最近恢复了公网连接，约 {int(float(public_age))} 秒前",
                     )
 
-                all_transport_ok = bool(local_result and local_result.ok) and (
-                    method == ConnectionMethod.LOCAL
-                    or bool(public_result and public_result.ok)
-                )
                 if all_transport_ok:
                     set_layer(
                         12,

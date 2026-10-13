@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QPushButton
@@ -41,6 +43,42 @@ def _close(app: QApplication, window: dm.MainWindow) -> None:
             unit.windows._state = dm.EngineState.IDLE
     window.close()
     app.processEvents()
+
+
+@pytest.mark.parametrize("local_ok,public_ok,recovered", [(True, False, False), (False, True, False), (True, True, True)])
+def test_diagnostic_recent_attempt_is_not_recovery_without_current_mcp_success(
+    tmp_path: Path, monkeypatch, local_ok: bool, public_ok: bool, recovered: bool,
+) -> None:
+    import local_dev_mcp_bridge.selftest as selftest
+
+    app, window, project, _ = _window(tmp_path, monkeypatch)
+    try:
+        project.connection = "cloudflare"
+        project.public_hostname = "example.com"
+        window.pm.update(project)
+        window._select_root(project.root_path)
+        window._apply_selected_project()
+        unit = window.pm.unit_for(project.id)
+        assert unit is not None
+        unit.codex._state = dm.EngineState.READY
+        window.coord._state = dm.EngineState.READY
+        window.coord._public_url = "https://example.com/mcp"
+        monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+        monkeypatch.setattr(window.coord, "recovery_snapshot", lambda: {
+            "gateway_restart_seconds_ago": None, "public_restart_seconds_ago": 5,
+        })
+
+        def probe(url, *args, **kwargs):
+            ok = local_ok if url.startswith("http://127.0.0.1") else public_ok
+            return selftest.SelftestResult(ok=ok, error="" if ok else "fixture failure", tool_count=50)
+
+        monkeypatch.setattr(selftest, "run_selftest", probe)
+        window._run_diagnostics()
+        result = window.diag_output.toPlainText()
+        layer = next(line for line in result.splitlines() if "11." in line and "最近自动恢复" in line)
+        assert ("已恢复" in layer) is recovered, layer
+    finally:
+        _close(app, window)
 
 
 def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypatch) -> None:
