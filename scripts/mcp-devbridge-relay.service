@@ -1,0 +1,24 @@
+[Unit]
+Description=MCP DevBridge dedicated Cloudflare relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mcp-devbridge-relay
+Group=mcp-devbridge-relay
+ExecStart=/opt/mcp-devbridge-relay/cloudflared tunnel --no-autoupdate --protocol http2 --loglevel warn --metrics 127.0.0.1:20249 run --token-file /etc/mcp-devbridge-relay/tunnel-token
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

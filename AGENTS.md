@@ -1,6 +1,6 @@
 # AGENTS.md — MCP DevBridge 开发与维护指南
 
-本文件是仓库内 AI/Agent 与工程师的开发入口。2026-10-13现场核实：本机Windows安装/运行0.8.9.7，源d8e1c3b，路径D:\mcp-devbridge\MCP DevBridge-0.8.9.7\MCPDevBridge.exe；Hub和四根端口存活，本机D路由MCP合同通过，公网稳定性未通过（最新HTTP530/1033）。GitHub最新已发布v0.8.9.6（2026-10-08发布），本机0.8.9.7的tag/Release仍独立待办。维护源正在准备0.8.9.8，不能将源码版本视为线上升级。正式运行态与发布源以当前回执和Release provenance为准，维护分支fix/stability-20261001。历史v0.8.9.1/v0.8.9-fixed/v0.8.9及其他已发布tag/Release保持不可变；唯一例外仍是§8登记的2026-09-08所有者授权v0.8.9.1同版本重发。不得混回已淘汰的多Agent runtime。
+本文件是仓库内 AI/Agent 与工程师的开发入口。2026-10-13 15:00现场：本机Windows实际运行0.8.9.8、源128121d8c592446b36f6aaee8251f84bb772b732（CI38354638192）。安装目录仍为D:\mcp-devbridge\MCP DevBridge-0.8.9.7以保持管理员登记与精确白名单；实际EXE SHA-256=e96d6d4471d7519b12a2572dd9ae91c30b9f9e3e3bec4d0ded42e73b7e4018ea，2709项匹配。用户另行授权的MCP专用常驻中转已部署：opencode-server低权限Cloudflare服务+本机普通用户SSH任务。按诊断页原15秒阈值观察604.61秒，本机/公网均21/21，native工具及只读SSH exit0；自动转发恢复18.321秒。原本机7844直连仍失败，GUI原连接器可能继续重试，不把这条原链路称为修好。系统代理、项目配置、四根进程及Docker保持；最新公开Release仍v0.8.9.6，本轮无新tag/Release。正式运行态与发布源以当前回执和Release provenance为准，维护分支fix/stability-20261001。历史v0.8.9.1/v0.8.9-fixed/v0.8.9及其他已发布tag/Release保持不可变；唯一例外仍是§8登记的2026-09-08所有者授权v0.8.9.1同版本重发。不得混回已淘汰的多Agent runtime。
 
 ## 1. 开工阅读顺序
 
