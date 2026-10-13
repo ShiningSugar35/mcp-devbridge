@@ -1,6 +1,6 @@
 # AGENTS.md — MCP DevBridge 开发与维护指南
 
-本文件是仓库内 AI/Agent 与工程师的开发入口。2026-10-13 18:29现场：Windows实际运行0.8.9.9，源410df1f608b14a944cd95eb7d95049827df69925/CI38381107745，安装目录D:\mcp-devbridge\MCP DevBridge-0.8.9.7保留以保持管理员登记与精确白名单。EXE SHA256=3d9c81f6266cbaf173d07d4751b689a25fec7dac6c13c8cee9a1a973be2c2d2c，2709项匹配。工作台已提供本机直连/服务器中转手动切换；当前relay真实MCP通过，relay模式不启动本机cloudflared。实机直连两次网络超时后自动恢复中转，38次采样Hub51124/C33696/D32132/E12592/F16496均不变；恢复后本机/公网6/6、native任务/只读SSH exit0。代理、项目配置及Docker保持；本机直连网络仍未恢复，公开发行正在收尾。正式运行态与发布源以当前回执和Release provenance为准，维护分支fix/stability-20261001。历史v0.8.9.1/v0.8.9-fixed/v0.8.9及其他已发布tag/Release保持不可变；唯一例外仍是§8登记的2026-09-08所有者授权v0.8.9.1同版本重发。不得混回已淘汰的多Agent runtime。
+本文件是仓库内 AI/Agent 与工程师的开发入口。2026-10-13 18:29现场：Windows实际运行0.8.9.9，源410df1f608b14a944cd95eb7d95049827df69925/CI38381107745，安装目录D:\mcp-devbridge\MCP DevBridge-0.8.9.7保留以保持管理员登记与精确白名单。EXE SHA256=3d9c81f6266cbaf173d07d4751b689a25fec7dac6c13c8cee9a1a973be2c2d2c，2709项匹配。工作台已提供本机直连/服务器中转手动切换；当前relay真实MCP通过，relay模式不启动本机cloudflared。实机直连两次网络超时后自动恢复中转，38次采样Hub51124/C33696/D32132/E12592/F16496均不变；恢复后本机/公网6/6、native任务/只读SSH exit0。代理、项目配置及Docker保持；本机直连网络仍未恢复，公开Release尚未发布（大文件上传未完成，草稿保留）。正式运行态与发布源以当前回执和Release provenance为准，维护分支fix/stability-20261001。历史v0.8.9.1/v0.8.9-fixed/v0.8.9及其他已发布tag/Release保持不可变；唯一例外仍是§8登记的2026-09-08所有者授权v0.8.9.1同版本重发。不得混回已淘汰的多Agent runtime。
 
 ## 1. 开工阅读顺序
 
