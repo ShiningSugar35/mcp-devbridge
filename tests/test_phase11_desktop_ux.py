@@ -73,6 +73,7 @@ def test_diagnostic_recent_attempt_is_not_recovery_without_current_mcp_success(
             return selftest.SelftestResult(ok=ok, error="" if ok else "fixture failure", tool_count=50)
 
         monkeypatch.setattr(selftest, "run_selftest", probe)
+        monkeypatch.setattr(dm, "run_selftest", probe)
         window._run_diagnostics()
         result = window.diag_output.toPlainText()
         layer = next(line for line in result.splitlines() if "11." in line and "最近自动恢复" in line)
