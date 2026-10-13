@@ -2,6 +2,13 @@
 
 All dates are local development dates.
 
+## 0.8.9.9 (2026-10-13) - Verified manual connection paths
+
+- Add shared direct/relay selection, strict ownership checks, explicit MCP verification, failed-switch rollback and truthful uncertainty state. Relay mode no longer starts or retries the local connector.
+- Preserve Hub/project processes during path switches; migrate existing trusted Windows relay installations without rewriting project profiles. Relay controls are supported only for the explicitly provisioned Windows deployment; Linux direct behavior remains unchanged.
+- Fix legacy test environment restoration and prohibit live relay subprocesses in tests after an ordered isolation regression exposed access to production configuration.
+- Same-source Windows/Linux builds, installed payload/security checks and actual failed-direct/relay rollback passed. The underlying direct network still times out; current relay is verified. Full evidence: [manual transport acceptance](MANUAL_TRANSPORT_20261013.md).
+
 ## Local configuration maintenance (2026-10-07) - D-root SSH enabled
 
 - At the user's explicit choice, switch only the installed D-root permission profile from workspace/developer to system/full with the existing elevated broker. Keep C/E profiles, the existing F engine, proxy settings and credentials.

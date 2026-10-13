@@ -10,6 +10,7 @@ MCP DevBridge 是一个面向本地开发场景的桌面桥接工具，用于把
 - **明确的权限边界**：提供只读、项目工作区和完全访问等模式；路径访问使用 canonical/real-path 语义，防止 `..`、symlink/junction 等越界。
 - **统一 MCP Hub**：Local 模式和公网模式都通过共享 Gateway 暴露稳定的 MCP 入口，不要求客户端先选择“入口项目”。
 - **公网连接**：支持 Cloudflare Named Tunnel、ngrok、Quick Tunnel 等方式；本地引擎和 Gateway 默认只监听 loopback。
+- **手动选择连接路径**：Cloudflare 固定地址可在工作台选择“本机直连”或“服务器中转”；中转需先经所有者配置。切换保留项目引擎与任务，实际验证失败则尝试恢复原方式。
 - **OAuth / Bearer 认证**：公网连接通过 Gateway 认证，敏感凭据使用系统安全存储或受保护的本地 fallback，不写入普通配置文件和日志。
 - **后台任务与耐久长任务**：长命令通过后台 task 执行；多阶段工作可使用 durable long-run 状态机保存步骤、证据、审查和恢复状态。
 - **连接诊断与局部恢复**：项目引擎、Gateway 和 Tunnel 分层探测并按责任层恢复，避免单个项目故障触发无关组件的全局重启。

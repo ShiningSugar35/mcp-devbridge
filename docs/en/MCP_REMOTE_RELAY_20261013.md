@@ -1,5 +1,8 @@
 # Dedicated MCP relay deployment — October 13, 2026
 
+> Update 2026-10-13 18:29: version 0.8.9.9 now integrates the owner-provisioned relay into the Workbench manual selector. The earlier standalone deployment and observations below remain historical; see [current manual-path acceptance](MANUAL_TRANSPORT_20261013.md).
+
+
 The owner explicitly authorized the five-minute trial, then separately authorized a persistent MCP-only relay. This changes the MCP egress path; it does not repair the computer's direct Cloudflare port-7844 connectivity or change its system proxy.
 
 ```text
