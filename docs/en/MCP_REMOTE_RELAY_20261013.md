@@ -45,6 +45,8 @@ A subsequent identity-checked failure injection stopped only owned SSH PID 21472
 
 Native mcp-wjp device status and its explicitly catalog-routed D configuration also passed. It is a different computer and was not modified. Its earlier unbound config probe returned a clear UNAVAILABLE routing error, not a transport-internal failure.
 
+Post-test counter audit: the relay accumulated eight origin-proxy errors during the intentional SSH outage. Server journal errors at 15:00:06–15:00:14 correspond to Windows 14:59:39–14:59:47 after measuring the server clock approximately 26.97 seconds ahead; the owned forward recovered at Windows 14:59:56.9. Later native MCP calls passed, readiness was 200, four connector connections remained live, and the cumulative counter stayed at eight. These planned-test failures are retained rather than reported as an all-time zero-error result. No system clock was changed.
+
 ## Controlled stop and withdrawal
 
 To stop the newly installed forward normally, create `stop.request` in its dedicated Windows relay directory and wait for its scheduled task to finish and recorded SSH process to exit. Disable only `MCP DevBridge - SSH relay` to prevent future login starts. To resume, remove that owned request file and start that same task. Do not terminate processes by broad name or stop project engines.
