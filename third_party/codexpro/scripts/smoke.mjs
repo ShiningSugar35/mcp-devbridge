@@ -495,7 +495,23 @@ await expectToolError('long_run_review', {
 }, /background work is not terminal|running/i);
 const longRunTaskDone = await waitForTask(client, longRunTask, current.structuredContent.workspace_id, 20);
 if (longRunTaskDone.structuredContent.task.status !== 'completed') throw new Error(`attached long-run task did not complete: ${JSON.stringify(longRunTaskDone.structuredContent)}`);
-await client.request('tools/call', {
+// In-memory exit precedes the asynchronous durable callback. Review must wait
+// for the same task's persisted receipt, including under slow filesystem I/O.
+let durableTask = longRunTaskDone.structuredContent.task;
+const durableDeadline = Date.now() + 10_000;
+while (durableTask.durableResolutionState !== 'persisted') {
+  if (durableTask.durableResolutionState === 'failed' || Date.now() >= durableDeadline) {
+    throw new Error(`attached task terminal receipt was not persisted: ${JSON.stringify(durableTask)}`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const observed = await client.request('tools/call', {
+    name: 'get_task',
+    arguments: { workspace_id: current.structuredContent.workspace_id, task_id: durableTask.taskId }
+  });
+  if (observed.isError) throw new Error(`terminal receipt observation failed: ${JSON.stringify(observed.structuredContent)}`);
+  durableTask = observed.structuredContent.task;
+}
+const longRunReview = await client.request('tools/call', {
   name: 'long_run_review',
   arguments: {
     workspace_id: current.structuredContent.workspace_id,
@@ -505,6 +521,7 @@ await client.request('tools/call', {
     evidence: ['LONG_RUN_OK task completed with exit code 0']
   }
 });
+if (longRunReview.isError) throw new Error(`long_run_review failed: ${JSON.stringify(longRunReview.structuredContent)}`);
 const longRunComplete = await client.request('tools/call', {
   name: 'long_run_complete',
   arguments: {
