@@ -9,7 +9,7 @@ from shutil import copy2
 import sys
 
 ROOT = Path(SPECPATH).parent
-PROJECT_VERSION = "0.8.9.7"
+PROJECT_VERSION = "0.8.9.8"
 IS_WINDOWS = sys.platform == "win32"
 version_info = None
 if IS_WINDOWS:

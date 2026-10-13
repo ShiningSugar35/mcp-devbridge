@@ -239,3 +239,37 @@ class TestDefaults:
 
     def test_ngrok_default_is_path_probe(self) -> None:
         assert isinstance(default_ngrok(), str)
+
+
+def test_failure_keeps_bounded_recent_network_evidence_and_resets_on_start(tmp_path: Path) -> None:
+    evidence = "连" * 20000 + "\nERR dial tcp 198.41.200.63:7844: i/o timeout"
+    proc = SimpleNamespace(pid=4321, log=SimpleNamespace(tail=lambda count: evidence), stop=lambda **kwargs: None)
+    mgr = TunnelManager(log_dir=tmp_path)
+    mgr._proc = proc  # type: ignore[assignment]
+    mgr._fail("establishment timeout")
+    assert "i/o timeout" in mgr.log_tail(160)
+    assert len(mgr.log_tail(160).encode("utf-8")) <= 16384
+    from local_dev_mcp_bridge.app_state import ServiceCoordinator
+
+    assert ServiceCoordinator(tunnel=mgr)._tunnel_failure_classification()[0] == "transient_network_or_dns"
+    mgr.start(kind=ConnectionMethod.LOCAL)
+    assert "i/o timeout" not in mgr.log_tail(160)
+
+
+@pytest.mark.parametrize("complete,udp2,tcp,expected", [
+    (True, "fail", "pass", "http2"),
+    (False, "fail", "pass", ""),
+    (True, "pass", "pass", ""),
+    (True, "fail", "fail", ""),
+])
+def test_completed_transport_precheck_can_recommend_http2_despite_api_failure(
+    complete: bool, udp2: str, tcp: str, expected: str,
+) -> None:
+    tail = (
+        'precheck component="UDP Connectivity" status=fail target=region1.v2.argotunnel.com\n'
+        f'precheck component="UDP Connectivity" status={udp2} target=region2.v2.argotunnel.com\n'
+        f'precheck component="TCP Connectivity" status={tcp} target=region1.v2.argotunnel.com\n'
+        'precheck component="Cloudflare API" status=fail target=api.cloudflare.com:443\n'
+        + ("precheck complete hard_fail=true" if complete else "")
+    )
+    assert TunnelManager._parse_cloudflare_protocol_hint(tail) == expected

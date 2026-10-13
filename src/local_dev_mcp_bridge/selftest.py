@@ -163,7 +163,10 @@ async def _run_selftest(
                     arguments["devbridge_workspace_id"] = route_workspace_id
                 call = await session.call_tool(canary, arguments)
                 text = _extract_text(call)
-                result.add(canary, bool(text), text.splitlines()[0] if text else "只读调用未返回内容")
+                call_ok = bool(text) and not bool(getattr(call, "isError", False))
+                result.add(canary, call_ok, text.splitlines()[0] if text else "只读调用未返回内容")
+                if not call_ok:
+                    result.error = "MCP 只读调用返回错误或无内容"
 
                 result.ok = all(step["ok"] for step in result.steps)
                 return result

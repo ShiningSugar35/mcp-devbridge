@@ -85,3 +85,39 @@ def test_selftest_wrong_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     result = run_selftest("http://127.0.0.1:1/mcp", timeout=10)
     assert not result.ok
     assert result.error != ""
+
+
+@pytest.mark.parametrize("tool_error", [False, True])
+def test_canary_text_does_not_turn_tool_errors_into_success(monkeypatch: pytest.MonkeyPatch, tool_error: bool) -> None:
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    import local_dev_mcp_bridge.selftest as module
+
+    @asynccontextmanager
+    async def transport(**kwargs):
+        yield (None, None)
+
+    class Session:
+        def __init__(self, *args):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def list_tools(self):
+            return SimpleNamespace(tools=[SimpleNamespace(name="server_config", inputSchema={})])
+
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(isError=tool_error, content=[SimpleNamespace(text="fixture response")])
+
+    monkeypatch.setattr(module, "streamable_http_client", transport)
+    monkeypatch.setattr(module, "ClientSession", Session)
+    result = run_selftest("http://127.0.0.1:1/mcp", timeout=1)
+    assert result.ok is (not tool_error)

@@ -146,6 +146,7 @@ class ServiceCoordinator:
         self._transport_thread: threading.Thread | None = None
         self._transport_failures = 0
         self._last_transport_restart = 0.0
+        self._public_recovery_pending = False
         self._gateway_failures = 0
         self._last_gateway_restart = 0.0
         self._gateway_mcp_failures = 0
@@ -501,6 +502,7 @@ class ServiceCoordinator:
                 raise SpawnError("Hub 已使用不同连接配置启动；请先停止后再切换连接配置。")
             self._tunnel_retry_stop.clear()
             self._cloudflare_retry_protocol = "auto"
+            self._public_recovery_pending = False
             self._active_options = options
             self._start_once(options)
             if self.state == EngineState.READY:
@@ -533,9 +535,10 @@ class ServiceCoordinator:
                 self._set_url(fixed_public_url, False)
                 self._start_gateway(options)
 
-            tunnel_ok, retried, category = self._start_public_tunnel_with_retry(
+            tunnel_ok, _retried, category = self._start_public_tunnel_with_retry(
                 options, phase="initial_start"
             )
+            self._last_transport_restart = time.monotonic()
             if not tunnel_ok and not fixed_public_url:
                 if category == "configuration_auth":
                     raise SpawnError("公网隧道配置或凭据错误，无法启动。")
@@ -551,11 +554,8 @@ class ServiceCoordinator:
                 error=self.awake_guard.last_error if not awake_ok else "",
             )
             if tunnel_ok:
-                message = (
-                    "公网隧道重试后已恢复，共享 Hub 已启动。"
-                    if retried
-                    else "共享 Hub 已启动。"
-                )
+                self._public_recovery_pending = True
+                message = "共享 Hub 已启动，正在验证公网连接。"
                 self._set_state(EngineState.READY, message)
             else:
                 self._transport_failures = TRANSPORT_HEALTH_FAILURE_THRESHOLD - 1
@@ -613,6 +613,7 @@ class ServiceCoordinator:
         self._gateway_mcp_failures = 0
         self._public_mcp_failures = 0
         self._last_deep_mcp_probe = 0.0
+        self._public_recovery_pending = False
         self._set_url("", False)
         self._set_state(EngineState.IDLE, None)
 
@@ -635,6 +636,7 @@ class ServiceCoordinator:
         self._gateway_mcp_failures = 0
         self._public_mcp_failures = 0
         self._last_deep_mcp_probe = 0.0
+        self._public_recovery_pending = False
         self._set_url("", False)
 
     @staticmethod
@@ -666,6 +668,9 @@ class ServiceCoordinator:
                 response.read(1)
             elapsed = time.monotonic() - started
             return 200 <= status < 300, elapsed, status
+        except urllib_error.HTTPError as exc:
+            exc.close()
+            return False, time.monotonic() - started, exc.code
         except (OSError, TimeoutError, urllib_error.URLError):
             return False, time.monotonic() - started, status
 
@@ -797,6 +802,14 @@ class ServiceCoordinator:
         self._public_mcp_failures = 0 if public_ok else self._public_mcp_failures + 1
         if public_ok:
             self._mark_probe_success("public")
+            if self._public_recovery_pending and self.tunnel.is_running and not self._tunnel_retry_stop.is_set():
+                self._public_recovery_pending = False
+                self._write_transport_health(
+                    event="tunnel_restart_ok",
+                    public_mcp_verified=True,
+                    project_id=project_id,
+                )
+                self._set_state(EngineState.READY, "公网 MCP 调用验证通过，连接已恢复。")
         self._write_transport_health(
             event="mcp_transport_probe",
             project_id=project_id,
@@ -924,13 +937,21 @@ class ServiceCoordinator:
             if options is None or options.connection == ConnectionMethod.LOCAL or self.state != EngineState.READY:
                 return
             self._last_transport_restart = time.monotonic()
+            self._public_recovery_pending = False
             self._write_transport_health(
                 event="tunnel_restart",
                 reason="consecutive_public_probe_failures",
             )
-            tunnel_ok, retried, category = self._start_public_tunnel_with_retry(
-                options, phase="runtime_rebuild"
-            )
+            try:
+                tunnel_ok, retried, category = self._start_public_tunnel_with_retry(
+                    options, phase="runtime_rebuild"
+                )
+            finally:
+                # A bounded round can take several minutes. Its full duration
+                # must not consume the cooldown before the next monitor tick.
+                self._last_transport_restart = time.monotonic()
+            if self._tunnel_retry_stop.is_set():
+                return
             if tunnel_ok:
                 self._set_url(
                     self.tunnel.public_url or self._fixed_public_url(options),
@@ -939,11 +960,12 @@ class ServiceCoordinator:
                 self._transport_failures = 0
                 self._public_mcp_failures = 0
                 self._last_deep_mcp_probe = 0.0
+                self._public_recovery_pending = True
                 self._write_transport_health(
-                    event="tunnel_restart_ok",
+                    event="tunnel_restart_connected",
                     retried=retried,
                 )
-                self._set_state(EngineState.READY, "公网隧道重试后已恢复。")
+                self._set_state(EngineState.READY, "公网隧道已重新连接，正在验证公网调用；本地服务可用。")
                 return
 
             self._transport_failures = 0

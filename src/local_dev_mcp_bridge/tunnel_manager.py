@@ -90,6 +90,22 @@ class TunnelManager(EngineManager):
         self._last_exit_code: int | None = None
         self._cloudflare_protocol = "auto"
         self._recommended_protocol = ""
+        self._failure_log_tail = ""
+
+    def _fail(self, message: str) -> None:
+        # EngineManager releases the process on failure. Retain only its already
+        # redacted, bounded tail so classification can still inspect the cause.
+        proc = self._proc
+        if proc is not None:
+            self._failure_log_tail = (
+                proc.log.tail(160)[-16384:].encode("utf-8")[-16384:].decode("utf-8", errors="ignore")
+            )
+        super()._fail(message)
+
+    def log_tail(self, count: int = 200) -> str:
+        if self._proc is None and self._failure_log_tail:
+            return "\n".join(self._failure_log_tail.splitlines()[-max(1, count):])
+        return super().log_tail(count)
 
     @property
     def last_pid(self) -> int | None:
@@ -131,6 +147,7 @@ class TunnelManager(EngineManager):
     ) -> None:
         if self.is_running:
             return
+        self._failure_log_tail = ""
         self._ready_cancel.clear()
         self.kind = kind
         self.public_hostname = hostname.strip().rstrip("/")
@@ -281,6 +298,26 @@ class TunnelManager(EngineManager):
             or 'proceed using "http2"' in lowered
         ):
             return "http2"
+        if "precheck complete" in lowered:
+            udp_failed: set[str] = set()
+            udp_passed = False
+            tcp_passed = False
+            for line in lowered.splitlines():
+                if "precheck " not in line:
+                    continue
+                status = re.search(r"\bstatus=(pass|fail)\b", line)
+                target = re.search(r"\btarget=(region[12]\.v2\.argotunnel\.com)\b", line)
+                if status is None or target is None:
+                    continue
+                if 'component="udp connectivity"' in line:
+                    if status[1] == "pass":
+                        udp_passed = True
+                    else:
+                        udp_failed.add(target[1])
+                elif 'component="tcp connectivity"' in line and status[1] == "pass":
+                    tcp_passed = True
+            if len(udp_failed) == 2 and not udp_passed and tcp_passed:
+                return "http2"
         return ""
 
     def _parse_public_url(self, tail: str) -> str:

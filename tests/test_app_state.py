@@ -107,6 +107,89 @@ def test_initial_state_is_idle_and_has_no_project_engines() -> None:
     assert coord.component_states()["tunnel"] == EngineState.IDLE
 
 
+def test_rebuild_registration_does_not_claim_public_mcp_recovery() -> None:
+    coord = make_coord()
+    coord.start(StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="example.com"))
+    events: list[dict[str, object]] = []
+    coord._write_transport_health = lambda **fields: events.append(fields)  # type: ignore[method-assign]
+    coord._restart_public_tunnel()
+    assert not any(e["event"] == "tunnel_restart_ok" for e in events)
+    assert "验证" in str(coord.message)
+
+
+def test_only_successful_routed_public_mcp_confirms_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from local_dev_mcp_bridge import config_store
+
+    monkeypatch.setattr(config_store, "load_projects", lambda: [SimpleNamespace(id="route-a")])
+    monkeypatch.setattr(app_state, "DEEP_MCP_PROBE_INTERVAL_SECONDS", 0)
+    coord = ServiceCoordinator(
+        tunnel=FakeTunnel(),  # type: ignore[arg-type]
+        workspace_registry=lambda route: (19901, "D:/project") if route == "route-a" else None,
+        workspace_credential_registry=lambda route: "fixture" if route == "route-a" else None,
+    )
+    opts = StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="example.com")
+    coord.start(opts)
+    events: list[dict[str, object]] = []
+    coord._write_transport_health = lambda **fields: events.append(fields)  # type: ignore[method-assign]
+    coord._restart_public_tunnel()
+    public_ok = False
+
+    def probe(url: str, token: str, route_workspace_id: str = "") -> tuple[bool, float, str]:
+        assert token == "fixture"
+        if url.startswith("https:"):
+            assert route_workspace_id == "route-a"
+            return public_ok, 0.01, "fixture result"
+        return True, 0.01, "ok"
+
+    coord._mcp_probe = probe
+    coord._deep_mcp_health_tick(opts)
+    assert not any(e["event"] == "tunnel_restart_ok" for e in events)
+    public_ok = True
+    coord._deep_mcp_health_tick(opts)
+    assert any(e["event"] == "tunnel_restart_ok" and e.get("public_mcp_verified") is True for e in events)
+    assert "验证通过" in str(coord.message)
+
+
+def test_long_failed_rebuild_cools_down_after_entire_round(monkeypatch: pytest.MonkeyPatch) -> None:
+    tunnel = FakeTunnel()
+    coord = ServiceCoordinator(tunnel=tunnel)  # type: ignore[arg-type]
+    coord.start(StartOptions(connection=ConnectionMethod.CLOUDFLARE, public_hostname="example.com"))
+    clock = [1000.0]
+    monkeypatch.setattr(app_state.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_state, "TUNNEL_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    coord._write_transport_health = lambda **fields: None  # type: ignore[method-assign]
+
+    def fail_after_wait() -> bool:
+        clock[0] += 90
+        tunnel.is_running = False
+        tunnel.state = EngineState.ERROR
+        return False
+
+    tunnel.wait_ready = fail_after_wait  # type: ignore[method-assign]
+    coord._restart_public_tunnel()
+    starts = len(tunnel.starts)
+    assert coord._last_transport_restart == 1270.0
+    clock[0] += 15
+    coord._transport_probe = lambda url, timeout_seconds: (True, 0.01, 200)
+    coord._transport_health_tick()
+    assert len(tunnel.starts) == starts
+
+
+def test_public_health_preserves_cloudflare_http_error_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    from email.message import Message
+    from urllib.error import HTTPError
+
+    def fail(*args, **kwargs):
+        raise HTTPError("https://example.com/health", 530, "Cloudflare error", Message(), None)
+
+    monkeypatch.setattr(app_state.urllib_request, "urlopen", fail)
+    ok, _, status = ServiceCoordinator._probe_health_url("https://example.com/health", 1)
+    assert not ok
+    assert status == 530
+
+
 def test_start_options_only_describe_shared_transport() -> None:
     opts = StartOptions()
     assert opts.gateway_port == constants.DEFAULT_GATEWAY_PORT
