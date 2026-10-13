@@ -917,6 +917,8 @@ class ServiceCoordinator:
             self.public_url, token, project_id
         )
         self._public_mcp_verified = public_ok
+        if public_ok:
+            self._public_path_uncertain = False
         self._public_mcp_failures = 0 if public_ok else self._public_mcp_failures + 1
         if public_ok:
             self._mark_probe_success("public")

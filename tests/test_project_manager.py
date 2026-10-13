@@ -131,61 +131,59 @@ def test_list_backfills_engine_ports_and_ids_for_legacy_configs(
     from local_dev_mcp_bridge import config_store
 
     config_dir = tmp_path / "config"
-    os.environ["LOCALDEV_MCP_CONFIG_DIR"] = str(config_dir)
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(config_dir))
     monkeypatch.setattr(config_store, "_loopback_port_in_use", lambda _port: False)
-    try:
-        legacy = ProjectConfig(
-            id="",
-            display_name="legacy",
-            root_path=str(tmp_path / "legacy"),
-            permission_mode="workspace",
-        )
-        save_projects([legacy])
-        projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
-        assert len(projects) == 1
-        assert projects[0].id
-        assert projects[0].codexpro_port == constants.DEFAULT_CODEXPRO_PORT
-        assert projects[0].windows_bridge_port == constants.DEFAULT_WINDOWS_MCP_PORT
-        assert not hasattr(projects[0], "gateway_port")
-    finally:
-        os.environ.pop("LOCALDEV_MCP_CONFIG_DIR", None)
+    legacy = ProjectConfig(
+        id="",
+        display_name="legacy",
+        root_path=str(tmp_path / "legacy"),
+        permission_mode="workspace",
+    )
+    save_projects([legacy])
+    projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
+    assert len(projects) == 1
+    assert projects[0].id
+    assert projects[0].codexpro_port == constants.DEFAULT_CODEXPRO_PORT
+    assert projects[0].windows_bridge_port == constants.DEFAULT_WINDOWS_MCP_PORT
+    assert not hasattr(projects[0], "gateway_port")
 
 
-def test_legacy_per_project_gateway_port_is_ignored(tmp_path: Path) -> None:
+def test_legacy_per_project_gateway_port_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_dir = tmp_path / "config-many"
-    os.environ["LOCALDEV_MCP_CONFIG_DIR"] = str(config_dir)
-    try:
-        payload = {
-            "projects": [
-                {
-                    "id": "legacy-a",
-                    "display_name": "legacy-a",
-                    "root_path": str(tmp_path / "legacy-a"),
-                    "codexpro_port": 18787,
-                    "windows_bridge_port": 28731,
-                    "gateway_port": 18786,
-                },
-                {
-                    "id": "legacy-b",
-                    "display_name": "legacy-b",
-                    "root_path": str(tmp_path / "legacy-b"),
-                    "codexpro_port": 18788,
-                    "windows_bridge_port": 28732,
-                    "gateway_port": 18789,
-                },
-            ]
-        }
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "projects.json").write_text(json.dumps(payload), encoding="utf-8")
-        projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
-        assert all(not hasattr(project, "gateway_port") for project in projects)
-        claimed = {
-            *(project.codexpro_port for project in projects),
-            *(project.windows_bridge_port for project in projects),
-        }
-        assert len(claimed) == 4
-    finally:
-        os.environ.pop("LOCALDEV_MCP_CONFIG_DIR", None)
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(config_dir))
+    payload = {
+        "projects": [
+            {
+                "id": "legacy-a",
+                "display_name": "legacy-a",
+                "root_path": str(tmp_path / "legacy-a"),
+                "codexpro_port": 18787,
+                "windows_bridge_port": 28731,
+                "gateway_port": 18786,
+            },
+            {
+                "id": "legacy-b",
+                "display_name": "legacy-b",
+                "root_path": str(tmp_path / "legacy-b"),
+                "codexpro_port": 18788,
+                "windows_bridge_port": 28732,
+                "gateway_port": 18789,
+            },
+        ]
+    }
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "projects.json").write_text(json.dumps(payload), encoding="utf-8")
+    projects = ProjectManager(unit_factory=lambda p: _FakeUnit(p)).list()
+    assert all(not hasattr(project, "gateway_port") for project in projects)
+    claimed = {
+        *(project.codexpro_port for project in projects),
+        *(project.windows_bridge_port for project in projects),
+    }
+    assert len(claimed) == 4
+
+
+def test_legacy_config_tests_preserve_session_default() -> None:
+    assert constants.config_dir() == constants.CONFIG_DIR
 
 
 def test_duplicate_add_returns_existing(manager: tuple[ProjectManager, Path]) -> None:

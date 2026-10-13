@@ -36,6 +36,18 @@ sys.path.insert(0, str(_ROOT / "src"))
 from local_dev_mcp_bridge.tools import LocalDevTools  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolate_runtime_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Restore the session sandbox for every test, even after legacy raw env edits.
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", _TEST_STATE.name)
+    from local_dev_mcp_bridge.relay_control import RelayController
+
+    def refuse_live_control(self, args, *, timeout=30):
+        pytest.fail("Tests must mock relay subprocesses; live MCP control is forbidden")
+
+    monkeypatch.setattr(RelayController, "_run", refuse_live_control)
+
+
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "工作区 空间"

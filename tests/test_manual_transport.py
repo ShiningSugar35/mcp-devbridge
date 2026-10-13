@@ -112,3 +112,12 @@ def test_custom_port_relay_refused_before_disconnecting_direct(tmp_path, monkeyp
     ok, _ = c.switch_cloudflare_transport("relay")
     assert not ok
     assert not events
+
+
+def test_verified_recovery_clears_previous_path_uncertainty(tmp_path, monkeypatch):
+    c, _ = rig(tmp_path, monkeypatch)
+    c._public_path_uncertain = True
+    assert c._active_options is not None
+    c._deep_mcp_health_tick(c._active_options)
+    assert c.connection_snapshot()["verified"]
+    assert not c.connection_snapshot()["uncertain"]
