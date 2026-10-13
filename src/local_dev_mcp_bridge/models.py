@@ -119,6 +119,7 @@ class AppConfig(BaseModel):
     allow_local_anonymous: bool = True
     log_retention_days: int = 14
     tunnel_auto_reconnect: bool = True
+    cloudflare_transport: Literal["direct", "relay"] | None = None
     exit_stop_managed: bool = False
     first_system_risk_accepted: bool = False
     execution_profile: str = "developer"

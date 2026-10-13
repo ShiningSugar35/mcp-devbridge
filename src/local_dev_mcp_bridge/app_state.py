@@ -25,8 +25,9 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -36,6 +37,7 @@ from .engines import EngineState, SpawnError, port_listening
 from .flight_recorder import FlightRecorder
 from .gateway import OAuthGateway
 from .power_guard import SystemAwakeGuard
+from .relay_control import RelayController
 from .tunnel_manager import ConnectionMethod, TunnelManager
 
 StateCallback = Callable[[EngineState, str | None], None]
@@ -94,12 +96,15 @@ class StartOptions:
     cloudflare_config: Path | None = None
     tunnel_token: str | None = None
     gateway_port: int = 0
+    cloudflare_transport: Literal["direct", "relay"] = "direct"
 
     def __post_init__(self) -> None:
         from . import constants as _c
 
         if not self.gateway_port:
             self.gateway_port = _c.DEFAULT_GATEWAY_PORT
+        if self.cloudflare_transport not in ("direct", "relay"):
+            raise ValueError("Unknown Cloudflare transport")
 
     @property
     def url_mutable(self) -> bool:
@@ -113,6 +118,7 @@ class ServiceCoordinator:
         self,
         *,
         tunnel: TunnelManager | None = None,
+        relay: RelayController | None = None,
         awake_guard: SystemAwakeGuard | None = None,
         workspace_registry: Callable[[str], tuple[int, str] | None] | None = None,
         workspace_project_registry: Callable[[str], str | None] | None = None,
@@ -123,6 +129,7 @@ class ServiceCoordinator:
         flight_recorder: FlightRecorder | None = None,
     ) -> None:
         self.tunnel = tunnel or TunnelManager()
+        self.relay = relay or RelayController()
         self.awake_guard = awake_guard or SystemAwakeGuard()
         self.gateway: OAuthGateway | None = None
         self._workspace_registry = workspace_registry
@@ -147,6 +154,9 @@ class ServiceCoordinator:
         self._transport_failures = 0
         self._last_transport_restart = 0.0
         self._public_recovery_pending = False
+        self._public_mcp_verified = False
+        self._switching_transport = False
+        self._public_path_uncertain = False
         self._gateway_failures = 0
         self._last_gateway_restart = 0.0
         self._gateway_mcp_failures = 0
@@ -219,6 +229,8 @@ class ServiceCoordinator:
 
     def component_states(self) -> dict[str, EngineState]:
         states: dict[str, EngineState] = {"tunnel": self.tunnel.state}
+        if self._using_relay(self._active_options):
+            states["tunnel"] = EngineState.READY if self.relay.is_running else EngineState.ERROR
         if self.gateway is not None:
             states["gateway"] = EngineState.READY if self.gateway.is_running else EngineState.ERROR
         return states
@@ -298,6 +310,17 @@ class ServiceCoordinator:
     def _start_public_tunnel_with_retry(
         self, options: StartOptions, *, phase: str
     ) -> tuple[bool, bool, str]:
+        try:
+            if self._using_relay(options):
+                if self.tunnel.is_running:
+                    self.tunnel.stop()
+                self.relay.start()
+                return self.relay.is_running, False, "relay"
+            if options.connection == ConnectionMethod.CLOUDFLARE and self.relay.configured:
+                self.relay.stop()
+        except RuntimeError as exc:
+            self._write_transport_health(event="relay_control_failed", phase=phase, detail=str(exc))
+            return False, False, "relay_control"
         last_category = "unknown_process_failure"
         retried = False
         cloudflare_protocol = "auto"
@@ -316,7 +339,8 @@ class ServiceCoordinator:
             )
         ):
             cloudflare_protocol = "http2"
-        for attempt, delay in enumerate(TUNNEL_RETRY_BACKOFF_SECONDS, start=1):
+        delays = (0.0, 2.0) if phase == "manual_switch" else TUNNEL_RETRY_BACKOFF_SECONDS
+        for attempt, delay in enumerate(delays, start=1):
             if self._tunnel_retry_stop.is_set():
                 return False, retried, "cancelled"
             if delay > 0:
@@ -344,7 +368,7 @@ class ServiceCoordinator:
                 if options.connection == ConnectionMethod.CLOUDFLARE:
                     start_kwargs["cloudflare_protocol"] = cloudflare_protocol
                 self.tunnel.start(**start_kwargs)
-                if self.tunnel.wait_ready():
+                if (self.tunnel.wait_ready(timeout_seconds=45) if phase == "manual_switch" else self.tunnel.wait_ready()):
                     if options.connection == ConnectionMethod.CLOUDFLARE:
                         self._cloudflare_retry_protocol = cloudflare_protocol
                     self._write_transport_health(
@@ -394,7 +418,7 @@ class ServiceCoordinator:
                 options.connection == ConnectionMethod.CLOUDFLARE
                 and recommended_protocol == "http2"
                 and cloudflare_protocol != "http2"
-                and attempt < len(TUNNEL_RETRY_BACKOFF_SECONDS)
+                and attempt < len(delays)
             ):
                 self._write_transport_health(
                     event="tunnel_protocol_fallback",
@@ -405,7 +429,7 @@ class ServiceCoordinator:
                 )
                 cloudflare_protocol = "http2"
                 retryable = True
-            if not retryable or attempt >= len(TUNNEL_RETRY_BACKOFF_SECONDS):
+            if not retryable or attempt >= len(delays):
                 break
             retried = True
         return False, retried, last_category
@@ -503,6 +527,7 @@ class ServiceCoordinator:
             self._tunnel_retry_stop.clear()
             self._cloudflare_retry_protocol = "auto"
             self._public_recovery_pending = False
+            self._public_mcp_verified = False
             self._active_options = options
             self._start_once(options)
             if self.state == EngineState.READY:
@@ -600,6 +625,11 @@ class ServiceCoordinator:
         self._cancel_tunnel_start_wait()
         self._set_state(EngineState.STOPPING, "正在停止共享 Hub…")
         self._stop_transport_monitor()
+        if self._using_relay(self._active_options):
+            try:
+                self.relay.stop()
+            except RuntimeError as exc:
+                self._write_transport_health(event="relay_stop_failed", detail=str(exc))
         self.awake_guard.stop()
         if self.gateway is not None:
             self.gateway.stop()
@@ -614,6 +644,7 @@ class ServiceCoordinator:
         self._public_mcp_failures = 0
         self._last_deep_mcp_probe = 0.0
         self._public_recovery_pending = False
+        self._public_mcp_verified = False
         self._set_url("", False)
         self._set_state(EngineState.IDLE, None)
 
@@ -648,7 +679,89 @@ class ServiceCoordinator:
             and left.public_hostname.strip().rstrip("/") == right.public_hostname.strip().rstrip("/")
             and left.gateway_port == right.gateway_port
             and left.cloudflare_config == right.cloudflare_config
+            and left.cloudflare_transport == right.cloudflare_transport
         )
+
+    @staticmethod
+    def _using_relay(options: StartOptions | None) -> bool:
+        return bool(options and options.connection == ConnectionMethod.CLOUDFLARE and options.cloudflare_transport == "relay")
+
+    def _public_path_running(self, options: StartOptions) -> bool:
+        return self.relay.is_running if self._using_relay(options) else self.tunnel.is_running
+
+    def connection_snapshot(self) -> dict[str, object]:
+        with self._lock:
+            options = self._active_options
+            return {"mode": options.cloudflare_transport if options else "", "verified": self._public_mcp_verified,
+                    "connection": options.connection.value if options else "",
+                    "uncertain": self._public_path_uncertain, "switching": self._switching_transport}
+
+    def _verify_public_connection(self) -> bool:
+        from .config_store import load_projects
+
+        if not self._workspace_registry or not self._workspace_credential_registry:
+            return False
+        for project in load_projects():
+            if self._workspace_registry(project.id) and (token := self._workspace_credential_registry(project.id)):
+                # Explicit route + existing credential, never a bootstrap/default project.
+                ok, _, _ = self._mcp_probe(self.public_url, token, project.id)
+                return ok
+        return False
+
+    def switch_cloudflare_transport(self, mode: Literal["direct", "relay"]) -> tuple[bool, str]:
+        """Switch the one shared public path, keeping the exact Gateway and engines."""
+        if mode not in ("direct", "relay"):
+            raise ValueError("Unknown transport mode")
+        with self._lifecycle_lock:
+            old = self._active_options
+            if not old or old.connection != ConnectionMethod.CLOUDFLARE or self.state != EngineState.READY:
+                return False, "请先启动使用 Cloudflare 固定地址的连接。"
+            if mode == "relay":
+                try:
+                    self.relay.validate()
+                except RuntimeError as exc:
+                    return False, f"目标中转未通过配置检查，当前连接保持：{exc}"
+            self._switching_transport = True
+            self._public_mcp_verified = False
+            self._tunnel_retry_stop.clear()
+            try:
+                target = replace(old, cloudflare_transport=mode)
+                self._active_options = target
+                ok, _, _ = self._start_public_tunnel_with_retry(target, phase="manual_switch")
+                if not ok or not self._verify_public_connection():
+                    raise RuntimeError("目标连接未通过实际 MCP 验证。")
+                self._public_mcp_verified = True
+                self._public_path_uncertain = False
+                self._public_recovery_pending = False
+                self._transport_failures = self._public_mcp_failures = 0
+                self._last_transport_restart = time.monotonic()
+                self._set_state(EngineState.READY, "连接方式已切换，实际 MCP 验证通过。")
+                self._write_transport_health(event="manual_transport_switch", mode=mode, verified=True)
+                return True, "连接方式已切换，实际 MCP 验证通过。"
+            except Exception as exc:
+                restored = False
+                try:
+                    if self._using_relay(self._active_options):
+                        self.relay.stop()
+                    elif self.tunnel.is_running:
+                        self.tunnel.stop()
+                    self._active_options = old
+                    ok, _, _ = self._start_public_tunnel_with_retry(old, phase="manual_rollback")
+                    restored = ok and self._verify_public_connection()
+                except Exception:
+                    pass
+                self._active_options = old
+                self._public_mcp_verified = restored
+                self._public_path_uncertain = not restored
+                self._public_recovery_pending = not restored
+                self._last_transport_restart = time.monotonic()
+                suffix = "已恢复原连接方式并通过验证。" if restored else "原连接方式尚未恢复验证，请运行诊断。"
+                message = f"切换未成功：{exc} {suffix}"
+                self._set_state(EngineState.READY, message)
+                self._write_transport_health(event="manual_transport_switch_failed", requested=mode, restored=restored)
+                return False, message
+            finally:
+                self._switching_transport = False
 
     @staticmethod
     def _health_url_from_public_mcp(public_url: str) -> str:
@@ -799,10 +912,11 @@ class ServiceCoordinator:
         public_ok, public_elapsed, public_detail = self._mcp_probe(
             self.public_url, token, project_id
         )
+        self._public_mcp_verified = public_ok
         self._public_mcp_failures = 0 if public_ok else self._public_mcp_failures + 1
         if public_ok:
             self._mark_probe_success("public")
-            if self._public_recovery_pending and self.tunnel.is_running and not self._tunnel_retry_stop.is_set():
+            if self._public_recovery_pending and self._public_path_running(options) and not self._tunnel_retry_stop.is_set():
                 self._public_recovery_pending = False
                 self._write_transport_health(
                     event="tunnel_restart_ok",
@@ -828,6 +942,15 @@ class ServiceCoordinator:
             self._restart_public_tunnel()
 
     def _transport_health_tick(self) -> None:
+        # A manual switch and an old health result must never manage opposite paths concurrently.
+        if not self._lifecycle_lock.acquire(blocking=False):
+            return
+        try:
+            self._transport_health_tick_locked()
+        finally:
+            self._lifecycle_lock.release()
+
+    def _transport_health_tick_locked(self) -> None:
         options = self._active_options
         if options is None or self.state != EngineState.READY:
             return
@@ -858,7 +981,8 @@ class ServiceCoordinator:
             self._transport_failures = 0
             self._deep_mcp_health_tick(options)
             return
-        if not self.tunnel.is_running:
+        if not self._public_path_running(options):
+            self._public_mcp_verified = False
             self._transport_failures = max(
                 self._transport_failures,
                 TRANSPORT_HEALTH_FAILURE_THRESHOLD,
@@ -880,6 +1004,8 @@ class ServiceCoordinator:
             public_health, TRANSPORT_HEALTH_TIMEOUT_SECONDS
         )
         degraded = (not public_ok) or public_ttfb > TRANSPORT_HEALTH_TTFB_LIMIT_SECONDS
+        if not public_ok:
+            self._public_mcp_verified = False
         self._transport_failures = self._transport_failures + 1 if degraded else 0
         if public_ok:
             self._mark_probe_success("public")

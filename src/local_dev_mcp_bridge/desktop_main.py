@@ -28,7 +28,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 from PySide6.QtCore import QLockFile, QObject, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QFont, QTextOption
+from PySide6.QtGui import QAction, QFont, QStandardItemModel, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -266,6 +266,10 @@ class MainWindow(QMainWindow):
             device_registry=self.device_registry,
             local_device_id=self._app_config.device_id,
         )
+        if self._app_config.cloudflare_transport is None:
+            self._app_config.cloudflare_transport = "relay" if self.coord.relay.provisioned else "direct"
+            save_app_config(self._app_config)
+        self._transport_switch_busy = False
         self._signals = _Signals()
         self._signals.coord_event.connect(self._on_coord_event)
         self.coord.listen(self._emit_coord_event)
@@ -406,6 +410,28 @@ class MainWindow(QMainWindow):
         proj_v.addLayout(proj_btns)
         self.project_table.setToolTip("所有运行中的项目根目录同时可用，工具调用按路径自动路由")
         self.ctrl_layout.addWidget(proj_box)
+
+        transport_box = QGroupBox("公网连接路径（这台电脑共用）")
+        transport_layout = QVBoxLayout(transport_box)
+        transport_row = QHBoxLayout()
+        self.transport_mode_combo = NoWheelComboBox()
+        self.transport_mode_combo.addItem("本机直连", "direct")
+        self.transport_mode_combo.addItem("服务器中转", "relay")
+        self.transport_mode_combo.setCurrentIndex(1 if self._app_config.cloudflare_transport == "relay" else 0)
+        if not self.coord.relay.provisioned:
+            model = self.transport_mode_combo.model()
+            if isinstance(model, QStandardItemModel) and (item := model.item(1)) is not None:
+                item.setEnabled(False)
+            self.transport_mode_combo.setToolTip("服务器中转需先完成专用中转配置；当前平台或安装尚未配置。")
+        self.transport_apply_btn = QPushButton("切换连接路径")
+        self.transport_apply_btn.clicked.connect(self._apply_transport_mode)
+        transport_row.addWidget(self.transport_mode_combo, 1)
+        transport_row.addWidget(self.transport_apply_btn)
+        transport_layout.addLayout(transport_row)
+        self.transport_status_label = QLabel("尚未启动连接")
+        self.transport_status_label.setWordWrap(True)
+        transport_layout.addWidget(self.transport_status_label)
+        self.ctrl_layout.addWidget(transport_box)
 
         # --- config: permission + connection + bridge
         cfg_box = QGroupBox("连接与权限")
@@ -2689,7 +2715,48 @@ class MainWindow(QMainWindow):
             public_hostname=self.hostname_edit.text().strip(),
             tunnel_token=self._tunnel_token_value(),
             gateway_port=self._app_config.gateway_port,
+            cloudflare_transport=self._app_config.cloudflare_transport or "direct",
         )
+
+    def _apply_transport_mode(self) -> None:
+        if self._transport_switch_busy:
+            return
+        mode = self.transport_mode_combo.currentData()
+        if mode not in ("direct", "relay"):
+            return
+        if mode == "relay" and not self.coord.relay.provisioned:
+            QMessageBox.warning(self, "中转尚未配置", "这台电脑尚未配置受信任的服务器中转。")
+            return
+        if not self.coord.running:
+            self._app_config.cloudflare_transport = mode
+            save_app_config(self._app_config)
+            self._append_log("连接路径已保存，下次启动连接时生效。")
+            self._poll_status()
+            return
+        self._transport_switch_busy = True
+        self._append_log("正在切换公网连接路径，项目引擎和任务保持运行…")
+        self._poll_status()
+
+        def run() -> tuple[bool, str]:
+            return self.coord.switch_cloudflare_transport(mode)
+
+        def done(result: Any) -> None:
+            self._transport_switch_busy = False
+            if isinstance(result, Exception):
+                self._append_log(f"切换未完成：{result}")
+            else:
+                ok, message = result
+                if ok:
+                    self._app_config.cloudflare_transport = mode
+                    save_app_config(self._app_config)
+                self._append_log(message)
+                if not ok:
+                    QMessageBox.warning(self, "连接路径未切换", message)
+            actual = self.coord.connection_snapshot()["mode"] or self._app_config.cloudflare_transport
+            self.transport_mode_combo.setCurrentIndex(1 if actual == "relay" else 0)
+            self._poll_status()
+
+        _run_async(run, done)
 
     def _tunnel_token_value(self) -> str | None:
         field = self.cf_token_edit.text().strip()
@@ -3127,6 +3194,25 @@ class MainWindow(QMainWindow):
         self._update_gateway_port_ui()
 
     def _poll_status(self) -> None:
+        snapshot = self.coord.connection_snapshot()
+        mode = snapshot["mode"] or self._app_config.cloudflare_transport
+        label = "服务器中转" if mode == "relay" else "本机直连"
+        if self._transport_switch_busy or snapshot["switching"]:
+            detail = "正在切换，项目任务保持运行"
+        elif self.coord.running:
+            detail = "实际 MCP 已验证" if snapshot["verified"] else "实际 MCP 尚未验证通过"
+        else:
+            detail = "已保存，启动连接后验证"
+        connection = snapshot.get("connection") or self._selected_connection().value
+        if snapshot.get("uncertain") and not self._transport_switch_busy:
+            self.transport_status_label.setText(f"实际连接路径尚未确认 · 上次选择：{label} · 请运行诊断")
+        elif connection != ConnectionMethod.CLOUDFLARE.value:
+            self.transport_status_label.setText("此开关用于 Cloudflare 固定地址，当前连接方式不使用此开关。")
+        else:
+            self.transport_status_label.setText(f"当前路径：{label} · {detail}")
+        enabled = not self._transport_switch_busy and connection == ConnectionMethod.CLOUDFLARE.value
+        self.transport_mode_combo.setEnabled(enabled)
+        self.transport_apply_btn.setEnabled(enabled)
         selected = self._project_config()
         selected_unit = self.pm.unit(selected.id) if selected is not None else None
         state = self._project_state(selected)

@@ -45,6 +45,54 @@ def _close(app: QApplication, window: dm.MainWindow) -> None:
     app.processEvents()
 
 
+def test_idle_transport_choice_is_global_and_does_not_start_services(tmp_path: Path, monkeypatch):
+    from local_dev_mcp_bridge.config_store import load_app_config
+
+    app, window, first, second = _window(tmp_path, monkeypatch)
+    try:
+        first.connection = "cloudflare"
+        window.pm.update(first)
+        window._select_root(first.root_path)
+        window._apply_selected_project()
+        monkeypatch.setattr(type(window.coord.relay), "provisioned", property(lambda self: True))
+        monkeypatch.setattr(window.coord.relay, "start", lambda: pytest.fail("idle preference started relay"))
+        window.transport_mode_combo.setCurrentIndex(1)
+        window._apply_transport_mode()
+        assert load_app_config().cloudflare_transport == "relay"
+        saved_first, saved_second = window.pm.get(first.id), window.pm.get(second.id)
+        assert saved_first is not None and saved_second is not None
+        assert saved_first.connection == "cloudflare"
+        assert saved_second.connection == "local"
+        assert "启动连接后验证" in window.transport_status_label.text()
+    finally:
+        _close(app, window)
+
+
+def test_failed_transport_ui_does_not_persist_requested_mode(tmp_path: Path, monkeypatch):
+    from local_dev_mcp_bridge.config_store import load_app_config
+
+    app, window, first, _ = _window(tmp_path, monkeypatch)
+    try:
+        first.connection = "cloudflare"
+        window.pm.update(first)
+        window._select_root(first.root_path)
+        window._apply_selected_project()
+        window._app_config.cloudflare_transport = "relay"
+        dm.save_app_config(window._app_config)
+        window.coord._state = dm.EngineState.READY
+        monkeypatch.setattr(window.coord, "switch_cloudflare_transport", lambda mode: (False, "切换未成功，已恢复服务器中转"))
+        monkeypatch.setattr(window.coord, "connection_snapshot", lambda: {"mode": "relay", "verified": True, "switching": False})
+        monkeypatch.setattr(dm, "_run_async", lambda fn, callback: callback(fn()))
+        monkeypatch.setattr(dm.QMessageBox, "warning", lambda *args: None)
+        window.transport_mode_combo.setCurrentIndex(0)
+        window._apply_transport_mode()
+        assert load_app_config().cloudflare_transport == "relay"
+        assert window.transport_mode_combo.currentData() == "relay"
+        assert "服务器中转" in window.transport_status_label.text()
+    finally:
+        _close(app, window)
+
+
 @pytest.mark.parametrize("local_ok,public_ok,recovered", [(True, False, False), (False, True, False), (True, True, True)])
 def test_diagnostic_recent_attempt_is_not_recovery_without_current_mcp_success(
     tmp_path: Path, monkeypatch, local_ok: bool, public_ok: bool, recovered: bool,
