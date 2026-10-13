@@ -103,3 +103,12 @@ def test_target_preflight_failure_keeps_working_direct_connector(tmp_path, monke
     assert not events
     assert c.tunnel.is_running
     assert c.connection_snapshot()["verified"]
+
+
+def test_custom_port_relay_refused_before_disconnecting_direct(tmp_path, monkeypatch):
+    c, events = rig(tmp_path, monkeypatch, "direct")
+    assert c._active_options is not None
+    c._active_options.gateway_port = 9999
+    ok, _ = c.switch_cloudflare_transport("relay")
+    assert not ok
+    assert not events

@@ -26,6 +26,16 @@ def test_unrecognized_task_rejected_before_any_remote_or_file_mutation(tmp_path,
     assert not (r.directory / "stop.request").exists()
 
 
+def test_missing_script_in_existing_deployment_is_not_absent_relay(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path))
+    r = rc.RelayController()
+    r.directory.mkdir()
+    assert r.configured and not r.provisioned
+    with pytest.raises(RuntimeError):
+        r.stop()
+    assert not (r.directory / "stop.request").exists()
+
+
 def test_remote_stop_failure_keeps_forward_and_does_not_record_disabled(tmp_path, monkeypatch):
     r = controller(tmp_path, monkeypatch)
     monkeypatch.setattr(r, "_task", lambda action: None if action == "check" else pytest.fail("working forward stopped"))

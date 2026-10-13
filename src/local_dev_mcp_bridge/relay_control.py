@@ -28,7 +28,8 @@ class RelayController:
 
     @property
     def configured(self) -> bool:
-        return (self.directory / "relay-supervisor.ps1").exists()
+        # Missing or changed files in an existing deployment are not "no relay".
+        return self.directory.exists()
 
     @property
     def provisioned(self) -> bool:

@@ -312,6 +312,8 @@ class ServiceCoordinator:
     ) -> tuple[bool, bool, str]:
         try:
             if self._using_relay(options):
+                if options.gateway_port != constants.DEFAULT_GATEWAY_PORT:
+                    raise RuntimeError("现有专用中转使用本机端口 8786，请恢复该端口后再启用中转。")
                 if self.tunnel.is_running:
                     self.tunnel.stop()
                 self.relay.start()
@@ -717,6 +719,8 @@ class ServiceCoordinator:
             if not old or old.connection != ConnectionMethod.CLOUDFLARE or self.state != EngineState.READY:
                 return False, "请先启动使用 Cloudflare 固定地址的连接。"
             if mode == "relay":
+                if old.gateway_port != constants.DEFAULT_GATEWAY_PORT:
+                    return False, "现有专用中转使用本机端口 8786，当前连接保持。"
                 try:
                     self.relay.validate()
                 except RuntimeError as exc:
