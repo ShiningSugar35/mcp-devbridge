@@ -47,7 +47,12 @@ Thumbs.db
 
 # 本地临时
 tmp/
+/.tmp/
+/.cache/
+/.pytest_cache/
 /.ai-bridge/
+/installer/
+/昨晚另一台设备(grw)上的诊断包/
 
 # 当仓库与本机安装目录重合时产生的正式安装文件
 /MCPDevBridge.exe

@@ -281,6 +281,26 @@ class TunnelManager(EngineManager):
             or 'proceed using "http2"' in lowered
         ):
             return "http2"
+        if "precheck complete" in lowered:
+            udp_failed: set[str] = set()
+            udp_passed = False
+            tcp_passed = False
+            for line in lowered.splitlines():
+                if "precheck " not in line:
+                    continue
+                status = re.search(r"\bstatus=(pass|fail)\b", line)
+                target = re.search(r"\btarget=(region[12]\.v2\.argotunnel\.com)\b", line)
+                if status is None or target is None:
+                    continue
+                if 'component="udp connectivity"' in line:
+                    if status[1] == "pass":
+                        udp_passed = True
+                    else:
+                        udp_failed.add(target[1])
+                elif 'component="tcp connectivity"' in line and status[1] == "pass":
+                    tcp_passed = True
+            if len(udp_failed) == 2 and not udp_passed and tcp_passed:
+                return "http2"
         return ""
 
     def _parse_public_url(self, tail: str) -> str:

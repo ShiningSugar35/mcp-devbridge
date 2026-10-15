@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from .platform_support import IS_LINUX, IS_WINDOWS, platform_key, popen_platform_kwargs
+from .platform_support import IS_LINUX, IS_MACOS, IS_WINDOWS, platform_key, popen_platform_kwargs
 
 RELEASES_API = "https://api.github.com/repos/ShiningSugar35/mcp-devbridge/releases?per_page=100"
 WINDOWS_INSTALLER_PREFIX = "MCPDevBridge-Setup-"
@@ -78,6 +78,10 @@ def _release_asset_prefix() -> str:
                 "SteamOS/Steam Machine x86_64 已支持。"
             )
         return LINUX_PACKAGE_PREFIX
+    if IS_MACOS:
+        from .macos_app import architecture
+
+        return f"MCPDevBridge-macOS-{architecture(platform.machine())}-"
     raise RuntimeError(f"当前平台 {platform_key()} 暂不支持应用内升级。")
 
 
@@ -93,7 +97,7 @@ def _release_info_from_payload(payload: dict[str, object]) -> ReleaseInfo | None
         return None
     prefix = _release_asset_prefix()
     expected_asset_name = (
-        f"{prefix}{version}.exe" if IS_WINDOWS else f"{prefix}{version}.tar.gz"
+        f"{prefix}{version}.exe" if IS_WINDOWS else f"{prefix}{version}.zip" if IS_MACOS else f"{prefix}{version}.tar.gz"
     )
     asset = next(
         (
@@ -139,13 +143,15 @@ def fetch_latest_release(*, timeout: float = 10.0) -> ReleaseInfo:
         if (info := _release_info_from_payload(item)) is not None
     ]
     if not candidates:
-        platform_name = "Windows" if IS_WINDOWS else "Linux/SteamOS"
+        platform_name = "Windows" if IS_WINDOWS else "macOS" if IS_MACOS else "Linux/SteamOS"
         raise RuntimeError(f"没有可用于当前 {platform_name} 的正式 Release 安装包。")
     return max(candidates, key=lambda item: version_tuple(item.version))
 
 
 def download_installer(info: ReleaseInfo, *, target_dir: Path | None = None) -> Path:
     """Download the current platform's installer/package and verify size/digest."""
+    if IS_MACOS and not re.fullmatch(r"[0-9a-fA-F]{64}", info.sha256):
+        raise RuntimeError("macOS 更新包缺少可验证的 SHA-256，尚未下载。")
     directory = target_dir or (Path(tempfile.gettempdir()) / "MCPDevBridge-Updates")
     directory.mkdir(parents=True, exist_ok=True)
     if info.asset_name:
@@ -154,6 +160,10 @@ def download_installer(info: ReleaseInfo, *, target_dir: Path | None = None) -> 
         filename = f"MCPDevBridge-Setup-{info.version}.exe"
     elif IS_LINUX:
         filename = f"MCPDevBridge-Linux-x86_64-{info.version}.tar.gz"
+    elif IS_MACOS:
+        from .macos_app import asset_name
+
+        filename = asset_name(info.version, platform.machine())
     else:
         raise RuntimeError(f"当前平台 {platform_key()} 暂不支持应用内升级。")
     target = directory / filename
@@ -194,6 +204,13 @@ def bundled_upgrade_script() -> Path:
 
 
 def launch_update(installer: Path, *, project_root: str = "") -> None:
+    if IS_MACOS:
+        # The initial Mac port uses ordinary .app replacement, not a Linux installer.
+        # Do not silently stop active Mac tasks or claim an automatic restart.
+        raise RuntimeError(
+            "macOS 更新包已下载并校验。请先结束当前任务并退出本软件，"
+            f"再从 {installer} 解压并替换原应用；配置保留不变。"
+        )
     script = bundled_upgrade_script()
     if not script.is_file():
         raise RuntimeError("找不到内置升级脚本。")

@@ -77,7 +77,7 @@ def test_running_project_does_not_disable_other_project(tmp_path: Path, monkeypa
         assert button_b.text() == "启动服务"
         assert button_b.isEnabled()
         assert window.permission_combo.isEnabled()
-        assert window.client_combo.isEnabled()
+        assert not hasattr(window, "client_combo")
         assert window.connection_combo.isEnabled()
         assert window.add_project_btn.isEnabled()
 
@@ -187,7 +187,7 @@ def test_connection_info_exposes_encoded_no_auth_server_url_for_personal_connect
 
         expected = "https://mcp.example.test/mcp?token=access+code%2B%2F%3F%3Avalue"
         assert window.no_auth_url_edit.text() == expected
-        assert window.no_auth_url_copy_btn.text() == "复制 No Auth 地址"
+        assert window.no_auth_url_copy_btn.text() == "复制 ChatGPT 免登录地址"
         assert "访问码" in window.no_auth_url_edit.toolTip()
 
         window.no_auth_url_copy_btn.click()

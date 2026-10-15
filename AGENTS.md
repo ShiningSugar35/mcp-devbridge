@@ -1,6 +1,6 @@
 # AGENTS.md — MCP DevBridge 开发与维护指南
 
-本文件是仓库内 AI/Agent 与工程师的开发入口。当前维护/发布目标版本为 `0.8.9.6`，维护分支为 `release/v0.8.9.6`；正式已安装构建与已发布源仍必须以 `进度验收.md` 的运行态证据及 Release provenance 为准，不能因源码版本已前推就提前宣称线上或本机已升级。历史 `v0.8.9.1` / `v0.8.9-fixed` / `v0.8.9` 保持不动，一般不得移动或改写已发布 tag/Release；唯一例外仍仅是本文件 §8 登记的 2026-09-08 所有者授权 `v0.8.9.1` 同版本重发。不得为了补功能把已经淘汰的多 Agent runtime 混回正式产品链。
+本文件是仓库内 AI/Agent 与工程师的开发入口。当前维护/发布目标版本为 `0.9.1`，维护分支为 `release/v0.9.1`；正式已安装构建与已发布源仍必须以 `进度验收.md` 的运行态证据及 Release provenance 为准，不能因源码版本已前推就提前宣称线上或本机已升级。历史 `v0.8.9.1` / `v0.8.9-fixed` / `v0.8.9` 保持不动，一般不得移动或改写已发布 tag/Release；唯一例外仍仅是本文件 §8 登记的 2026-09-08 所有者授权 `v0.8.9.1` 同版本重发。不得为了补功能把已经淘汰的多 Agent runtime 混回正式产品链。
 
 ## 1. 开工阅读顺序
 
@@ -268,11 +268,6 @@ Linux release 以 Ubuntu 22.04 构建保持较旧 glibc 基线；SteamOS Desktop
 
 ## 8. 发布门
 
-### 2026-09-08 所有者单次授权：同版本重发 0.8.9.1
-
-用户已明确要求：将本轮新增修复验证通过后，替换线上及本机正在运行的 `0.8.9.1`，热更新安装并重发，版本号不前推。本裁决仅覆盖本轮 `v0.8.9.1` 的 tag/Release/资产，优先于本文件的一般不可改写要求；其它历史版本仍不可变。必须先保存旧 annotated tag 对象、源提交、Release 元数据、全部旧资产及 SHA-256，确认 GitHub 实际未启用 immutable 保护；新 Windows/Linux 资产必须同源构建通过。使用具名且带旧值核验的 tag 更新，不 force-push 分支；替换期间保留回滚副本，发布说明和 provenance 明示同版本重发及新旧 SHA。不得把版本未变化当作新包已安装，必须核对实际冻结 EXE 与新包哈希。更新前仍须所有根/全部 workspace active-task drain，不取消其它会话任务。
-
-
 任何版本发布前至少必须满足：
 
 - `开发计划.md` 中与该版本发布声明有关的事项全部完成；平台阻断能力不得通过改文案、删测或伪造证据绕过。
@@ -288,15 +283,3 @@ Linux release 以 Ubuntu 22.04 构建保持较旧 glibc 基线；SteamOS Desktop
 - 所有历史 tag/Release 均不可删除、移动、改写或 force-push。
 
 最终实测只写入 `进度验收.md`；完成任务从 `开发计划.md` 删除。
-
-## 9. Gemini 辅助 Agent 能力
-
-本机提供共享 Gemini 辅助 Agent 基础设施，权威调用协议位于 `D:\Environment\GeminiAgentBridge\AGENTS.md`。Codex/OpenCode 等主 Agent 可以把**边界清晰、可独立验收**的调查、代码 review、窄实现、测试设计或日志分析交给 Gemini worker/reviewer；Gemini 不是本项目 coordinator，不得取代主 Agent、durable run、发布门或终局裁决。
-
-- Coding / 技术分析首选 `gemini-flash-latest`；Antigravity Coding 快捷入口为 `agy-code`。Chat / 摘要 / 分类 / 抽取等轻量任务首选 `gemini-flash-lite-latest`；具体连接、环境变量与受控读写命令只以桥目录 `AGENTS.md` 为准。
-- 允许 Gemini 修改本仓库时，必须显式限定 `ProjectPath=D:\Environment\mcp` 和窄写入范围，并先确认不存在其它 Agent/会话对同一文件或同一区域的并发写入；严禁 reset、回退、覆盖当前未提交现场或跨项目写任务产物。
-- 对 §1.2“项目外不得写入”的唯一窄化说明：调用已部署的 `GeminiAgentBridge` 时，该共享服务自身在 `D:\Environment\GeminiAgentBridge` 下维护的既有 `logs/`、`run/`、`secrets/` 等**基础设施运行态**属于被本条显式允许的服务副作用，不得视为本项目任务产物；Gemini 子任务本身仍禁止在 `D:\Environment\mcp` 之外创建代码、补丁、临时文件、测试工件、报告或其它任务输出。
-- 多阶段/长任务仍只维护本仓库规定的**唯一 durable run**。Gemini 可以完成其中一个有边界的辅助步骤或独立 review，但不得另建平行 durable run、改写主计划状态、替主 Agent 调用 completion gate，或把自己的“已完成”作为最终证据。
-- Gemini 必须继承本仓库 PathGuard、workspace 路由、Windows/Linux 兼容、安全、版本、安装/升级、release provenance、历史 tag 不可变和 active-task drain 等全部硬约束；不得自行执行正式 release、tag 改写、全局服务切换或其它高风险动作，除非当前任务规范和主 Agent 明确授权。
-- 主 Agent 必须把 Gemini 产出的有价值结果重新纳入本仓库 `开发计划.md` / `进度验收.md` / 架构文档和分级测试流程；辅助 Agent 的 review 不能替代 defect-first Review、真实 smoke、构建、发布资产与远端 provenance 验证。
-- 禁止 Gemini 递归委派其它 Agent；禁止把真实 Google API Key、Cloudflare 凭据、Cookie、浏览器 Profile、MCP 密钥或其它秘密写入提示词、源码、日志或任务工件。

@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { waitForTask } from './task-wait.mjs';
 
 // The broad smoke suite validates workspace-scoped safety. Production launchers
 // may export full-system mode, so clear it for this child-process fixture instead
@@ -281,14 +282,6 @@ async function expectToolError(name, args, pattern, targetClient = client) {
   if (pattern && !pattern.test(text)) {
     throw new Error(`${name} error did not match ${pattern}: ${text}`);
   }
-}
-async function waitForTask(targetClient, startResult, workspaceId, waitSeconds = 10) {
-  const taskId = startResult.structuredContent?.task_id ?? startResult.structuredContent?.task?.taskId;
-  if (!taskId) throw new Error(`command did not return task_id: ${JSON.stringify(startResult.structuredContent)}`);
-  return targetClient.request('tools/call', {
-    name: 'wait_task',
-    arguments: { ...(workspaceId ? { workspace_id: workspaceId } : {}), task_id: taskId, wait_seconds: waitSeconds }
-  });
 }
 for (const visualTool of toolNames) {
   if (hasWidgetMeta(visualTool) || hasToolCardStatusMeta(visualTool)) throw new Error(`${visualTool} exposed widget metadata while CODEXPRO_TOOL_CARDS is off`);

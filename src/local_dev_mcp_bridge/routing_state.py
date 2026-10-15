@@ -153,6 +153,17 @@ def _exclusive_file_lock(path: Path) -> Iterator[None]:
         stream.close()
 
 
+def _atomic_replace(src: Path, dst: Path, attempts: int = 10, delay: float = 0.01) -> None:
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1 or os.name != "nt":
+                raise
+            time.sleep(delay)
+
+
 def save_workspace_routes(
     routes: list[dict[str, Any]],
     *,
@@ -230,7 +241,7 @@ def save_workspace_routes(
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(tmp, path)
+            _atomic_replace(tmp, path)
         finally:
             with suppress(OSError):
                 tmp.unlink()

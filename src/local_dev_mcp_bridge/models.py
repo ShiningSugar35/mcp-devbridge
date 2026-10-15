@@ -64,7 +64,7 @@ class ProjectConfig(BaseModel):
     display_name: str = ""
     root_path: str
     permission_mode: PermissionMode = "system"
-    client_target: ClientTarget = "chatgpt"
+    client_target: ClientTarget = "chatgpt"  # Legacy profile field; not used to select the shared Hub
     gemini_redirect_uri: str = ""
     test_command: str = "uv run pytest"
     lint_command: str = "uv run ruff check ."

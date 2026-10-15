@@ -87,6 +87,8 @@ def desktop_dir() -> Path:
     """Best-effort per-user desktop directory without requiring root access."""
     if IS_WINDOWS:
         return Path.home() / "Desktop"
+    if IS_MACOS:
+        return Path.home() / "Desktop"
     # KDE/SteamOS respects XDG user dirs.  Avoid invoking shell code just to find
     # it; parse the generated config if present and otherwise use ~/Desktop.
     config_root = _xdg_home("XDG_CONFIG_HOME", Path.home() / ".config")
@@ -103,6 +105,13 @@ def desktop_dir() -> Path:
         except OSError:
             pass
     return Path.home() / "Desktop"
+
+
+def macos_config_dir() -> Path:
+    """Native per-user profile location; app startup preserves legacy profiles."""
+    from .macos_app import native_config_dir
+
+    return native_config_dir()
 
 
 def linux_install_root() -> Path:

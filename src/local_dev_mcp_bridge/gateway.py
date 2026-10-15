@@ -67,6 +67,7 @@ from .hub_tool_contract import (
     load_codexpro_full_tool_contract,
 )
 from .oauth_provider import ConsentExpired, LocalOAuthProvider, _workspace_from_subject
+from .oauth_transport import client_auth_routes
 from .routing_state import load_workspace_routes, save_workspace_routes
 from .secrets import SecretsStore
 from .shell import run_command, run_program
@@ -202,6 +203,12 @@ _CODEXPRO_ACTION_ALIASES = {
 _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     {
         "name": "run_command",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
         "description": "Run only a short PowerShell command (hard cap 20 seconds). For builds, tests, installs, crawls, or other long work, use the background bash task tool and poll with wait_task/get_task instead of holding one MCP call open.",
         "inputSchema": {
             "type": "object",
@@ -223,6 +230,12 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "run_program",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
         "description": "Run only a short program directly (hard cap 20 seconds). For long-running programs use the background bash task tool and poll wait_task/get_task.",
         "inputSchema": {
             "type": "object",
@@ -249,6 +262,13 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "shell_self_test",
+        # Executes configurable external programs, including Python modules.
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
         "description": "Check whether the default shell is executable and whether python/git/pytest/pyright are available. Returns per-line checkmarks.",
         "inputSchema": {
             "type": "object",
@@ -257,6 +277,12 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "devbridge_list_workspaces",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": "List all registered project workspaces with path, status, and CodexPro port.",
         "inputSchema": {
             "type": "object",
@@ -265,6 +291,12 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "devbridge_get_current_workspace",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": "Return the workspace project bound to the current MCP session.",
         "inputSchema": {
             "type": "object",
@@ -273,6 +305,12 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "devbridge_switch_workspace",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "description": "Switch the current MCP session to a different project workspace. Only affects the calling client, not other GPT/Gemini sessions.",
         "inputSchema": {
             "type": "object",
@@ -287,16 +325,34 @@ _PYTHON_TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "devbridge_list_devices",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": "List computers connected to this MCP DevBridge Hub and whether each one is online.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "devbridge_get_current_device",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "description": "Return the computer currently selected for this MCP session.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "devbridge_switch_device",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "description": "Switch only the current MCP session to another online computer from devbridge_list_devices.",
         "inputSchema": {
             "type": "object",
@@ -403,6 +459,48 @@ def _diag_redact_headers(headers: dict[str, str]) -> dict[str, str]:
 def _write_diag_entry(**fields: Any) -> None:
     with suppress(OSError):
         write_entry(_diag_log_path(), fields, max_bytes=_DIAG_MAX_BYTES)
+
+
+def _classify_oauth_redirect(location: str | None) -> dict[str, str]:
+    """Classify an OAuth redirect Location for privacy-safe diagnostic logging.
+
+    Returns a dict with ``oauth_redirect`` set to one of:
+    ``consent_page``, ``oauth_error``, ``client_callback``, ``unrecognized``,
+    or ``missing``.  For ``oauth_error``, the standard OAuth ``error`` code is
+    included (but never ``error_description``, ``state``, ``code``, ``token``,
+    or the full URL).
+    """
+    if not location:
+        return {"oauth_redirect": "missing"}
+
+    from urllib.parse import parse_qs, urlsplit
+
+    parsed = urlsplit(location)
+
+    # A relative or absolute path to the local consent page: /consent?id=...
+    if (not parsed.scheme and not parsed.netloc and parsed.path == "/consent") or (
+        parsed.scheme in ("http", "https")
+        and parsed.netloc
+        and parsed.path == "/consent"
+        and "id" in parse_qs(parsed.query)
+    ):
+        return {"oauth_redirect": "consent_page"}
+
+    # An absolute external URL — check for OAuth error or success callback.
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        query = parse_qs(parsed.query)
+        if "error" in query:
+            # Only expose the standard error code, never description/state.
+            error_code = query["error"][0] if query["error"] else "unknown"
+            return {"oauth_redirect": "oauth_error", "oauth_error": error_code}
+        if "code" in query:
+            # Authorization code present — this is a success callback.
+            # Never include the code, state, or host in the diagnostic.
+            return {"oauth_redirect": "client_callback"}
+        # External URL without error or code — still a client callback shape.
+        return {"oauth_redirect": "client_callback"}
+
+    return {"oauth_redirect": "unrecognized"}
 
 
 class UpstreamResponseTooLarge(RuntimeError):
@@ -660,7 +758,23 @@ def _rewrite_server_identity(payload: bytes) -> bytes:
             )
             current = str(target.get("instructions") or "")
             if "MCP DevBridge routing:" not in current:
-                target["instructions"] = current + routing_note
+                current += routing_note
+            command_note = (
+                "\n\nMCP DevBridge command execution: run_command already executes the selected "
+                "shell (PowerShell on Windows). Pass a raw script, not an extra powershell "
+                "-Command wrapper with a double-quoted script: the outer shell may expand its "
+                "variables before the nested shell runs. Prefer run_program with an explicit "
+                "argument array when a separate executable is intended. Supply an absolute cwd "
+                "for a known target directory; listing/current-workspace/switching are not "
+                "prerequisites for each call. Prefer read/tree/search for data inspection. "
+                "For one user-authorized short write/read/cleanup operation, one coherent "
+                "script is sufficient; ordinary client confirmation still applies. Check the "
+                "exit code and returned data. On unknown execution outcome, do not replay "
+                "a side-effectful command without first checking its resulting state."
+            )
+            if "MCP DevBridge command execution:" not in current:
+                current += command_note
+            target["instructions"] = current
         return obj
 
     if text.lstrip().startswith("data:") or "\ndata:" in text:
@@ -1079,20 +1193,31 @@ class _DiagnosticMiddleware:
         resp_content_type: list[str] = [""]
         resp_bytes: list[int] = [0]
 
+        location_header: list[str] = [""]
+
         async def _send(message: dict) -> None:
             if message["type"] == "http.response.start":
                 status[0] = message.get("status", 0)
                 for h in message.get("headers") or []:
-                    if h[0].decode("latin-1").lower() == "content-type":
+                    h_name = h[0].decode("latin-1").lower()
+                    if h_name == "content-type":
                         resp_content_type[0] = h[1].decode("latin-1")
+                    elif h_name == "location":
+                        location_header[0] = h[1].decode("latin-1")
+                stage_fields: dict[str, Any] = {
+                    "status": status[0],
+                    "component": component,
+                    "content_type": resp_content_type[0],
+                    "streaming": "text/event-stream" in resp_content_type[0].casefold(),
+                }
+                if path.startswith("/authorize"):
+                    with suppress(Exception):
+                        stage_fields.update(_classify_oauth_redirect(location_header[0]))
                 if self.recorder is not None and trace_id:
                     self.recorder.stage(
                         trace_id,
                         "response_started",
-                        status=status[0],
-                        component=component,
-                        content_type=resp_content_type[0],
-                        streaming="text/event-stream" in resp_content_type[0].casefold(),
+                        **stage_fields,
                     )
             elif message["type"] == "http.response.body":
                 body = message.get("body") or b""
@@ -1126,6 +1251,10 @@ class _DiagnosticMiddleware:
                     content_type=resp_content_type[0],
                     streaming="text/event-stream" in resp_content_type[0].casefold(),
                 )
+            extra_diag: dict[str, Any] = {}
+            if path.startswith("/authorize"):
+                with suppress(Exception):
+                    extra_diag.update(_classify_oauth_redirect(location_header[0]))
             _write_diag_entry(
                 path=path,
                 method=method,
@@ -1135,6 +1264,7 @@ class _DiagnosticMiddleware:
                 duration_ms=duration_ms,
                 exc_type=exc_type,
                 exc_msg=exc_msg,
+                **extra_diag,
             )
 
 
@@ -1238,8 +1368,8 @@ class OAuthGateway:
     def _build_app(self) -> Any:
         registration = ClientRegistrationOptions(
             enabled=True,
-            valid_scopes=[constants.OAUTH_SCOPE, constants.OAUTH_OFFLINE_SCOPE],
-            default_scopes=[constants.OAUTH_SCOPE],
+            valid_scopes=list(constants.OAUTH_ALL_VALID_SCOPES),
+            default_scopes=list(constants.OAUTH_SUPPORTED_SCOPES),
         )
         routes: list[Route] = create_auth_routes(
             self._provider,
@@ -1247,10 +1377,12 @@ class OAuthGateway:
             client_registration_options=registration,
             revocation_options=RevocationOptions(enabled=True),
         )
+        routes = [route for route in routes if route.path not in {"/token", "/revoke"}]
+        routes.extend(client_auth_routes(self._provider))
         resource = create_protected_resource_routes(
             AnyHttpUrl(self.resource_url),
             [AnyHttpUrl(self.public_base)],
-            scopes_supported=[constants.OAUTH_SCOPE, constants.OAUTH_OFFLINE_SCOPE],
+            scopes_supported=list(constants.OAUTH_SUPPORTED_SCOPES),
             resource_name="MCP DevBridge",
         )
         routes.extend(resource)

@@ -127,16 +127,23 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         scopes: list[str] | None, error_factory: Callable[..., Exception]
     ) -> list[str]:
         result = list(scopes) if scopes is not None else [constants.OAUTH_SCOPE]
-        allowed = {constants.OAUTH_SCOPE, constants.OAUTH_OFFLINE_SCOPE}
+        allowed = set(constants.OAUTH_ALL_VALID_SCOPES)
         requested = set(result)
-        if constants.OAUTH_SCOPE not in requested or not requested.issubset(allowed):
+        business_scopes = {
+            constants.OAUTH_SCOPE,
+            constants.OAUTH_CONVERSATION_SCOPE,
+            constants.OAUTH_TOOLS_SCOPE,
+        }
+        if not requested.issubset(allowed) or not (requested & business_scopes):
             raise error_factory(
                 error="invalid_scope",
                 error_description=(
-                    f"必须包含 scope：{constants.OAUTH_SCOPE}；"
-                    f"可选：{constants.OAUTH_OFFLINE_SCOPE}"
+                    f"必须包含 MCP 业务 scope（如 {constants.OAUTH_SCOPE}）；"
+                    f"支持的范围：{', '.join(sorted(allowed))}"
                 ),
             )
+        if constants.OAUTH_SCOPE not in requested:
+            result.insert(0, constants.OAUTH_SCOPE)
         return list(dict.fromkeys(result))
 
     # -------------------------------------------------------------- DCR
@@ -149,7 +156,10 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
         if not raw:
             return None
         try:
-            return OAuthClientInformationFull.model_validate(json.loads(raw))
+            client = OAuthClientInformationFull.model_validate(json.loads(raw))
+            current_scopes = set(client.scope.split()) if client.scope else set()
+            client.scope = " ".join(current_scopes.union(constants.OAUTH_SUPPORTED_SCOPES))
+            return client
         except Exception:
             return None
 
@@ -160,6 +170,8 @@ class LocalOAuthProvider(OAuthAuthorizationServerProvider):
             value = str(uri)
             if value.startswith("http://") and not value.startswith("http://localhost"):
                 raise RegistrationError("invalid_client_metadata", "仅允许 https 或 http://localhost 回调地址")
+        current_scopes = set(client_info.scope.split()) if client_info.scope else set()
+        client_info.scope = " ".join(current_scopes.union(constants.OAUTH_SUPPORTED_SCOPES))
         payload = client_info.model_dump(exclude_none=True, mode="json")
         self.store.set(self._client_key(client_info.client_id), json.dumps(payload))
 

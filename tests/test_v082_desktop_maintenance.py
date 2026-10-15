@@ -86,13 +86,11 @@ def test_save_connection_and_permission_card_to_all_projects(tmp_path: Path, mon
         window._select_root(project_a.root_path)
         window._apply_selected_project()
         window.permission_combo.setCurrentIndex(1)
-        window.client_combo.setCurrentIndex(window.client_combo.findData("gemini"))
         window.connection_combo.setCurrentIndex(
             window.connection_combo.findData(dm.ConnectionMethod.CLOUDFLARE.value)
         )
         window.hostname_edit.setText("mcp.example.com")
         window.bridge_check.setChecked(True)
-        window.gemini_uri_edit.setText("https://example.com/oauth/callback")
         window.cf_token_edit.setText("placeholder-value")
 
         window._save_settings_for_all_projects()
@@ -101,11 +99,11 @@ def test_save_connection_and_permission_card_to_all_projects(tmp_path: Path, mon
             saved = window.pm.get(project_id)
             assert saved is not None
             assert saved.permission_mode == "workspace"
-            assert saved.client_target == "gemini"
+            assert saved.client_target == "chatgpt"
             assert saved.connection == dm.ConnectionMethod.CLOUDFLARE.value
             assert saved.public_hostname == "mcp.example.com"
             assert saved.windows_enabled is IS_WINDOWS
-            assert saved.gemini_redirect_uri == "https://example.com/oauth/callback"
+            assert saved.gemini_redirect_uri == ""
             assert remembered[project_id] == "placeholder-value"
         saved_b = window.pm.get(project_b.id)
         assert saved_b is not None and saved_b.git_user_name == "keep-me"
