@@ -57,13 +57,15 @@ async def _check_protocol(url: str, credential: str) -> dict[str, Any]:
 
 def _wait_for_listener(engine: CodexProManager) -> None:
     deadline = time.monotonic() + 12
-    with httpx.Client(timeout=1, trust_env=False, follow_redirects=False) as client:
+    token = getattr(engine, "_probe_token", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with httpx.Client(timeout=1, headers=headers, trust_env=False, follow_redirects=False) as client:
         while time.monotonic() < deadline:
             if not engine.is_running:
                 raise RuntimeError("Packaged engine exited during startup")
             try:
                 response = client.get(f"http://127.0.0.1:{engine.port}/healthz")
-                if response.status_code == 200:
+                if response.status_code in {200, 401}:
                     return
             except httpx.HTTPError:
                 pass
