@@ -1,0 +1,76 @@
+name: Native macOS compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/v091-native-*']
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'packaging/macos.spec'
+      - 'packaging/entry_macos.py'
+      - 'scripts/build_macos.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/macos.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  macos-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 'latest'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - name: Prepare isolated build state
+        shell: bash
+        run: |
+          mkdir -p .ci-cache/tmp .ci-cache/uv .ci-cache/npm
+          echo "TMPDIR=$GITHUB_WORKSPACE/.ci-cache/tmp" >> "$GITHUB_ENV"
+          echo "TEMP=$GITHUB_WORKSPACE/.ci-cache/tmp" >> "$GITHUB_ENV"
+          echo "TMP=$GITHUB_WORKSPACE/.ci-cache/tmp" >> "$GITHUB_ENV"
+          echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/.ci-cache/uv" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$GITHUB_WORKSPACE/.ci-cache/npm" >> "$GITHUB_ENV"
+      - name: Install locked Python environment
+        run: uv sync --python 3.12 --locked --extra dev --extra package
+      - name: Verify runner architecture and build native candidate
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        shell: bash
+        run: |
+          .venv/bin/python -c 'import os,platform; assert platform.machine() == os.environ["EXPECTED_ARCH"]'
+          VERSION="$(.venv/bin/python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          .venv/bin/python scripts/build_macos.py --version "$VERSION"
+      - name: Preserve native-only verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.architecture }}-native-check
+          if-no-files-found: warn
+          retention-days: 1
+          include-hidden-files: true
+          path: .ai-bridge/macos-build/native-check-*.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.architecture }}-candidate
+          if-no-files-found: error
+          path: |
+            release/MCPDevBridge-macOS-${{ matrix.architecture }}-*.zip
+            release/MCPDevBridge-macOS-${{ matrix.architecture }}-*.zip.sha256
+            release/MCPDevBridge-macOS-${{ matrix.architecture }}-*.zip.provenance.json

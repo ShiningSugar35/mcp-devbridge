@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$InstallerPath = "",
     [string]$ProjectRoot = "",
@@ -190,7 +190,7 @@ if (-not $Worker) {
     $currentInstallDir = ""
     if ($OldPid -le 0) {
         $candidate = Get-CimInstance Win32_Process |
-            Where-Object { $_.Name -ieq "MCPDevBridge.exe" } |
+            Where-Object { $_.Name -ieq "MCPDevBridge.exe" -and $_.ExecutablePath } |
             Sort-Object ProcessId |
             Select-Object -First 1
         if ($candidate) {

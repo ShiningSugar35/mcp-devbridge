@@ -87,7 +87,6 @@ from .help_content import (
     search_topics,
 )
 from .models import PermissionMode, ProjectConfig, gateway_service_url, git_field_error
-from .oauth_provider import get_or_create_gemini_client
 from .platform_support import IS_WINDOWS, open_in_file_manager
 from .project_manager import ProjectManager
 from .project_secrets import (
@@ -125,7 +124,6 @@ ADMIN_SETUP_TEXT = (
     "Windows 管理员授权没有成功完成，因此“完全访问”暂时无法启用。\n\n"
     "你可以先以普通权限启动，只访问项目目录。稍后可在“项目设置”中重新启用“完全访问”。"
 )
-CLIENT_TARGETS = [("chatgpt", "ChatGPT 网页端"), ("gemini", "Gemini Spark")]
 CONNECTION_METHODS = [
     ConnectionMethod.CLOUDFLARE,
     ConnectionMethod.NGROK,
@@ -134,7 +132,6 @@ CONNECTION_METHODS = [
 ]
 BRIDGE_TOKEN_CRED_NAME = "LocalDevMCPBridge/WindowsBridgeToken"
 TUNNEL_TOKEN_CRED_NAME = "LocalDevMCPBridge/CloudflareTunnelToken"
-GEMINI_LAST_URI_CRED_NAME = "LocalDevMCPBridge/OAuthGeminiLastUri"
 
 
 class NoWheelComboBox(QComboBox):
@@ -421,12 +418,6 @@ class MainWindow(QMainWindow):
             "只读：只允许读取；项目工作区：仅操作当前项目；完全访问：允许系统级操作。"
         )
 
-        self.client_combo = NoWheelComboBox()
-        for value, label in CLIENT_TARGETS:
-            self.client_combo.addItem(label, value)
-        self.client_combo.currentIndexChanged.connect(self._on_client_changed)
-        cfg_form.addRow("连接客户端:", self.client_combo)
-
         self.connection_combo = NoWheelComboBox()
         for method in CONNECTION_METHODS:
             self.connection_combo.addItem(method.label(), method.value)
@@ -447,60 +438,6 @@ class MainWindow(QMainWindow):
             self.cf_token_edit.setText(self._tunnel_token_default)
         self.cf_token_edit.textEdited.connect(self._on_tunnel_token_edited)
         cfg_form.addRow(self._help_label("Cloudflare 访问码", HELP_TUNNEL_TOKEN), self.cf_token_edit)
-
-        self.gemini_box = QGroupBox("Gemini 授权")
-        gemini_form = QFormLayout(self.gemini_box)
-        gemini_form.setContentsMargins(12, 12, 12, 12)
-        gemini_form.setSpacing(8)
-        self._gemini_store = SecretsStore()
-        self._gemini_secret = ""
-        self.gemini_uri_edit = QLineEdit()
-        self.gemini_uri_edit.setPlaceholderText("粘贴 Gemini 提供的回调地址")
-        self.gemini_uri_edit.editingFinished.connect(self._on_gemini_uri_edited)
-        gemini_form.addRow("Gemini 回调地址:", self.gemini_uri_edit)
-
-        self.gemini_gen_btn = QPushButton("生成 / 更新授权信息")
-        self.gemini_gen_btn.clicked.connect(self._generate_gemini_credentials)
-        gemini_form.addRow("", self.gemini_gen_btn)
-
-        self.gemini_id_edit = QLineEdit("—")
-        self.gemini_id_edit.setReadOnly(True)
-        self.gemini_id_edit.setToolTip("应用编号：只读，可选中复制")
-        self.gemini_id_copy = QPushButton("复制")
-        id_row = QHBoxLayout()
-        id_row.setSpacing(8)
-        id_row.addWidget(self.gemini_id_edit, 1)
-        id_row.addWidget(self.gemini_id_copy)
-        gemini_form.addRow("应用编号:", id_row)
-
-        self.gemini_secret_edit = QLineEdit("—")
-        self.gemini_secret_edit.setReadOnly(True)
-        self.gemini_secret_edit.setToolTip("应用密钥：掩码显示，仅可复制")
-        self.gemini_secret_copy = QPushButton("复制")
-        secret_row = QHBoxLayout()
-        secret_row.setSpacing(8)
-        secret_row.addWidget(self.gemini_secret_edit, 1)
-        secret_row.addWidget(self.gemini_secret_copy)
-        gemini_form.addRow("应用密钥:", secret_row)
-
-        self.gemini_id_copy.clicked.connect(
-            lambda: self._copy_with_feedback(self.gemini_id_copy, self.gemini_id_edit.text())
-        )
-        self.gemini_secret_copy.clicked.connect(
-            lambda: self._copy_with_feedback(self.gemini_secret_copy, self._gemini_secret)
-        )
-        cfg_form.addRow("", self.gemini_box)
-
-        if self.gemini_uri_edit.text():
-            try:
-                client_id, secret = get_or_create_gemini_client(
-                    self.gemini_uri_edit.text(), rotate_secret=False
-                )
-                self.gemini_id_edit.setText(client_id)
-                self._gemini_secret = secret
-                self.gemini_secret_edit.setText("•" * 16)
-            except ValueError:
-                pass
 
         self.bridge_check = QCheckBox("启用 Windows 控制桥接")
         self.bridge_check.setToolTip("启用后提供额外的 Windows 桌面控制工具。")
@@ -583,8 +520,8 @@ class MainWindow(QMainWindow):
         tok_row.setSpacing(8)
         self.token_copy_btn = QPushButton("复制访问码")
         self.token_regenerate_btn = QPushButton("重新生成")
-        self.url_copy_btn = QPushButton("复制地址")
-        self.no_auth_url_copy_btn = QPushButton("复制 No Auth 地址")
+        self.url_copy_btn = QPushButton("复制标准地址（Gemini）")
+        self.no_auth_url_copy_btn = QPushButton("复制 ChatGPT 免登录地址")
         self.token_copy_btn.clicked.connect(
             lambda: self._copy_with_feedback(self.token_copy_btn, self._current_token)
         )
@@ -603,8 +540,9 @@ class MainWindow(QMainWindow):
         tok_row.addWidget(self.no_auth_url_copy_btn)
         tok_row.addStretch(1)
         tok_layout.addWidget(self.token_edit)
+        tok_layout.addWidget(QLabel("标准连接地址（Gemini 等支持授权的客户端；无需填写 Client ID、密钥或回调）"))
         tok_layout.addWidget(self.url_edit)
-        tok_layout.addWidget(QLabel("No Auth Server URL（含访问码，请勿分享）"))
+        tok_layout.addWidget(QLabel("ChatGPT 免登录地址（含访问码，等同密码，请勿分享）"))
         tok_layout.addWidget(self.no_auth_url_edit)
         tok_layout.addLayout(tok_row)
 
@@ -871,19 +809,10 @@ class MainWindow(QMainWindow):
                 details.append("Quick Tunnel 的地址是临时的；重建后会换地址。")
             else:
                 details.append("“仅本机”不会把这台电脑暴露到互联网。")
-                if project.client_target in {"chatgpt", "gemini"}:
-                    problems.append(
-                        (
-                            "当前选择了“仅本机”",
-                            "网页端 ChatGPT / Gemini 无法直接访问仅本机地址。到“项目设置”改用 Quick Tunnel、Cloudflare 固定地址或 ngrok。",
-                        )
-                    )
-
-            if project.client_target == "gemini" and not project.gemini_redirect_uri:
                 problems.append(
                     (
-                        "Gemini 还缺少 Redirect URI",
-                        "到“项目设置 → Gemini 授权”，粘贴 Gemini 提供的回调地址。",
+                        "当前选择了“仅本机”",
+                        "网页端 ChatGPT / Gemini 无法直接访问仅本机地址。到“项目设置”改用 Quick Tunnel、Cloudflare 固定地址或 ngrok。",
                     )
                 )
 
@@ -2048,8 +1977,6 @@ class MainWindow(QMainWindow):
             modes = [mode[0] for mode in PERMISSION_MODES]
             idx = modes.index(project.permission_mode) if project.permission_mode in modes else 2
             self.permission_combo.setCurrentIndex(idx)
-            client_idx = self.client_combo.findData(project.client_target)
-            self.client_combo.setCurrentIndex(client_idx if client_idx >= 0 else 0)
             try:
                 method = ConnectionMethod(project.connection)
             except ValueError:
@@ -2062,18 +1989,15 @@ class MainWindow(QMainWindow):
             self.git_remote_edit.setText(project.default_push_remote or "")
             self.git_branch_edit.setText(project.default_push_branch or "")
             self.bridge_check.setChecked(project.windows_enabled)
-            self.gemini_uri_edit.setText(project.gemini_redirect_uri or "")
             self._current_token = _hub_access_token(ensure=True)
             self._tunnel_token_default = get_project_tunnel_token(project.id) or ""
             self.cf_token_edit.setText(self._tunnel_token_default)
-            self._load_gemini_credential_view(project.gemini_redirect_uri)
             self.test_output.setText(self._test_outputs.get(project.id, "（尚未运行）"))
             if hasattr(self, "diag_output"):
                 self.diag_output.setPlainText(self._diag_outputs.get(project.id, "（尚未诊断）"))
         finally:
             self._loading_project = False
         self._sync_connection_fields()
-        self._sync_client_fields()
         self._sync_token_ui()
         self._update_gateway_port_ui()
 
@@ -2217,62 +2141,13 @@ class MainWindow(QMainWindow):
         self._sync_connection_fields()
         self._autosave_project_settings()
 
-    def _on_client_changed(self) -> None:
-        self._sync_client_fields()
-        self._autosave_project_settings()
-
-    def _on_gemini_uri_edited(self) -> None:
-        if self._loading_project:
-            return
-        if self._save_project_settings(show_errors=False):
-            self._load_gemini_credential_view(self.gemini_uri_edit.text().strip())
-
     def _autosave_project_settings(self, *_args: object) -> None:
         if not self._loading_project:
             self._save_project_settings(show_errors=False)
 
-    def _generate_gemini_credentials(self) -> None:
-        project = self._project_config()
-        if project is None:
-            QMessageBox.warning(self, "未选择项目", "请先选择项目。")
-            return
-        uri = self.gemini_uri_edit.text().strip()
-        if not uri:
-            QMessageBox.warning(self, "缺少 URI", "请先粘贴 Gemini 的 redirect URI。")
-            return
-        try:
-            client_id, secret = get_or_create_gemini_client(uri, rotate_secret=True)
-        except ValueError as exc:
-            QMessageBox.warning(self, "URI无效", str(exc))
-            return
-        project.client_target = "gemini"
-        project.gemini_redirect_uri = uri
-        self.pm.update(project)
-        self._gemini_store.set(GEMINI_LAST_URI_CRED_NAME, uri)
-        self.gemini_id_edit.setText(client_id)
-        self._gemini_secret = secret
-        self.gemini_secret_edit.setText("•" * 16)
-        self._append_log(
-            f"已更新 {project.display_name or project.root_path} 的 Gemini 授权信息。"
-        )
-
     @staticmethod
     def _copy_text(text: str) -> None:
         QApplication.clipboard().setText(text)
-
-    def _load_gemini_credential_view(self, uri: str) -> None:
-        self.gemini_id_edit.setText("—")
-        self.gemini_secret_edit.setText("—")
-        self._gemini_secret = ""
-        if not uri:
-            return
-        try:
-            client_id, secret = get_or_create_gemini_client(uri, rotate_secret=False)
-        except ValueError:
-            return
-        self.gemini_id_edit.setText(client_id)
-        self._gemini_secret = secret
-        self.gemini_secret_edit.setText("•" * 16)
 
     def _sync_connection_fields(self) -> None:
         method = self._selected_connection()
@@ -2294,10 +2169,6 @@ class MainWindow(QMainWindow):
             self.hostname_edit.setPlaceholderText("启动后自动生成临时地址")
         else:
             self.hostname_edit.setPlaceholderText("仅本机，无需填写")
-
-    def _sync_client_fields(self) -> None:
-        is_gemini = str(self.client_combo.currentData() or "chatgpt") == "gemini"
-        self.gemini_box.setVisible(is_gemini)
 
     def _browse_project(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "选择项目目录")
@@ -2882,11 +2753,9 @@ class MainWindow(QMainWindow):
         for project in self.pm.list():
             target = self.pm.get(project.id) or project
             target.permission_mode = source.permission_mode
-            target.client_target = source.client_target
             target.connection = source.connection
             target.public_hostname = source.public_hostname
             target.windows_enabled = source.windows_enabled
-            target.gemini_redirect_uri = source.gemini_redirect_uri
             self.pm.update(target)
             if tunnel_token:
                 remember_project_tunnel_token(target.id, tunnel_token)
@@ -2923,11 +2792,9 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "Git 参数不合法", error)
                 return False
         project.permission_mode = self._selected_permission_mode()
-        project.client_target = cast(Any, str(self.client_combo.currentData() or "chatgpt"))
         project.connection = self._selected_connection().value
         project.public_hostname = self.hostname_edit.text().strip()
         project.windows_enabled = bool(IS_WINDOWS and self.bridge_check.isChecked())
-        project.gemini_redirect_uri = self.gemini_uri_edit.text().strip()
         self._app_config.gateway_port = self.gateway_port_spin.value()
         project.git_user_name = git_vals["git_user_name"]
         project.git_user_email = git_vals["git_user_email"]
@@ -3104,6 +2971,7 @@ class MainWindow(QMainWindow):
         project = self._project_config()
         if project is None:
             self.url_edit.setText("选择项目后显示")
+            self.url_edit.setToolTip("")
             self.no_auth_url_edit.setText("选择项目后显示")
             self.service_url_edit.setText("选择项目后显示")
             self.port_warn_label.setVisible(False)
@@ -3111,14 +2979,15 @@ class MainWindow(QMainWindow):
         url = self._display_url()
         method = self._selected_connection()
         if self.coord.public_url:
-            suffix = "临时地址" if self.coord.url_mutable else "固定地址"
+            status_hint = "临时地址" if self.coord.url_mutable else "固定地址"
         elif method == ConnectionMethod.QUICK:
-            suffix = "启动后生成临时地址"
+            status_hint = "启动后生成临时地址"
         elif method in (ConnectionMethod.CLOUDFLARE, ConnectionMethod.NGROK):
-            suffix = "固定配置"
+            status_hint = "固定配置"
         else:
-            suffix = "仅本机"
-        self.url_edit.setText(f"{url}  ·  {suffix}")
+            status_hint = "仅本机"
+        self.url_edit.setText(url)
+        self.url_edit.setToolTip(status_hint)
         self.no_auth_url_edit.setText(self._no_auth_server_url())
         self._update_gateway_port_ui()
 
@@ -3151,7 +3020,6 @@ class MainWindow(QMainWindow):
         for widget in (
             self.advanced_btn,
             self.permission_combo,
-            self.client_combo,
             self.connection_combo,
         ):
             widget.setEnabled(editable)

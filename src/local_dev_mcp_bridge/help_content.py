@@ -14,10 +14,10 @@ class ManualTopic:
 
 
 HELP_CONNECTION_INFO = """
-<b>这里是给 ChatGPT / Gemini 使用的连接信息。</b><br><br>
-<b>MCP 地址</b>相当于“这台开发电脑在网上的入口地址”；<b>访问令牌</b>相当于这扇门的密码。
-把两项按教程填入 ChatGPT 或 Gemini 后，网页端才能调用本机的开发工具。<br><br>
-如果连接器只提供 <b>No Auth</b>，请复制“<b>No Auth Server URL</b>”。该地址已经包含访问码，等同密码；仅可粘贴到你自己的受信任连接，切勿分享、截图或写入文档。重新生成访问码会立即使旧地址失效。<br><br>
+<b>同一个 MCP 服务可同时连接 ChatGPT 和 Gemini，无需选择或切换客户端。</b><br><br>
+<b>标准连接地址</b>用于 Gemini 等支持自动注册的客户端；<b>ChatGPT 免登录地址</b>用于保留原有 No Auth 兼容方式。
+Gemini 只需粘贴标准地址，在 Google 页面完成首次授权；无需手填 Client ID、Client secret 或回调地址。旧 ChatGPT 配置保持不变。<br><br>
+已有 ChatGPT 使用 No Auth 时，继续使用“<b>ChatGPT 免登录地址</b>”。该地址已经包含访问码，等同密码；仅可粘贴到你自己的受信任连接，切勿分享、截图或写入文档。重新生成访问码会立即使旧地址失效。<br><br>
 地址是否长期不变，取决于你在“项目设置 → 连接方式”中的选择。
 """
 
@@ -69,7 +69,7 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         <li>打开“项目设置”，确认权限模式。默认“完全访问”能力最完整，但请只在你信任的电脑和账号上使用。</li>
         <li>选择连接方式。第一次体验建议 <b>Quick Tunnel 临时测试</b>；长期使用建议 Cloudflare 固定地址。</li>
         <li>回到“工作台”，点击 <b>启动服务</b>。等状态变成“可以使用”。</li>
-        <li>复制“连接信息”中的 MCP 地址和访问令牌，按“连接 ChatGPT”或“连接 Gemini”教程填写。</li>
+        <li>在“连接信息”中按需要复制标准 MCP 地址或 ChatGPT 兼容地址，再按“连接 ChatGPT”或“连接 Gemini”教程操作。</li>
         <li>最后到“诊断”运行一次完整检查。看到“可以正常使用”后再开始开发。</li>
         </ol>""",
     ),
@@ -78,11 +78,11 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
         "连接 ChatGPT 网页端",
         ("chatgpt", "gpt", "plugin", "app", "网页", "连接"),
         """<h2>连接 ChatGPT 网页端</h2>
-        <p>先在 MCP DevBridge 的工作台启动一个公网连接，然后复制 <b>MCP 地址</b> 和 <b>访问令牌</b>。</p>
+        <p>现有 ChatGPT 连接不必重新设置。首次接入时启动公网服务，并复制工作台中的 <b>ChatGPT 免登录地址</b>；它已经包含访问码。</p>
         <ol>
         <li>在 ChatGPT 中启用 Developer Mode，并在 Apps / 自定义应用设置中添加远程 MCP。</li>
-        <li>把 MCP 地址粘贴到远程 MCP 地址位置。ChatGPT 不能直接访问只监听本机的地址，所以必须先用 MCP DevBridge 建立公网连接。</li>
-        <li>如果界面要求 Bearer / Authorization，填入工作台复制的访问令牌。</li>
+        <li>如果选择 No Auth，直接粘贴 <b>ChatGPT 免登录地址</b>。网页端无法访问仅本机地址，必须使用公网连接。</li>
+        <li>现有已连通的方式保留不变；支持 Bearer / OAuth 的其他客户端也可以使用各自的标准连接流程，不强制迁移旧连接。</li>
         <li>保存后回到对话，选择刚添加的 MCP DevBridge。</li>
         <li>可以先让 ChatGPT “列出当前项目”或“读取 README”，确认连接正常。</li>
         </ol>
@@ -92,15 +92,15 @@ MANUAL_TOPICS: tuple[ManualTopic, ...] = (
     ManualTopic(
         "gemini",
         "连接 Gemini",
-        ("gemini", "oauth", "redirect", "connected app"),
+        ("gemini", "oauth", "connectors", "connected app"),
         """<h2>连接 Gemini</h2>
-        <p>Gemini 的 Custom Connected Apps 需要你的账号已经获得 Gemini Spark 对应功能；Google 还会检查年龄、账号类型、地区和 Keep Activity 等条件，实际可用范围以 Gemini 页面为准。</p>
+        <p>Gemini 的 Customize → Connectors → Custom 可添加远程 MCP 服务。可用性仍以当前 Google 账号和 Gemini 页面为准。</p>
         <ol>
-        <li>在“项目设置”把“连接客户端”改为 <b>Gemini Spark</b>，先启动该项目的公网服务。</li>
-        <li>在 Gemini 网页端打开 Settings & help → Connected Apps，在 Custom apps for Spark 中添加 MCP 地址。</li>
-        <li>如果 Gemini 提示服务器不支持自动注册，展开 Advanced features；从 Gemini 复制 Redirect URI 到 MCP DevBridge。</li>
-        <li>点击“生成 / 更新凭证”，把 Client ID 和 Client Secret 填回 Gemini，然后按页面提示完成授权。</li>
-        <li>授权时选择一个正在运行的项目。未运行的项目不会被静默授权。</li>
+        <li>在工作台确认已启动公网服务，点击 <b>复制标准地址（Gemini）</b>。</li>
+        <li>在 Gemini 网页端打开 Customize → Connectors → Custom，粘贴标准地址，点击 Next。</li>
+        <li>保留 Additional settings 中的 Client ID 与 Client secret 为空；本服务支持自动注册。</li>
+        <li>阅读 Google 提示并完成首次账号关联与本服务原有的正常授权同意流程。</li>
+        <li>连接成功后在 Gemini 中执行一次只读工具调用；需要访问某个项目时，在任务里提供完整路径或沿用工作区句柄。</li>
         </ol>""",
     ),
     ManualTopic(
