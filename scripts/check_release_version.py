@@ -124,13 +124,28 @@ def _parser() -> argparse.ArgumentParser:
         default=Path(__file__).resolve().parents[1],
         help="Repository root (defaults to the parent of scripts/).",
     )
-    parser.add_argument("--expected", required=True, help="Expected release version.")
+    parser.add_argument("--expected", required=False, default="", help="Expected release version.")
+    parser.add_argument(
+        "--get-pyproject-version",
+        action="store_true",
+        help="Print pyproject.toml version to stdout and exit.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.get_pyproject_version:
+        ver = _pyproject_version(args.root)
+        if not ver:
+            print("Could not read version from pyproject.toml", file=sys.stderr)
+            return 2
+        print(ver)
+        return 0
     expected = str(args.expected or "").strip()
+    if not expected:
+        print("--expected is required unless --get-pyproject-version is specified", file=sys.stderr)
+        return 2
     if not _VERSION_PATTERN.fullmatch(expected):
         print(
             f"invalid expected release version: {expected!r}; use a three/four-segment PEP 440 release, optionally followed by .postN",
