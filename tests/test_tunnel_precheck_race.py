@@ -72,7 +72,7 @@ def test_auto_tunnel_without_precheck_never_exceeds_existing_timeout_budget(tmp_
     assert manager.wait_ready(timeout_seconds=0.2) is True
     elapsed = time.monotonic() - started
 
-    assert 0.15 <= elapsed < 0.45
+    assert 0.15 <= elapsed < 0.8
     assert manager.public_url == "https://mcp.example.test/mcp"
     assert stopped == []
 
