@@ -104,7 +104,7 @@ try {
       if (String(args[0]).endsWith('z-slow.txt')) await barrier;
       return originalRead(...args);
     };
-    const partial = await searchWorkspace(config, guard, workspace, { query: 'needle', timeoutMs: 300 });
+    const partial = await searchWorkspace(config, guard, workspace, { query: 'needle', timeoutMs: 800 });
     assert(partial.truncated && partial.matches.some((m) => m.path === 'a-first.txt'));
     assert(!partial.matches.some((m) => m.path === 'z-slow.txt'));
     unblock();

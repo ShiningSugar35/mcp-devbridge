@@ -3,16 +3,27 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+PY="$ROOT/.venv/bin/python"
+if [[ ! -x "$PY" ]]; then
+  PY="$(command -v python3 || command -v python)"
+fi
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
-  VERSION="$(python3 - <<'PY'
-import tomllib
-with open('pyproject.toml','rb') as f:
-    print(tomllib.load(f)['project']['version'])
+  VERSION="$("$PY" - <<'PY'
+try:
+    import tomllib
+    with open('pyproject.toml', 'rb') as f:
+        print(tomllib.load(f)['project']['version'])
+except Exception:
+    import re
+    with open('pyproject.toml', 'r', encoding='utf-8') as f:
+        m = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.M)
+        if m:
+            print(m.group(1))
 PY
 )"
 fi
-python3 scripts/check_release_version.py --root "$ROOT" --expected "$VERSION"
+"$PY" scripts/check_release_version.py --root "$ROOT" --expected "$VERSION"
 PY="$ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || { echo "Missing .venv/bin/python" >&2; exit 2; }
 
