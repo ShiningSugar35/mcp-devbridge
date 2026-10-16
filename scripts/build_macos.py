@@ -23,6 +23,22 @@ ROOT = Path(__file__).resolve().parents[1]
 NODE_VERSION = "22.19.0"
 CLOUDFLARED_VERSION = "2026.7.3"
 MAX_DOWNLOAD = 300 * 1024 * 1024
+# Publisher release API digests verified 2026-10-16. Keep version and hashes
+# together so a dependency upgrade cannot reuse a checksum for another version.
+_CLOUDFLARED_ARCHIVES = {
+    ("2026.7.3", "amd64"): "70d1c8684fa6d14b5843787ec8d1ea8e18b23650e424f4ea43d849a506487c3b",
+    ("2026.7.3", "arm64"): "90c5a4f914d705fd70c135dba6d80b1791d254b08d6d4136301941f88330dd09",
+}
+
+
+def cloudflared_archive(architecture: str) -> tuple[str, str]:
+    try:
+        digest = _CLOUDFLARED_ARCHIVES[(CLOUDFLARED_VERSION, architecture)]
+    except KeyError as exc:
+        raise ValueError("Cloudflared version/architecture has no verified publisher checksum") from exc
+    url = (f"https://github.com/cloudflare/cloudflared/releases/download/{CLOUDFLARED_VERSION}/"
+           f"cloudflared-darwin-{architecture}.tgz")
+    return url, digest
 
 
 def small_response(url: str, maximum: int = 2 * 1024 * 1024) -> bytes:
@@ -87,13 +103,9 @@ def prepare_runtimes(temporary: Path, architecture: str) -> Path:
     node_archive = temporary / node_name
     download_verified(node_base + node_name, node_archive, matching[0])
     extract_runtime(node_archive, f"node-v{NODE_VERSION}-darwin-{node_arch}/bin/node", directory / "node")
-    metadata = json.loads(small_response(f"https://api.github.com/repos/cloudflare/cloudflared/releases/tags/{CLOUDFLARED_VERSION}"))
-    cf_name = f"cloudflared-darwin-{cf_arch}.tgz"
-    assets = [a for a in metadata.get("assets", []) if a.get("name") == cf_name]
-    if len(assets) != 1 or not str(assets[0].get("digest", "")).startswith("sha256:"):
-        raise RuntimeError("Cloudflared native asset or publisher digest is missing")
-    cf_archive = temporary / cf_name
-    download_verified(assets[0]["browser_download_url"], cf_archive, assets[0]["digest"][7:])
+    cf_url, cf_digest = cloudflared_archive(cf_arch)
+    cf_archive = temporary / f"cloudflared-darwin-{cf_arch}.tgz"
+    download_verified(cf_url, cf_archive, cf_digest)
     extract_runtime(cf_archive, "cloudflared", directory / "cloudflared")
     for executable in (directory / "node", directory / "cloudflared"):
         slices = subprocess.check_output(["/usr/bin/lipo", "-archs", str(executable)], text=True, timeout=10).split()
