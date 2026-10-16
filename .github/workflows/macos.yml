@@ -11,6 +11,7 @@ on:
       - 'packaging/macos.spec'
       - 'packaging/entry_macos.py'
       - 'scripts/build_macos.py'
+      - 'scripts/check_macos_crypto.py'
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/macos.yml'
@@ -48,7 +49,22 @@ jobs:
           echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/.ci-cache/uv" >> "$GITHUB_ENV"
           echo "npm_config_cache=$GITHUB_WORKSPACE/.ci-cache/npm" >> "$GITHUB_ENV"
       - name: Install locked Python environment
-        run: uv sync --python 3.12 --locked --extra dev --extra package
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: |
+          if [[ "$EXPECTED_ARCH" == "x86_64" ]]; then
+            # Intel builds cryptography from source. A dynamic Homebrew libssl
+            # can collide with Python's same-named bundled dylib in PyInstaller.
+            export OPENSSL_STATIC=1
+            export OPENSSL_DIR="$(brew --prefix openssl@3)"
+            test -f "$OPENSSL_DIR/lib/libssl.a"
+            test -f "$OPENSSL_DIR/lib/libcrypto.a"
+            uv sync --python 3.12 --locked --extra dev --extra package \
+              --no-cache --no-binary-package cryptography --reinstall-package cryptography
+          else
+            uv sync --python 3.12 --locked --extra dev --extra package
+          fi
       - name: Verify runner architecture and build native candidate
         env:
           EXPECTED_ARCH: ${{ matrix.architecture }}

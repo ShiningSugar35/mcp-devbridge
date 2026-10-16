@@ -132,6 +132,7 @@ def main() -> int:
     def run(arguments: list[str], cwd: Path = ROOT, timeout: int | None = None, *, extra_env: dict[str, str] | None = None) -> None:
         subprocess.run(arguments, cwd=cwd, env=env if extra_env is None else {**env, **extra_env}, check=True, timeout=timeout)
 
+    run([sys.executable, "scripts/check_macos_crypto.py"], timeout=20)
     npm = shutil.which("npm")
     if not npm:
         raise RuntimeError("Build-time Node/npm is required")
