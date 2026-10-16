@@ -2,6 +2,17 @@
 
 All dates are local development dates.
 
+## 0.9.2 (2026-10-16) — Gemini tool metadata and native macOS delivery
+
+Released from `b738dd90bc79a568eb2d1684bb881ce3074b96f2`, with Windows/Linux CI `38834511140` and native macOS CI `38834508099`. The existing v0.9.1 tag is unchanged. Windows, Linux, macOS arm64 and macOS x86_64 assets and checksums are available in the new release.
+
+- Complete truthful annotations for all 50 public tools; remove nine missing annotation sets in the previously installed catalogue. Read-only queries and mutating commands remain accurately distinguished. Improve direct-workspace/PowerShell guidance without promising to override Gemini's own write confirmations.
+- Integrate standard OAuth Basic authentication and strict duplicate/conflicting-parameter validation while retaining existing personal ChatGPT links, PKCE and resource constraints.
+- Add native Finder/bootstrap/profile/runtime handling and frozen MCP checks for Apple Silicon and Intel. Statically build Intel cryptography to eliminate a bundled OpenSSL ABI collision; use version-pinned publisher hashes for Darwin runtime archives instead of an unauthenticated release-metadata API call.
+- Preserve terminal smoke-test evidence and retry transient Windows atomic routing-state replacement failures.
+- Verification: Windows 817 passed / 3 skipped; Linux and each native Mac architecture 808 passed / 12 skipped; required Node smoke, typing and package checks succeeded. WJP was upgraded from the formal installer and restarted: both configured roots restored, 2734 installed files matched the CI payload, existing access code and permissions unchanged, local/public authentication and a one-call read/write/delete test passed.
+- macOS archives are ad-hoc signed, not Developer ID signed or Apple notarized; Mac updates currently use download-and-replace. The GRW machine's relay-specific deployment has not been overwritten by this generic package. Full delivery receipt: `docs/RELEASE_0_9_2_20261016.md`.
+
 ## 0.8.9.5 (2026-09-29) - Scheduled continuation and responsive project startup
 
 Released from source `6cde7c9a91b6558f00689fdaf4c3c8f2a0e2396b` with Windows/Linux CI run `36540228276`; the Windows release asset has also been installed and verified locally with all five prior project roots restored.
