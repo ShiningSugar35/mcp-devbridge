@@ -2,7 +2,7 @@
 
 All dates are local development dates.
 
-## 0.9.3 (candidate, 2026-10-20) — Windows control root diagnostics
+## 0.9.3 (2026-10-20) — Windows control root diagnostics
 
 - Report the owning project root in `windows_backend_status`, distinguishing a registered root from nested workspaces. Disabled-state guidance explains that subdirectories inherit the root's desktop setting and that file/command permissions do not start the optional desktop backend.
 - Preserve explicit desktop opt-in, disabled-without-network behavior, Windows permission profiles, the 50-tool input contract, and independent core-engine health. Existing settings are not silently changed by installing this release.
