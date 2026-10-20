@@ -2,6 +2,12 @@
 
 All dates are local development dates.
 
+## 0.9.3 (candidate, 2026-10-20) — Windows control root diagnostics
+
+- Report the owning project root in `windows_backend_status`, distinguishing a registered root from nested workspaces. Disabled-state guidance explains that subdirectories inherit the root's desktop setting and that file/command permissions do not start the optional desktop backend.
+- Preserve explicit desktop opt-in, disabled-without-network behavior, Windows permission profiles, the 50-tool input contract, and independent core-engine health. Existing settings are not silently changed by installing this release.
+- Add a hermetic root-attribution regression to the existing Windows bridge contract suite. This is a diagnostics change, not a claim that a disconnected backend is available.
+
 ## 0.9.2 (2026-10-16) — Gemini tool metadata and native macOS delivery
 
 Released from `b738dd90bc79a568eb2d1684bb881ce3074b96f2`, with Windows/Linux CI `38834511140` and native macOS CI `38834508099`. The existing v0.9.1 tag is unchanged. Windows, Linux, macOS arm64 and macOS x86_64 assets and checksums are available in the new release.

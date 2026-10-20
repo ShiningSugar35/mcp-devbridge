@@ -233,10 +233,15 @@ export function registerWindowsBridgeTools(server: McpServer, config: CodexProCo
     inputSchema: {}, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false },
     handler: async () => {
       const bridge = getBridge(), snapshot = await bridge.status();
-      return bridgeTextResult(["# Windows Backend Status", `Status: ${snapshot.status}`, `Server: ${bridgeTitle(snapshot)}`, `Permission profile: ${bridge.profile}`, snapshot.error ?? "", snapshot.hint ?? ""].filter(Boolean).join("\n"), {
+      const owningRoot = typeof config.defaultRoot === "string" ? redactSensitiveText(config.defaultRoot) : null;
+      const recoveryHint = snapshot.status === "disabled"
+        ? `${snapshot.hint ?? ""} Owning root: ${owningRoot ?? "not reported"}. Subdirectories inherit this root's setting; do not register a separate project for each folder. Desktop enablement is independent from the file/command permission profile.`
+        : snapshot.hint ?? null;
+      return bridgeTextResult(["# Windows Backend Status", `Status: ${snapshot.status}`, `Server: ${bridgeTitle(snapshot)}`, `Permission profile: ${bridge.profile}`, owningRoot ? `Owning root: ${owningRoot}` : "", snapshot.error ?? "", recoveryHint ?? ""].filter(Boolean).join("\n"), {
         ok: snapshot.ok, reachable: snapshot.ok, enabled: snapshot.enabled, status: snapshot.status,
+        project_root: owningRoot,
         server_name: snapshot.serverName ?? null, server_version: snapshot.serverVersion ?? null,
-        error: snapshot.error ?? null, recovery_hint: snapshot.hint ?? null, tools_count: snapshot.tools?.length ?? null,
+        error: snapshot.error ?? null, recovery_hint: recoveryHint, tools_count: snapshot.tools?.length ?? null,
         checked_at: snapshot.checkedAt, profile: bridge.profile, bridge: { local_only: true, fixed_port: true, project_scoped: true }
       });
     }

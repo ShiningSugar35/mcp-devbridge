@@ -31,7 +31,7 @@ function setup(env={}) {
   if(req.name==='Screenshot') return {content:[{type:'text',text:'desktop metadata'},{type:'image',mimeType:'image/png',data:'aGVsbG8='}],structuredContent:{width:800,height:600}};
   return {content:[{type:'text',text:'fixture ok'}]};
  };
- const handlers=new Map();registerWindowsBridgeTools({registerTool:(n,_d,h)=>handlers.set(n,h)},{connectionTest:false});
+ const handlers=new Map();registerWindowsBridgeTools({registerTool:(n,_d,h)=>handlers.set(n,h)},{connectionTest:false,defaultRoot:'D:\\'});
  return(name,args={})=>handlers.get(name)(args);
 }
 const cases=[];const test=(n,f)=>cases.push([n,f]);
@@ -60,6 +60,7 @@ test('concurrent discovery shares one connection',async()=>{const c=setup();awai
 test('TTL does not discard a healthy client',async()=>{const c=setup();await c('windows_backend_status');const now=Date.now;try{Date.now=()=>now()+11000;await c('windows_backend_status');assert.equal(state.connects,1);}finally{Date.now=now;}});
 test('no expiring connection-age abort signal',async()=>{const c=setup();await c('windows_backend_status');assert.equal(state.transport._requestInit?.signal,undefined);});
 test('failed mutation never replayed',async()=>{const c=setup();state.failure=true;assert.equal((await c('windows_call',{tool:'Click',arguments:{loc:[1,2]}})).isError,true);assert.equal(state.calls.length,1);});
+test('disabled status names the owning root rather than a nested workspace',async()=>{const c=setup({CODEXPRO_WINDOWS_ENABLED:'0',CODEXPRO_WINDOWS_PROFILE:'system_full'});const r=success(await c('windows_backend_status'));assert.equal(r.project_root,'D:\\');assert.match(r.recovery_hint,/owning root/i);assert.match(r.recovery_hint,/subdirector/i);assert.match(r.recovery_hint,/independent/i);assert.equal(state.connects,0);});
 let failed=0;
 try{for(const[n,f]of cases){try{await f();console.log(`PASS ${n}`);}catch(e){failed++;console.error(`FAIL ${n}: ${e.message}`);}}}finally{for(const[k,v]of Object.entries(original))Client.prototype[k]=v;for(const k of Object.keys(process.env))if(k.startsWith('CODEXPRO_WINDOWS_'))delete process.env[k];for(const[k,v]of Object.entries(savedEnv))if(k.startsWith('CODEXPRO_WINDOWS_'))process.env[k]=v;}
 console.log(JSON.stringify({suite:'windows-bridge-contract',total:cases.length,passed:cases.length-failed,failed}));if(failed)process.exitCode=1;
