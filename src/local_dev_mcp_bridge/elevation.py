@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -765,17 +766,22 @@ class ElevationController:
             return False
         return self._cache_registration(_run_registration_uac())
 
+    def _broker_port(self) -> int:
+        try:
+            return int(_read_state().get("port") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _open_request(self, request: urllib_request.Request, timeout: float) -> Any:
+        return urllib_request.urlopen(request, timeout=timeout)
+
     def _request_raw(
         self,
         payload: dict[str, Any],
         *,
         timeout: float = BROKER_REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
-        state = _read_state()
-        try:
-            port = int(state.get("port") or 0)
-        except (TypeError, ValueError):
-            port = 0
+        port = self._broker_port()
         if not port:
             raise RuntimeError("elevated broker is not running")
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -790,7 +796,7 @@ class ElevationController:
             },
         )
         try:
-            with urllib_request.urlopen(req, timeout=timeout) as response:
+            with self._open_request(req, timeout) as response:
                 result = json.loads(response.read(BROKER_MAX_BODY_BYTES).decode("utf-8"))
         except urllib_error.HTTPError as exc:
             raw = exc.read(8192).decode("utf-8", errors="replace")
@@ -1123,6 +1129,27 @@ def get_elevation_controller() -> ElevationController:
         return _CONTROLLER
 
 
+@contextlib.contextmanager
+def _use_elevation_controller(controller: ElevationController) -> Iterator[None]:
+    global _CONTROLLER
+    with _CONTROLLER_LOCK:
+        previous = _CONTROLLER
+        _CONTROLLER = controller
+    try:
+        yield
+    finally:
+        with _CONTROLLER_LOCK:
+            _CONTROLLER = previous
+
+
+def _broker_server(runtime: _BrokerRuntime) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _BrokerHandler)
+    server_ext: Any = server
+    server_ext.runtime = runtime
+    server.timeout = 0.5
+    return server
+
+
 def broker_main() -> int:
     if not IS_WINDOWS:
         return 2
@@ -1132,10 +1159,7 @@ def broker_main() -> int:
     if not auth_value or len(auth_value) < 32:
         return 4
     runtime = _BrokerRuntime(auth_value)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _BrokerHandler)
-    server_ext: Any = server
-    server_ext.runtime = runtime
-    server.timeout = 0.5
+    server = _broker_server(runtime)
     epoch = f"{os.getpid():x}-{time.time_ns():x}"
     _write_state(int(server.server_address[1]), epoch)
     try:

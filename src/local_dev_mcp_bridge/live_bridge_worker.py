@@ -8,14 +8,15 @@ import secrets
 import socket
 import sys
 import threading
-from contextlib import suppress
+from contextlib import AbstractContextManager, ExitStack, nullcontext, suppress
 from pathlib import Path
 
 from .config_store import save_projects
 from .device_hub import DeviceRegistry
 from .engines import EngineState
 from .gateway import OAuthGateway
-from .models import ProjectConfig
+from .live_elevation import live_admin_session as _live_admin_session
+from .models import PermissionMode, ProjectConfig
 from .platform_support import IS_WINDOWS
 from .project_manager import ProjectManager
 
@@ -33,6 +34,17 @@ def _ports(count: int) -> list[int]:
             listener.close()
 
 
+def _send_startup(message: dict[str, int | str]) -> None:
+    sys.stdout.buffer.write(json.dumps(message, ensure_ascii=False).encode("utf-8") + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def _startup_elevation(modes: list[PermissionMode]) -> AbstractContextManager[None]:
+    if IS_WINDOWS and "system" in modes:
+        return _live_admin_session()
+    return nullcontext()
+
+
 def main() -> int:
     if getattr(sys, "frozen", False):
         # PyInstaller exposes the bundle directory on the frozen interpreter.
@@ -44,6 +56,7 @@ def main() -> int:
     manager = ProjectManager()
     gateway: OAuthGateway | None = None
     closed = threading.Event()
+    startup = ExitStack()
 
     def watch_parent() -> None:
         sys.stdin.read(1)
@@ -70,15 +83,11 @@ def main() -> int:
             for i, item in enumerate(options)
         ]
         save_projects(projects)
+        startup.enter_context(_startup_elevation([project.permission_mode for project in projects]))
         for project in projects:
             if closed.is_set():
                 return 0
             elevated = IS_WINDOWS and project.permission_mode == "system"
-            if elevated:
-                from .elevation import get_elevation_controller
-
-                if not get_elevation_controller().is_registered():
-                    raise ValueError("完全访问需要先完成 DevBridge 的 Windows 管理员登记。")
             view = manager.start(
                 project.id,
                 codex_token=token,
@@ -118,10 +127,11 @@ def main() -> int:
             allow_local_anonymous=False,
         )
         gateway.start(port)
-        print(json.dumps({"port": port}), flush=True)
+        _send_startup({"port": port})
         closed.wait()
     except (ValueError, TypeError, KeyError, RuntimeError, OSError) as error:
-        print(json.dumps({"error": str(error)[:300]}, ensure_ascii=False), flush=True)
+        with suppress(OSError):
+            _send_startup({"error": str(error)[:300]})
         return 1
     finally:
         if gateway is not None:
@@ -129,6 +139,7 @@ def main() -> int:
                 gateway.stop()
         with suppress(Exception):
             manager.stop_all()
+        startup.close()
     return 0
 
 

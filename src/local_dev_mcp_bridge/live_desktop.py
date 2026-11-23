@@ -459,6 +459,8 @@ class LiveWindow:
             mode != "read_only" for mode in options.permissions.values()
         ):
             detail = "正在准备本机引擎。首次启用 Windows 控制时可能需要下载运行组件。"
+        if IS_WINDOWS and options.permissions and "system" in options.permissions.values():
+            detail = "本次共享包含完全访问项目，请在 Windows 弹窗中确认管理员授权。"
         self._show("正在连接", detail, _BLUE)
         threading.Thread(
             target=_run_session,

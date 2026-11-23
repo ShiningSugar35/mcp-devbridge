@@ -23,6 +23,7 @@ class BridgeWorker:
                  name: str, windows_enabled: bool) -> None:
         self.id = secrets.token_hex(16)
         self._token = secrets.token_urlsafe(32)
+        self._needs_admin = os.name == "nt" and "system" in permissions.values()
         self._windows_enabled = windows_enabled and any(mode != "read_only" for mode in permissions.values())
         self._configuration = {
             "device_id": self.id,
@@ -67,11 +68,17 @@ class BridgeWorker:
             assert self._process.stdin is not None and self._process.stdout is not None
             self._process.stdin.write(json.dumps(self._configuration).encode() + b"\n")
             await self._process.stdin.drain()
+            timeout = 240 if self._needs_admin else 120
             try:
-                line = await asyncio.wait_for(self._process.stdout.readline(), 120)
-                result = json.loads(line)
+                line = await asyncio.wait_for(self._process.stdout.readline(), timeout)
+                if not line:
+                    code = await asyncio.wait_for(self._process.wait(), 2)
+                    raise RuntimeError(f"本机引擎提前退出（退出码 {code}）。请查看测试与日志。")
+                result = json.loads(line.decode("utf-8"))
+                if not isinstance(result, dict):
+                    raise ValueError("invalid startup response")
             except TimeoutError:
-                raise RuntimeError("本机引擎启动超时（等待 120 秒）。请查看测试与日志。") from None
+                raise RuntimeError(f"本机引擎启动超时（等待 {timeout} 秒）。请查看测试与日志。") from None
             except ValueError:
                 raise RuntimeError("本机引擎未返回有效启动状态。请查看测试与日志。") from None
             finally:

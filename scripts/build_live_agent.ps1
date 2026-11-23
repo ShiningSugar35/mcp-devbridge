@@ -37,6 +37,10 @@ import sys
 
 if sys.argv[1:] == ["--live-bridge-worker"]:
     from local_dev_mcp_bridge.live_bridge_worker import main
+elif sys.argv[1:2] == ["--live-elevated-broker"]:
+    from local_dev_mcp_bridge.live_elevation import broker_main
+
+    raise SystemExit(broker_main(sys.argv[2:]))
 elif sys.argv[1:] == ["--live-desktop"]:
     from local_dev_mcp_bridge.live_desktop import main
 else:
@@ -140,6 +144,7 @@ MCP Live（Windows x64 便携端）
 当前窗口可以复用已验证的固定密钥。关闭窗口后，下次重新输入。
 固定密钥不会写入便携设置。服务地址和设备名称可在「高级设置」修改。
 
+选择「完全访问」并启动共享时，请在本机确认 Windows 管理员授权。断开共享会关闭本次管理员进程。
 首次启用 Windows 控制且本机没有 uvx 时，程序会下载并校验其运行组件。
 '@ | Set-Content -LiteralPath (Join-Path $bundle 'README.txt') -Encoding UTF8
 
