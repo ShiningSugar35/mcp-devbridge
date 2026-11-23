@@ -8,7 +8,7 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse
+from starlette.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.routing import Route
 
 
@@ -18,6 +18,7 @@ def install_download(app: Starlette, path: Path) -> None:
         raise ValueError("MCP Live 下载文件必须是有效的 ZIP。")
     with archive.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    asset_url = f"/download/artifacts/{digest}.zip"
     size_mb = archive.stat().st_size / 1_000_000
     filename = html.escape(archive.name)
     page = f"""<!doctype html>
@@ -37,7 +38,7 @@ small {{display:block; margin-top:18px; color:#52627a}}
 <main>
 <h1>MCP Live</h1>
 <p>Windows x64 便携端 · {size_mb:.1f} MB</p>
-<a href="/download/windows">下载 ZIP</a>
+<a href="{asset_url}">下载 ZIP</a>
 <small>{filename}</small>
 <small>SHA-256</small>
 <code>{digest}</code>
@@ -53,13 +54,17 @@ small {{display:block; margin-top:18px; color:#52627a}}
             },
         )
 
+    async def latest_archive(_: Request) -> RedirectResponse:
+        return RedirectResponse(asset_url, headers={"Cache-Control": "no-store"})
+
     async def download_archive(_: Request) -> FileResponse:
         return FileResponse(
             archive, filename=archive.name, media_type="application/zip",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "public, max-age=31536000, immutable", "ETag": f'"{digest}"'},
         )
 
     app.routes.extend([
         Route("/download", download_page, methods=["GET"]),
-        Route("/download/windows", download_archive, methods=["GET"]),
+        Route("/download/windows", latest_archive, methods=["GET"]),
+        Route(asset_url, download_archive, methods=["GET"]),
     ])

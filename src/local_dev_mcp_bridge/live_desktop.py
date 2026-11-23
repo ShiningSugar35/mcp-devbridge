@@ -6,18 +6,26 @@ import asyncio
 import socket
 import threading
 import tkinter as tk
+from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from tkinter import filedialog, messagebox, ttk
+from typing import TYPE_CHECKING
 
 import httpx
 
 from .live_agent import _connection_error, _pairing_code, _service_url, serve_agent
+from .live_diagnostics import check_connection, diagnostic_log_path, load_events, save_events
 from .live_profile import load_profile, save_profile
 from .live_protocol import MAX_FOLDERS, folder_alias
 from .models import PermissionMode
+from .platform_support import IS_WINDOWS
+
+if TYPE_CHECKING:
+    from .live_tray import LiveTray
 
 DEFAULT_ENDPOINT = "https://live.shiningsugar.shop"
 _PERMISSION_NAMES: dict[PermissionMode, str] = {
@@ -65,6 +73,7 @@ def _run_session(
             stop=stop,
             on_connected=lambda: notices.put(("connected", "")),
             on_device_key=lambda: notices.put(("key", "")),
+            on_progress=lambda message: notices.put(("progress", message)),
             bridge_permissions=options.permissions,
             windows_enabled=options.windows_enabled,
         )
@@ -123,11 +132,17 @@ class LiveWindow:
         self._pending_key: tuple[str, str] | None = None
         self._session_key: tuple[str, str] | None = None
         self._closing = False
+        self.close_to_tray = tk.BooleanVar(master=root, value=IS_WINDOWS and profile.get("close_to_tray", True) is True)
+        self._tray: LiveTray | None = None
+        self._events: deque[str] = deque(load_events(), maxlen=200)
+        self._diagnostic_window: tk.Toplevel | None = None
+        self._diagnostic_view: tk.Text | None = None
+        self._diagnostic_pending = False
 
         root.title("MCP Live")
         root.configure(background=_BACKGROUND)
         root.option_add("*Font", ("Microsoft YaHei UI", 10))
-        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.protocol("WM_DELETE_WINDOW", self._close_window)
         self._build()
         root.update_idletasks()
         root.minsize(590, root.winfo_reqheight())
@@ -249,6 +264,11 @@ class LiveWindow:
             variable=self.windows_enabled, style="Advanced.TCheckbutton",
         )
         self.windows_button.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        if IS_WINDOWS:
+            ttk.Checkbutton(
+                self.advanced, text="关闭窗口时最小化到托盘", variable=self.close_to_tray,
+                command=self._store_profile, style="Advanced.TCheckbutton",
+            ).grid(row=6, column=0, sticky="w", pady=(4, 0))
         self.endpoint_entry.bind("<FocusOut>", lambda _: self._refresh_key_hint())
         self.advanced.grid_remove()
 
@@ -262,6 +282,7 @@ class LiveWindow:
             font=("Microsoft YaHei UI", 11, "bold"),
         )
         self.status_label.pack(side="left")
+        ttk.Button(footer, text="测试与日志", command=self._open_diagnostics).pack(side="left", padx=8)
         self.start_button = ttk.Button(
             footer, text="启动共享", command=self.start, style="Primary.TButton"
         )
@@ -308,6 +329,7 @@ class LiveWindow:
                 "device_name": self.device_name.get().strip(),
                 "permissions": self.permissions,
                 "windows_enabled": self.windows_enabled.get(),
+                "close_to_tray": self.close_to_tray.get(),
             })
         except OSError:
             self._show("设置未保存", "当前选择可用，但无法保存到本机配置。", _RED)
@@ -432,7 +454,12 @@ class LiveWindow:
         self._store_profile()
         self._stop_request = Future()
         self._editing(False)
-        self._show("正在连接", "正在启动本机 0.8.9 工作区和 Live 连接。", _BLUE)
+        detail = "正在启动本机工作区和 Live 连接。"
+        if options.windows_enabled and options.permissions and any(
+            mode != "read_only" for mode in options.permissions.values()
+        ):
+            detail = "正在准备本机引擎。首次启用 Windows 控制时可能需要下载运行组件。"
+        self._show("正在连接", detail, _BLUE)
         threading.Thread(
             target=_run_session,
             args=(options, self._stop_request, self._notices),
@@ -446,10 +473,94 @@ class LiveWindow:
         self.stop_button.configure(state="disabled")
         self._show("正在断开", "正在关闭本机接入。", _MUTED)
 
+    def _close_window(self) -> None:
+        if not self.close_to_tray.get() or not IS_WINDOWS:
+            self.close()
+            return
+        try:
+            from .live_tray import LiveTray
+
+            if self._tray is None:
+                self._tray = LiveTray(
+                    lambda: self.root.after(0, self._restore_window),
+                    lambda: self.root.after(0, self.close),
+                )
+            self._tray.show()
+        except Exception:
+            self._show("托盘不可用", "窗口保持打开。可在高级设置中关闭托盘选项。", _RED)
+            return
+        if self._diagnostic_window is not None and self._diagnostic_window.winfo_exists():
+            self._diagnostic_window.withdraw()
+        self.root.withdraw()
+
+    def _restore_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _record(self, message: str) -> None:
+        keys = (self.code.get(), *(item[1] for item in (self._pending_key, self._session_key) if item))
+        for key in keys:
+            if key:
+                message = message.replace(key, "[已隐藏]")
+        self._events.append(f"{datetime.now().astimezone():%m-%d %H:%M:%S}  {message[:800]}")
+        save_events(self._events)
+        self._refresh_diagnostics()
+
+    def _refresh_diagnostics(self) -> None:
+        if self._diagnostic_view is None or not self._diagnostic_view.winfo_exists():
+            return
+        self._diagnostic_view.configure(state="normal")
+        self._diagnostic_view.delete("1.0", "end")
+        self._diagnostic_view.insert("1.0", "\n".join(self._events) or "暂无记录。")
+        self._diagnostic_view.configure(state="disabled")
+        self._diagnostic_view.see("end")
+
+    def _open_diagnostics(self) -> None:
+        if self._diagnostic_window is not None and self._diagnostic_window.winfo_exists():
+            self._diagnostic_window.deiconify()
+            self._diagnostic_window.lift()
+            return
+        dialog = tk.Toplevel(self.root)
+        self._diagnostic_window = dialog
+        dialog.title("连接测试与日志")
+        dialog.geometry("630x340")
+        bar = ttk.Frame(dialog, padding=8)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="一键连接测试", command=self._test_connection).pack(side="left")
+        ttk.Button(bar, text="复制日志", command=self._copy_diagnostics).pack(side="left", padx=8)
+        ttk.Label(dialog, text=str(diagnostic_log_path()), wraplength=600).pack(fill="x", padx=8)
+        self._diagnostic_view = tk.Text(dialog, wrap="word", padx=8, pady=8)
+        self._diagnostic_view.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._refresh_diagnostics()
+
+    def _copy_diagnostics(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(self._events))
+
+    def _test_connection(self) -> None:
+        if self._diagnostic_pending:
+            return
+        self._diagnostic_pending = True
+        endpoint = self.endpoint.get()
+        self._record("开始测试本机依赖与公网中转。")
+
+        def run() -> None:
+            results = check_connection(endpoint)
+            self._notices.put(("diagnostic", "\n".join(results)))
+
+        threading.Thread(target=run, name="mcp-live-diagnostics", daemon=True).start()
+
+    def _destroy(self) -> None:
+        if self._tray is not None:
+            self._tray.close()
+            self._tray = None
+        self.root.destroy()
+
     def close(self) -> None:
         if self._stop_request is None:
             self._session_key = None
-            self.root.destroy()
+            self._destroy()
             return
         self._closing = True
         self.stop()
@@ -458,6 +569,7 @@ class LiveWindow:
         self.status.set(status)
         self.detail.set(detail)
         self.status_label.configure(foreground=color)
+        self._record(f"{status}。{detail}")
 
     def _editing(self, allow: bool) -> None:
         fields = (
@@ -480,7 +592,15 @@ class LiveWindow:
                 kind, message = self._notices.get_nowait()
             except Empty:
                 break
+            if kind == "diagnostic":
+                self._diagnostic_pending = False
+                for line in message.splitlines():
+                    self._record(line)
+                continue
             if self._stop_request is None:
+                continue
+            if kind == "progress":
+                self._record(message)
                 continue
             if kind == "key":
                 self._session_key = self._pending_key
@@ -497,7 +617,7 @@ class LiveWindow:
             self._pending_key = None
             if self._closing:
                 self._session_key = None
-                self.root.destroy()
+                self._destroy()
                 return
             self._editing(True)
             if stopped:

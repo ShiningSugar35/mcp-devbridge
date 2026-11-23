@@ -23,6 +23,7 @@ class BridgeWorker:
                  name: str, windows_enabled: bool) -> None:
         self.id = secrets.token_hex(16)
         self._token = secrets.token_urlsafe(32)
+        self._windows_enabled = windows_enabled and any(mode != "read_only" for mode in permissions.values())
         self._configuration = {
             "device_id": self.id,
             "gateway_token": self._token,
@@ -46,17 +47,22 @@ class BridgeWorker:
         )
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
+            env = {
+                **os.environ,
+                "LOCALDEV_MCP_CONFIG_DIR": self._settings.name,
+                "PYTHONIOENCODING": "utf-8",
+            }
+            if os.name == "nt" and self._windows_enabled:
+                from .live_windows_runtime import windows_uvx
+
+                env["MCPDEVBRIDGE_UVX_EXE"] = await windows_uvx()
             self._process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 creationflags=flags,
-                env={
-                    **os.environ,
-                    "LOCALDEV_MCP_CONFIG_DIR": self._settings.name,
-                    "PYTHONIOENCODING": "utf-8",
-                },
+                env=env,
             )
             assert self._process.stdin is not None and self._process.stdout is not None
             self._process.stdin.write(json.dumps(self._configuration).encode() + b"\n")
@@ -64,8 +70,10 @@ class BridgeWorker:
             try:
                 line = await asyncio.wait_for(self._process.stdout.readline(), 120)
                 result = json.loads(line)
-            except (TimeoutError, ValueError):
-                raise RuntimeError("0.8.9 本机工具引擎未就绪。") from None
+            except TimeoutError:
+                raise RuntimeError("本机引擎启动超时（等待 120 秒）。请查看测试与日志。") from None
+            except ValueError:
+                raise RuntimeError("本机引擎未返回有效启动状态。请查看测试与日志。") from None
             finally:
                 self._configuration.clear()
             port = result.get("port")

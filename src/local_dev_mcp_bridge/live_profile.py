@@ -11,7 +11,10 @@ from tempfile import NamedTemporaryFile
 
 def _profile_path() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "MCP-Live-settings.json"
+        directory = Path(sys.executable).resolve().parent
+        if directory.name == "_internal":
+            directory = directory.parent
+        return directory / "MCP-Live-settings.json"
     base = os.environ.get("LOCALAPPDATA")
     return (Path(base) if base else Path.home() / ".config") / "MCP Live" / "profile.json"
 

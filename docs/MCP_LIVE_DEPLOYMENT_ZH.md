@@ -36,7 +36,7 @@ docker run -d --name mcp-live --restart unless-stopped \
   mcp-live:release
 ~~~
 
-在 Linux Docker 上使用 host 网络，容器默认仍只绑定回环。若无需下载服务，省略下载目录挂载和 `MCP_LIVE_DOWNLOAD_FILE`。配置后 `/download` 显示大小及 SHA-256，`/download/windows` 提供这个 ZIP。不要把凭据或源码树挂到下载位置。
+在 Linux Docker 上使用 host 网络，容器默认仍只绑定回环。若无需下载服务，省略下载目录挂载和 `MCP_LIVE_DOWNLOAD_FILE`。配置后 `/download` 显示大小及 SHA-256，`/download/windows` 跳转到当前 ZIP。版本化 ZIP 地址含 SHA-256，可由 CDN 缓存并支持断点续传。升级请使用新的 ZIP 文件名并重启服务。不要把凭据或源码树挂到下载位置。
 
 ~~~sh
 curl -fsS http://127.0.0.1:8796/health
@@ -46,7 +46,7 @@ curl -I https://live.example.com/download/windows
 
 ## Windows 客户端
 
-解压整个便携包到较短的目录（如 `D:\MCP-Live`），避免 Windows 深层路径限制。双击 `MCP-Live.exe`。添加要共享的目录，选择每个项目的权限并启动。设备密钥在当前窗口内存中短暂使用，不写入设置。只读模式下服务会拒绝写入和运行命令。Windows 控制需要启用原 Windows 模块及对应权限，完全访问沿用 DevBridge 的本机管理员授权。
+解压整个便携包到较短的目录（如 `D:\MCP-Live`），避免 Windows 深层路径限制。双击 `MCP-Live.exe`，并保留同目录的 `_internal`。添加要共享的目录，选择每个项目的权限并启动。首次启用 Windows 控制而本机没有 uvx 时，客户端会从官方发布源获取并校验运行组件。高级设置可切换关闭窗口时是否收进系统托盘。托盘菜单可显示主窗口或退出。连接测试与日志可检查本机运行时、公网中转及启动进度，并复制诊断记录。设备密钥在当前窗口内存中短暂使用，不写入设置。只读模式下服务会拒绝写入和运行命令。Windows 控制需要启用原 Windows 模块及对应权限，完全访问沿用 DevBridge 的本机管理员授权。
 
 ## 升级和回滚
 

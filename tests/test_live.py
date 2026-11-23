@@ -580,7 +580,20 @@ def test_public_download_serves_only_the_configured_archive(tmp_path: Path):
         assert page.status_code == 200
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         assert digest in page.text
-        assert client.get("/download/windows").content == archive.read_bytes()
-        assert client.head("/download/windows").headers["content-length"] == str(archive.stat().st_size)
+        asset = f"/download/artifacts/{digest}.zip"
+        assert asset in page.text
+        redirect = client.get("/download/windows", follow_redirects=False)
+        assert redirect.status_code == 307
+        assert redirect.headers["location"] == asset
+        assert redirect.headers["cache-control"] == "no-store"
+        full = client.get(asset)
+        assert full.content == archive.read_bytes()
+        assert full.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert full.headers["etag"] == f'"{digest}"'
+        assert client.head(asset).headers["content-length"] == str(archive.stat().st_size)
+        chunk = client.get(asset, headers={"Range": "bytes=0-7", "If-Range": full.headers["etag"]})
+        assert chunk.status_code == 206
+        assert chunk.content == full.content[:8]
+        assert client.get(f"/download/artifacts/{'0' * 64}.zip").status_code == 404
         assert client.get("/download/owner-token").status_code == 404
         assert client.get("/mcp").status_code == 401

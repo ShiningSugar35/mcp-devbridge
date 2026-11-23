@@ -157,6 +157,7 @@ async def serve_agent(
     stop: asyncio.Event | None = None,
     on_connected: Callable[[], None] | None = None,
     on_device_key: Callable[[], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
     bridge_permissions: dict[str, PermissionMode] | None = None,
     windows_enabled: bool = False,
 ) -> None:
@@ -180,6 +181,8 @@ async def serve_agent(
         origin = _service_url(endpoint)
         bridge = None
         if bridge_permissions is not None:
+            if on_progress:
+                on_progress("启动本机 CodexPro 引擎。")
             bridge = BridgeWorker(folders, bridge_permissions, name, windows_enabled)
             resources.push_async_callback(bridge.close)
             starting = asyncio.create_task(bridge.start())
@@ -189,11 +192,15 @@ async def serve_agent(
                 if stopped.is_set():
                     return
                 await starting
+                if on_progress:
+                    on_progress("本机引擎已启动，Gateway 健康检查通过。")
             finally:
                 if not starting.done():
                     starting.cancel()
                 stop_request.cancel()
                 await asyncio.gather(starting, stop_request, return_exceptions=True)
+        if on_progress:
+            on_progress("正在向公网中转注册本机。")
         client = await resources.enter_async_context(
             httpx.AsyncClient(base_url=origin, timeout=POLL_SECONDS + 3, trust_env=False)
         )
