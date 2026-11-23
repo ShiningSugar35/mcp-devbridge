@@ -116,8 +116,11 @@ class LiveWindow:
                 name: mode for name, mode in saved_permissions.items()
                 if name in self.folders and mode in _PERMISSION_NAMES
             }
-        self.permission_choice = tk.StringVar(master=root, value="只读")
-        self.windows_enabled = tk.BooleanVar(master=root, value=bool(profile.get("windows_enabled")))
+        self._new_folder_permission: PermissionMode = "system" if bridge_enabled else "read_only"
+        self.permission_choice = tk.StringVar(master=root, value=_PERMISSION_NAMES[self._new_folder_permission])
+        self.windows_enabled = tk.BooleanVar(
+            master=root, value=IS_WINDOWS and bridge_enabled and profile.get("windows_enabled", True) is True,
+        )
         self.code = tk.StringVar(master=root)
         self.endpoint = tk.StringVar(master=root, value=profile.get("endpoint") or DEFAULT_ENDPOINT)
         self.device_name = tk.StringVar(
@@ -261,7 +264,7 @@ class LiveWindow:
         self.forget_button.grid(row=4, column=0, sticky="w", pady=(4, 0))
         self.windows_button = ttk.Checkbutton(
             self.advanced, text="启用原版 Windows 控制",
-            variable=self.windows_enabled, style="Advanced.TCheckbutton",
+            variable=self.windows_enabled, command=self._store_profile, style="Advanced.TCheckbutton",
         )
         self.windows_button.grid(row=5, column=0, sticky="w", pady=(4, 0))
         if IS_WINDOWS:
@@ -400,6 +403,7 @@ class LiveWindow:
             alias = f"{basename}-{suffix}"
             suffix += 1
         self.folders[alias] = path
+        self.permissions[alias] = self._new_folder_permission
         self._refresh_folders()
         self.folder_table.selection_set(alias)
         self._store_profile()
@@ -484,11 +488,15 @@ class LiveWindow:
 
             if self._tray is None:
                 self._tray = LiveTray(
-                    lambda: self.root.after(0, self._restore_window),
-                    lambda: self.root.after(0, self.close),
+                    lambda: self._notices.put(("tray_show", "")),
+                    lambda: self._notices.put(("tray_exit", "")),
                 )
             self._tray.show()
-        except Exception:
+        except (ImportError, OSError, RuntimeError, TimeoutError) as exc:
+            if self._tray is not None:
+                self._tray.close()
+                self._tray = None
+            self._record(f"系统托盘注册失败（{type(exc).__name__}）。")
             self._show("托盘不可用", "窗口保持打开。可在高级设置中关闭托盘选项。", _RED)
             return
         if self._diagnostic_window is not None and self._diagnostic_window.winfo_exists():
@@ -594,6 +602,14 @@ class LiveWindow:
                 kind, message = self._notices.get_nowait()
             except Empty:
                 break
+            if kind == "tray_show":
+                self._restore_window()
+                continue
+            if kind == "tray_exit":
+                self.close()
+                if self._stop_request is None:
+                    return
+                continue
             if kind == "diagnostic":
                 self._diagnostic_pending = False
                 for line in message.splitlines():

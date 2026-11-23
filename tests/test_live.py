@@ -341,6 +341,150 @@ def test_oauth_protects_mcp_and_binds_tokens_to_the_live_resource(monkeypatch, t
         assert client.post("/token", data=refresh_form).status_code == 400
 
 
+def test_portable_windows_defaults_keep_existing_permissions(tmp_path, monkeypatch):
+    import tkinter as tk
+
+    from local_dev_mcp_bridge import live_desktop
+    from local_dev_mcp_bridge.live_profile import load_profile, save_profile
+
+    monkeypatch.setattr(live_desktop, "IS_WINDOWS", True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "settings"))
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "credentials"))
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk desktop is unavailable")
+    root.withdraw()
+    try:
+        window = live_desktop.LiveWindow(root)
+        assert window.permission_choice.get() == "完全访问"
+        assert window.windows_enabled.get() is True
+        additions = iter([tmp_path])
+        monkeypatch.setattr(live_desktop.filedialog, "askdirectory", lambda **_: str(next(additions)))
+        window.browse_button.invoke()
+        assert window.permissions[tmp_path.name] == "system"
+        assert load_profile()["permissions"][tmp_path.name] == "system"
+        window.windows_button.invoke()
+        assert load_profile()["windows_enabled"] is False
+    finally:
+        root.destroy()
+
+    save_profile({
+        "folders": {"explicit": str(tmp_path), "legacy": str(tmp_path)},
+        "permissions": {"explicit": "workspace"},
+        "windows_enabled": False,
+    })
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        window = live_desktop.LiveWindow(root)
+        assert window.windows_enabled.get() is False
+        assert window.permissions == {"explicit": "workspace"}
+        assert window.folder_table.item("legacy", "values")[-1] == "只读"
+    finally:
+        root.destroy()
+
+
+def test_portable_window_restores_from_native_tray(tmp_path, monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows tray is unavailable")
+
+    import tkinter as tk
+
+    import win32con
+    import win32gui
+
+    from local_dev_mcp_bridge import live_desktop, live_tray
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "settings"))
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path / "credentials"))
+    root = tk.Tk()
+    window = live_desktop.LiveWindow(root)
+    tray = None
+    try:
+        root.update()
+        window._close_window()
+        assert root.state() == "withdrawn", window.detail.get()
+        tray = window._tray
+        assert tray is not None
+        hwnd = tray._ready.result(timeout=1)
+        assert win32gui.IsWindow(hwnd)
+        win32gui.PostMessage(hwnd, live_tray._TRAY_EVENT, 0, win32con.WM_LBUTTONUP)
+        deadline = time.monotonic() + 4
+        while root.state() != "normal" and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert root.state() == "normal"
+        window._close_window()
+        assert root.state() == "withdrawn"
+        assert window._tray is tray
+    finally:
+        window.close()
+        if tray is not None:
+            tray._thread.join(4)
+            assert not tray._thread.is_alive()
+
+
+async def test_relay_request_retries_without_restarting_the_session(monkeypatch):
+    from local_dev_mcp_bridge import live_agent
+
+    monkeypatch.setattr(live_agent, "_RELAY_RETRY_DELAYS", (0, 0, 0, 0))
+    statuses = iter([None, 502, 409, 200])
+    requests = []
+
+    async def network(request):
+        requests.append(request)
+        status = next(statuses)
+        if status is None:
+            raise httpx.ReadTimeout("test timeout", request=request)
+        return httpx.Response(status)
+
+    events = []
+    stop = asyncio.Event()
+    async with httpx.AsyncClient(
+        base_url="http://127.0.0.1", transport=httpx.MockTransport(network),
+    ) as http:
+        response = await live_agent._relay_request(
+            lambda: http.get("/live/next", headers=bearer("test-existing-lease")),
+            stop, "轮询", events.append, busy_is_transient=True,
+        )
+    assert response is not None and response.status_code == 200
+    assert [req.headers["Authorization"] for req in requests] == [bearer("test-existing-lease")["Authorization"]] * 4
+    assert len(events) == 3
+    assert "ReadTimeout" in events[0] and "HTTP 502" in events[1] and "HTTP 409" in events[2]
+
+    requests.clear()
+    statuses = iter([502, 409])
+    async with httpx.AsyncClient(
+        base_url="http://127.0.0.1", transport=httpx.MockTransport(network),
+    ) as http:
+        response = await live_agent._relay_request(
+            lambda: http.post("/live/result", json={"id": "same-op", "text": "sample"}),
+            stop, "提交结果", events.append,
+        )
+    assert response is not None and response.status_code == 409
+    assert len(requests) == 2 and requests[0].content == requests[1].content
+
+
+async def test_portable_bridge_starts_when_windows_control_download_fails(tmp_path, monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows runtime is unavailable")
+
+    from local_dev_mcp_bridge import live_windows_runtime
+    from local_dev_mcp_bridge.live_bridge import BridgeWorker
+
+    async def unavailable():
+        raise RuntimeError("test runtime download failure")
+
+    monkeypatch.setattr(live_windows_runtime, "windows_uvx", unavailable)
+    bridge = BridgeWorker({"project": tmp_path}, {"project": "workspace"}, "fallback test", True)
+    try:
+        await bridge.start()
+        assert "test runtime download failure" in bridge.windows_warning
+    finally:
+        await bridge.close()
+
+
 async def test_portable_window_connects_and_disconnects(live_server, tmp_path, monkeypatch):
     import tkinter as tk
 

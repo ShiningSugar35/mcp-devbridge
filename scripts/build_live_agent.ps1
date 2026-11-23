@@ -140,12 +140,13 @@ MCP Live（Windows x64 便携端）
 解压整个压缩包，保留 MCP-Live.exe 和 _internal 目录在一起。
 双击 MCP-Live.exe 打开图形界面，添加要共享的文件夹，选择文件夹权限，输入设备密钥并启动。
 出现「已连接」后，可在已关联的 ChatGPT 账号中选 @MCP Live。
-工作区能力按所选项目权限启动。点击「断开」或关闭窗口会停止 Live 接入与本次启动的引擎。
-当前窗口可以复用已验证的固定密钥。关闭窗口后，下次重新输入。
+工作区能力按所选项目权限启动。点击「断开」会停止共享。默认关闭窗口会收进系统托盘，点击托盘图标可重新打开。
+退出程序后，下次启动须重新输入设备密钥。
 固定密钥不会写入便携设置。服务地址和设备名称可在「高级设置」修改。
 
 选择「完全访问」并启动共享时，请在本机确认 Windows 管理员授权。断开共享会关闭本次管理员进程。
-首次启用 Windows 控制且本机没有 uvx 时，程序会下载并校验其运行组件。
+首次运行默认勾选 Windows 控制，新加目录默认选择完全访问。已保存的设置仍按原选择读取。
+Windows 控制运行组件准备失败时，文件和项目工具仍可启动，原因会显示在「测试与日志」中。
 '@ | Set-Content -LiteralPath (Join-Path $bundle 'README.txt') -Encoding UTF8
 
     & $python -B -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', sys.argv[2], sys.argv[3])" `

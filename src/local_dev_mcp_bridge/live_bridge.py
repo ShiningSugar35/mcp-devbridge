@@ -25,6 +25,7 @@ class BridgeWorker:
         self._token = secrets.token_urlsafe(32)
         self._needs_admin = os.name == "nt" and "system" in permissions.values()
         self._windows_enabled = windows_enabled and any(mode != "read_only" for mode in permissions.values())
+        self.windows_warning = ""
         self._configuration = {
             "device_id": self.id,
             "gateway_token": self._token,
@@ -56,7 +57,12 @@ class BridgeWorker:
             if os.name == "nt" and self._windows_enabled:
                 from .live_windows_runtime import windows_uvx
 
-                env["MCPDEVBRIDGE_UVX_EXE"] = await windows_uvx()
+                try:
+                    env["MCPDEVBRIDGE_UVX_EXE"] = await asyncio.wait_for(windows_uvx(), timeout=25)
+                except (RuntimeError, TimeoutError) as exc:
+                    reason = str(exc) or "运行组件下载超时。"
+                    self.windows_warning = f"Windows 控制本次未启动：{reason} 文件与项目工具继续启动。"
+                    self._configuration["windows_enabled"] = False
             self._process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.PIPE,

@@ -7,8 +7,9 @@ import asyncio
 import getpass
 import socket
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, suppress
+from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
@@ -23,6 +24,9 @@ from .tools import LocalDevTools
 
 FILE_BYTES = 8_192
 LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
+_RELAY_RETRY_DELAYS = (1, 2, 4, 5)
+_RELAY_RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524})
+_LEASE_ENDED = "服务器已结束这次设备接入。请重新启动共享。"
 
 
 def _service_url(endpoint: str) -> str:
@@ -100,23 +104,55 @@ async def _read(workspaces: dict[str, LocalDevTools], path: str) -> dict[str, st
         return {"error": "无法读取该文件。请确认它在授权目录内且符合读取限制。"}
 
 
-async def _next(
-    client: httpx.AsyncClient, headers: dict[str, str], stop: asyncio.Event
+async def _send_with_retry(
+    request: Callable[[], Awaitable[httpx.Response]],
+    operation: str,
+    on_progress: Callable[[str], None] | None,
+    *,
+    busy_is_transient: bool = False,
+) -> httpx.Response:
+    for delay in (*_RELAY_RETRY_DELAYS, None):
+        try:
+            response = await request()
+        except httpx.TransportError as exc:
+            reason = type(exc).__name__
+        else:
+            status = response.status_code
+            if status not in _RELAY_RETRY_STATUS and not (busy_is_transient and status == 409):
+                return response
+            reason = f"HTTP {status}"
+        if delay is None:
+            raise RuntimeError(f"与中转的连接未恢复（{operation} · {reason}）。请检查网络后重新启动共享。")
+        if on_progress is not None:
+            on_progress(f"中转{operation}暂时失败（{reason}），{delay} 秒后重试。")
+        await asyncio.sleep(delay)
+    raise AssertionError("relay retry exhausted")
+
+
+async def _relay_request(
+    request: Callable[[], Awaitable[httpx.Response]],
+    stop: asyncio.Event,
+    operation: str,
+    on_progress: Callable[[str], None] | None,
+    *,
+    busy_is_transient: bool = False,
 ) -> httpx.Response | None:
-    poll = asyncio.create_task(client.get("/live/next", headers=headers))
+    pending = asyncio.create_task(
+        _send_with_retry(request, operation, on_progress, busy_is_transient=busy_is_transient)
+    )
     stopped = asyncio.create_task(stop.wait())
     try:
-        await asyncio.wait((poll, stopped), return_when=asyncio.FIRST_COMPLETED)
-        return None if stop.is_set() else poll.result()
+        await asyncio.wait((pending, stopped), return_when=asyncio.FIRST_COMPLETED)
+        return None if stop.is_set() else pending.result()
     finally:
-        for task in (poll, stopped):
+        for task in (pending, stopped):
             task.cancel()
-        await asyncio.gather(poll, stopped, return_exceptions=True)
+        await asyncio.gather(pending, stopped, return_exceptions=True)
 
 
 async def _heartbeat(
     client: httpx.AsyncClient, headers: dict[str, str], stop: asyncio.Event
-) -> None:
+) -> bool:
     while not stop.is_set():
         await asyncio.sleep(10)
         try:
@@ -125,7 +161,8 @@ async def _heartbeat(
             continue
         if response.status_code == 401:
             stop.set()
-            return
+            return True
+    return False
 
 
 async def _bridge_call(
@@ -194,6 +231,8 @@ async def serve_agent(
                 await starting
                 if on_progress:
                     on_progress("本机引擎已启动，Gateway 健康检查通过。")
+                    if bridge.windows_warning:
+                        on_progress(bridge.windows_warning)
             finally:
                 if not starting.done():
                     starting.cancel()
@@ -216,18 +255,22 @@ async def serve_agent(
         headers = _headers(connected["device_token"])
         heartbeat = None
         try:
-            if bridge is not None:
-                if connected.get("bridge_contract") != HUB_TOOL_CONTRACT_VERSION:
-                    raise RuntimeError("服务器尚未启用相同的 0.8.9 工具契约。")
-                heartbeat = asyncio.create_task(_heartbeat(client, headers, stopped))
+            if bridge is not None and connected.get("bridge_contract") != HUB_TOOL_CONTRACT_VERSION:
+                raise RuntimeError("服务器尚未启用相同的 0.8.9 工具契约。")
+            heartbeat = asyncio.create_task(_heartbeat(client, headers, stopped))
             if on_device_key is not None and connected.get("auth_kind") == "device_key":
                 on_device_key()
             if on_connected is not None and not stopped.is_set():
                 on_connected()
             while not stopped.is_set():
-                reply = await _next(client, headers, stopped)
-                if reply is None or reply.status_code == 401:
+                reply = await _relay_request(
+                    lambda: client.get("/live/next", headers=headers), stopped, "轮询", on_progress,
+                    busy_is_transient=True,
+                )
+                if reply is None:
                     break
+                if reply.status_code == 401:
+                    raise RuntimeError(_LEASE_ENDED)
                 reply.raise_for_status()
                 operation = reply.json()["operation"]
                 if operation is None:
@@ -238,13 +281,18 @@ async def serve_agent(
                         break
                 else:
                     result = await _read(workspaces, operation["path"])
-                submitted = await client.post(
-                    "/live/result", headers=headers, json={"id": operation["id"], **result}
+                submitted = await _relay_request(
+                    partial(client.post, "/live/result", headers=headers, json={"id": operation["id"], **result}),
+                    stopped, "提交结果", on_progress,
                 )
-                if submitted.status_code == 401:
+                if submitted is None:
                     break
+                if submitted.status_code == 401:
+                    raise RuntimeError(_LEASE_ENDED)
                 if submitted.status_code != 409:
                     submitted.raise_for_status()
+            if heartbeat is not None and heartbeat.done() and heartbeat.result():
+                raise RuntimeError(_LEASE_ENDED)
         finally:
             if heartbeat is not None:
                 heartbeat.cancel()
@@ -270,6 +318,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except httpx.HTTPStatusError as error:
         print(_connection_error(error), file=sys.stderr)
+        return 1
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
         return 1
     except (OSError, httpx.TransportError, ValueError):
         print("接入失败，请检查服务地址、网络和工作目录。", file=sys.stderr)
