@@ -127,58 +127,70 @@ async def _mcp_call(session: ClientSession, name: str, arguments: dict | None = 
 class TestMCPIntegration:
     async def test_initialize_and_tool_count(self, backend):
         with backend() as srv:
-            async with streamable_http_client(srv.base_url + "/mcp") as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    info = await session.initialize()
-                    assert info.server_info.name
-                    tools = await session.list_tools()
-                    assert len(tools.tools) >= 30
+            async with (
+                streamable_http_client(srv.base_url + "/mcp") as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                info = await session.initialize()
+                assert info.server_info.name
+                tools = await session.list_tools()
+                assert len(tools.tools) >= 30
 
     async def test_workspace_file_roundtrip(self, backend):
         with backend() as srv:
-            async with streamable_http_client(srv.base_url + "/mcp") as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    res = await _mcp_call(session, "write_file", {"path": "a.txt", "content": "hello mcp\n"})
-                    assert not res["is_error"], res
-                    res = await _mcp_call(session, "read_file", {"path": "a.txt"})
-                    assert "hello mcp" in res["text"]
-                    res = await _mcp_call(session, "list_directory", {"path": "."})
-                    assert "a.txt" in res["text"]
+            async with (
+                streamable_http_client(srv.base_url + "/mcp") as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                await session.initialize()
+                res = await _mcp_call(session, "write_file", {"path": "a.txt", "content": "hello mcp\n"})
+                assert not res["is_error"], res
+                res = await _mcp_call(session, "read_file", {"path": "a.txt"})
+                assert "hello mcp" in res["text"]
+                res = await _mcp_call(session, "list_directory", {"path": "."})
+                assert "a.txt" in res["text"]
 
     async def test_path_escape_rejected(self, backend):
         with backend() as srv:
-            async with streamable_http_client(srv.base_url + "/mcp") as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    res = await _mcp_call(session, "read_file", {"path": "../outside.txt"})
-                    assert res["is_error"]
-                    assert "项目根目录之外" in res["text"]
+            async with (
+                streamable_http_client(srv.base_url + "/mcp") as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                await session.initialize()
+                res = await _mcp_call(session, "read_file", {"path": "../outside.txt"})
+                assert res["is_error"]
+                assert "项目根目录之外" in res["text"]
 
     async def test_unknown_tool(self, backend):
         with backend() as srv:
-            async with streamable_http_client(srv.base_url + "/mcp") as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    res = await session.call_tool("no_such_tool_xyz", {})
-                    assert getattr(res, "is_error", False) or getattr(res, "isError", False)
+            async with (
+                streamable_http_client(srv.base_url + "/mcp") as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                await session.initialize()
+                res = await session.call_tool("no_such_tool_xyz", {})
+                assert getattr(res, "is_error", False) or getattr(res, "isError", False)
 
     async def test_write_blocked_in_read_only_mode(self, backend):
         with backend(permission_mode="read_only") as srv:
-            async with streamable_http_client(srv.base_url + "/mcp") as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    res = await _mcp_call(session, "write_file", {"path": "x.txt", "content": "nope"})
-                    assert res["is_error"]
+            async with (
+                streamable_http_client(srv.base_url + "/mcp") as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                await session.initialize()
+                res = await _mcp_call(session, "write_file", {"path": "x.txt", "content": "nope"})
+                assert res["is_error"]
 
     async def test_project_info(self, backend):
         with backend() as srv:
-            async with streamable_http_client(srv.base_url + "/mcp") as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    res = await _mcp_call(session, "get_workspace_info")
-                    assert not res["is_error"]
-                    assert "工作区 空间" in res["text"]
+            async with (
+                streamable_http_client(srv.base_url + "/mcp") as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                await session.initialize()
+                res = await _mcp_call(session, "get_workspace_info")
+                assert not res["is_error"]
+                assert "工作区 空间" in res["text"]
 
     async def test_two_sessions_isolated_workspace_switch(self, backend, tmp_path):
         """两个 MCP 会话在同一个后端进程里互不干扰（多项目并发）。"""

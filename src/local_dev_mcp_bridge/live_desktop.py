@@ -23,6 +23,7 @@ DEFAULT_ENDPOINT = "https://live.shiningsugar.shop"
 _PERMISSION_NAMES: dict[PermissionMode, str] = {
     "read_only": "只读", "workspace": "项目工作区", "system": "完全访问",
 }
+_PERMISSION_BY_NAME = {label: mode for mode, label in _PERMISSION_NAMES.items()}  # type: dict[str, PermissionMode]
 
 _BACKGROUND = "#F1F5FA"
 _SURFACE = "#FFFFFF"
@@ -330,10 +331,7 @@ class LiveWindow:
     def _set_selected_permissions(self) -> None:
         if self._stop_request is not None:
             return
-        mode = next(
-            (mode for mode, label in _PERMISSION_NAMES.items() if label == self.permission_choice.get()),
-            "read_only",
-        )
+        mode = _PERMISSION_BY_NAME.get(self.permission_choice.get(), "read_only")
         selected = self.folder_table.selection()
         for alias in selected:
             self.permissions[alias] = mode

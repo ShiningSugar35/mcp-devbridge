@@ -35,7 +35,8 @@ def _ports(count: int) -> list[int]:
 
 def main() -> int:
     if getattr(sys, "frozen", False):
-        runtime = Path(sys._MEIPASS) / "third_party" / "codexpro" / "dist"
+        # PyInstaller exposes the bundle directory on the frozen interpreter.
+        runtime = Path(sys._MEIPASS) / "third_party" / "codexpro" / "dist"  # pyright: ignore[reportAttributeAccessIssue]
     else:
         runtime = Path(__file__).resolve().parents[2] / "build" / "codexpro-runtime" / "dist"
     if (runtime / "http.js").is_file():
