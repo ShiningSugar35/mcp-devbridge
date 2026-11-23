@@ -570,8 +570,9 @@ class ProjectManager:
             elevated=spec.elevated,
         )
         if not unit.wait_ready(timeout_seconds=spec.timeout_seconds):
+            message = unit.message or "项目引擎启动失败。"
             unit.stop()
-            raise SpawnError(unit.message or "项目引擎启动失败。")
+            raise SpawnError(message)
         healthy, detail = unit.data_plane_health(spec.codex_token)
         if not healthy:
             unit.stop()

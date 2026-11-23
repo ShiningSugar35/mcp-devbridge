@@ -186,3 +186,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
 ## License
 
 本项目许可证见 [`LICENSE`](LICENSE)。第三方组件及许可证信息见 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)。
+
+## MCP Live portable release
+
+MCP Live connects selected Windows workspaces through a server you deploy. It reuses the DevBridge tool contract and workspace permissions. See the [deployment and setup guide](docs/MCP_LIVE_DEPLOYMENT_ZH.md).

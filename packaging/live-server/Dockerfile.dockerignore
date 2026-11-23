@@ -1,0 +1,9 @@
+**
+!src
+!src/local_dev_mcp_bridge
+!src/local_dev_mcp_bridge/**
+**/__pycache__
+!packaging
+!packaging/live-server
+!packaging/live-server/requirements.txt
+!packaging/live-server/run.py

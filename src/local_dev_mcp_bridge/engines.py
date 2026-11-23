@@ -142,6 +142,7 @@ class BaseEngineProcess:
             cmd,
             cwd=str(cwd) if cwd else None,
             env=effective_env,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

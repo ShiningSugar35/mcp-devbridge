@@ -357,8 +357,14 @@ class LocalDevTools:
         except ValueError:
             return str(target)
 
-    def _read_text(self, path: Path) -> str:
-        data = path.read_bytes()
+    def _read_text(self, path: Path, *, byte_limit: int | None = None) -> str:
+        if byte_limit is None:
+            data = path.read_bytes()
+        else:
+            with path.open("rb") as file:
+                data = file.read(byte_limit + 1)
+            if len(data) > byte_limit:
+                raise ValueError(f"文件超过读取上限（{byte_limit} 字节）。")
         for encoding in ("utf-8", "utf-8-sig", "gb18030"):
             try:
                 return data.decode(encoding)
@@ -667,7 +673,7 @@ class LocalDevTools:
             raise ValueError(
                 f"文件超过读取上限（{self.max_file_bytes} 字节），请使用命令工具按需读取。"
             )
-        text = self._read_text(target)
+        text = self._read_text(target, byte_limit=self.max_file_bytes)
         lines = text.splitlines()
         start = max(1, int(start_line))
         limit = max(1, min(int(max_lines), 2000))

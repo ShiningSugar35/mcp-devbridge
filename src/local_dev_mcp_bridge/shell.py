@@ -243,6 +243,7 @@ def _run_with_tree_kill(
         proc: subprocess.Popen[Any] = subprocess.Popen(
             argv,
             cwd=cwd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
