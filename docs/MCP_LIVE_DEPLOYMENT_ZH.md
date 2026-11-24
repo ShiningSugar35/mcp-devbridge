@@ -31,18 +31,25 @@ docker run -d --name mcp-live --restart unless-stopped \
   --mount type=bind,source=/opt/mcp-live/private,target=/run/mcp-live,readonly \
   --mount type=bind,source=/opt/mcp-live/state,target=/state \
   --mount type=bind,source=/opt/mcp-live/download,target=/downloads,readonly \
+  -e LOCALDEV_MCP_CONFIG_DIR=/state \
   -e MCP_LIVE_PUBLIC_HOSTNAME=live.example.com \
   -e MCP_LIVE_DOWNLOAD_FILE=/downloads/MCP-Live-Windows-x64.zip \
   mcp-live:release
 ~~~
 
-在 Linux Docker 上使用 host 网络，容器默认仍只绑定回环。若无需下载服务，省略下载目录挂载和 `MCP_LIVE_DOWNLOAD_FILE`。配置后 `/download` 显示大小及 SHA-256，`/download/windows` 跳转到当前 ZIP。版本化 ZIP 地址含 SHA-256，可由 CDN 缓存并支持断点续传。升级请使用新的 ZIP 文件名并重启服务。不要把凭据或源码树挂到下载位置。
+在 Linux Docker 上使用 host 网络，容器默认仍只绑定回环。若无需下载服务，省略下载目录挂载和 `MCP_LIVE_DOWNLOAD_FILE`。配置后 `/download` 显示大小及 SHA-256，`/download/windows` 跳转到当前 ZIP。版本化 ZIP 地址含 SHA-256，可由 CDN 缓存并支持断点续传。升级请使用新的 ZIP 文件名并重启服务。不要把凭据或源码树挂到下载位置。重建容器时，保留原 OAuth 状态卷，并将 `LOCALDEV_MCP_CONFIG_DIR` 显式设为该卷在容器里的路径。只读根文件系统下，目录配置错误会让 OAuth 初始化或令牌续期返回 HTTP 500。
 
 ~~~sh
 curl -fsS http://127.0.0.1:8796/health
 curl -fsS https://live.example.com/.well-known/oauth-protected-resource/mcp
 curl -I https://live.example.com/download/windows
+curl -sS -o /dev/null -w '%{http_code}\n' https://live.example.com/token \
+  --data-urlencode grant_type=refresh_token \
+  --data-urlencode client_id=invalid-smoke-client \
+  --data-urlencode refresh_token=invalid-smoke-token
 ~~~
+
+最后一个请求用测试值触发 OAuth 客户端存储检查，预期返回 HTTP 400 或 401。切换后还需通过已有 ChatGPT 插件实际调用 MCP 工具，验证原有授权能续期。
 
 ## Windows 客户端
 
