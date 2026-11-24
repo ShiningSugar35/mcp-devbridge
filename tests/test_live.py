@@ -197,7 +197,8 @@ async def test_confirmed_takeover_preserves_work_on_rejection_and_invalidates_ol
 
         await serve_agent(endpoint, _GUI_TEST_KEY, "B", tmp_path, on_takeover=decline)
         assert selected == [False]
-        assert (await invoke(session, "live_status"))[1]["device_handle"] == old_handle
+        error, current, _ = await invoke(session, "live_status")
+        assert not error and current and current["device_handle"] == old_handle
         assert (await client.post("/live/heartbeat", headers=bearer(old_token))).status_code == 200
 
         bridge_id = "d" * 32
