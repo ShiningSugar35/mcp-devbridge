@@ -58,7 +58,6 @@ _ALWAYS_ALLOWED: frozenset[str] = frozenset(
 )
 
 _DANGEROUS_WORDS: tuple[str, ...] = (
-    "format",      # format C: → 整盘格式化
     "diskpart",    # 分区/磁盘操作
     "shutdown",    # 关机
     "reboot",      # 重启
@@ -72,8 +71,13 @@ _DANGEROUS_WORDS: tuple[str, ...] = (
     "icacls",      # ACL 修改
 )
 
+# The Windows format utility and Format-Volume stay blocked. Only exempt the
+# four exact PowerShell cmdlet names that format display output.
+_POWERSHELL_FORMATTERS = ("format-table", "format-list", "format-wide", "format-custom")
 _DANGEROUS_WORD_RE = re.compile(
-    r"(?<![\w.-])(" + "|".join(re.escape(w) for w in _DANGEROUS_WORDS) + r")\b",
+    r"(?<![\w.-])(?:"
+    r"(?!(?:" + "|".join(_POWERSHELL_FORMATTERS) + r""")(?=$|[\s|;&)'"]))format\b|"""
+    r"(?:" + "|".join(re.escape(word) for word in _DANGEROUS_WORDS) + r")\b)",
     re.IGNORECASE,
 )
 
@@ -214,8 +218,12 @@ def _nested_delete_risk(command: str) -> bool:
     return False
 
 
-def _executable_name(executable: str) -> str:
-    return executable.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+def _executable_name(executable: str, *, for_guard: bool = False) -> str:
+    basename = executable.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    normalized = basename.removesuffix(".exe")
+    if for_guard and normalized in _POWERSHELL_FORMATTERS:
+        return basename
+    return normalized
 
 
 def _has_data_arguments(words: list[str]) -> bool:
@@ -237,7 +245,7 @@ def check_program_execution(
     if not executable.strip():
         return False, "命令为空。"
     words = [executable, *args]
-    subject = _executable_name(executable) if _has_data_arguments(words) else " ".join([_executable_name(executable), *args])
+    subject = _executable_name(executable) if _has_data_arguments(words) else " ".join([_executable_name(executable, for_guard=True), *args])
     return _check_execution(subject, profile, first=_executable_name(executable))
 
 
@@ -246,7 +254,7 @@ def check_execution(command: str, profile: str = DEFAULT_EXECUTION_PROFILE) -> t
     words = _simple_words(command)
     subject = (
         _executable_name(words[0]) if words and _has_data_arguments(words)
-        else " ".join([_executable_name(words[0]), *words[1:]]) if words else command
+        else " ".join([_executable_name(words[0], for_guard=True), *words[1:]]) if words else command
     )
     first = _executable_name(words[0]) if words else normalize_first_word(command)
     return _check_execution(subject, profile, first=first)

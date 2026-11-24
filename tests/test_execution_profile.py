@@ -86,6 +86,50 @@ def test_dangerous_commands_blocked_in_all_profiles():
             assert not allowed, f"{profile} 应拦截: {cmd}"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Date | Format-Table",
+        "Get-Date | FORMAT-LIST",
+        "Get-Date | Format-Wide",
+        "Get-Date | Format-Custom",
+        r"Get-Date | Microsoft.PowerShell.Utility\Format-Table",
+    ],
+)
+def test_powershell_display_formatters_are_allowed(command):
+    assert check_execution(command, "full_system")[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "format",
+        "format E:",
+        "& 'format.com' E:",
+        r"Format-Volume -DriveLetter E",
+        "Get-Date | Format-Table; Format-Volume -DriveLetter E",
+        "Get-Date | Format-Table; shutdown /s",
+        "Format-Table.exe",
+        "Format-Table-Extra",
+    ],
+)
+def test_format_guard_still_blocks_disk_format_and_other_commands(command):
+    for profile in ("safe", "developer", "full_system"):
+        allowed, reason = check_execution(command, profile)
+        assert not allowed
+        assert "检测到" in reason
+
+
+def test_format_guard_in_wrapped_powershell_command():
+    assert check_program_execution(
+        "powershell.exe", ["-Command", "Get-Date | Format-Table"], "full_system"
+    )[0]
+    assert not check_program_execution(
+        "powershell.exe", ["-Command", "Format-Volume -DriveLetter E"], "full_system"
+    )[0]
+    assert not check_program_execution("format-table.exe", [], "full_system")[0]
+
+
 def test_safe_preserves_project_commands():
     for cmd in ("pytest tests", "git status", "随便什么命令", "python run.py"):
         allowed, _ = check_execution(cmd, "safe")
