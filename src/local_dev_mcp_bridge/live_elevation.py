@@ -166,6 +166,10 @@ class _LiveController(elevation.ElevationController):
     def _open_request(self, request: urllib_request.Request, timeout: float) -> Any:
         return self._opener.open(request, timeout=timeout)
 
+    def is_registered(self) -> bool:
+        status = self.health()
+        return status is not None and status.get("elevated") is True
+
     def ensure_running(self, *, interactive_registration: bool = False) -> dict[str, Any]:
         status = self.health()
         if status is None or status.get("elevated") is not True:

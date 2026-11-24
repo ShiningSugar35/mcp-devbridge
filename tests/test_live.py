@@ -18,6 +18,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from local_dev_mcp_bridge.hub_tool_contract import HUB_TOOL_CONTRACT_VERSION
 from local_dev_mcp_bridge.live_agent import serve_agent
 from local_dev_mcp_bridge.live_server import DeviceSlot, LiveError
 from local_dev_mcp_bridge.tools import LocalDevTools
@@ -168,6 +169,99 @@ async def test_same_mcp_session_moves_from_a_to_offline_to_b(live_server, tmp_pa
         finally:
             stop_b.set()
             await asyncio.wait_for(agent_b, 12)
+
+
+async def test_confirmed_takeover_preserves_work_on_rejection_and_invalidates_old_session(live_server, tmp_path):
+    endpoint, owner, access = live_server
+    async with (
+        httpx.AsyncClient(base_url=endpoint, trust_env=False) as client,
+        httpx2.AsyncClient(headers=bearer(access), trust_env=False) as wire,
+        streamable_http_client(endpoint + "/mcp", http_client=wire) as streams,
+        ClientSession(streams[0], streams[1]) as session,
+    ):
+        old = await client.post("/live/connect", headers=bearer(_GUI_TEST_KEY), json={"name": "A"})
+        assert old.status_code == 200
+        old_token = old.json()["device_token"]
+        old_handle = await wait_online(session)
+        invalid = await client.post("/live/connect", headers=bearer("wrong-key"), json={
+            "name": "other", "takeover_handle": old_handle,
+        })
+        assert invalid.status_code == 401 and "takeover_handle" not in invalid.json()
+
+        selected = []
+        (tmp_path / "test.txt").write_text("B marker", encoding="utf-8")
+
+        async def decline():
+            selected.append(False)
+            return False
+
+        await serve_agent(endpoint, _GUI_TEST_KEY, "B", tmp_path, on_takeover=decline)
+        assert selected == [False]
+        assert (await invoke(session, "live_status"))[1]["device_handle"] == old_handle
+        assert (await client.post("/live/heartbeat", headers=bearer(old_token))).status_code == 200
+
+        bridge_id = "d" * 32
+        join = {"name": "C", "bridge_id": bridge_id, "bridge_contract": HUB_TOOL_CONTRACT_VERSION}
+        ordinary = await client.post("/live/connect", headers=bearer(_GUI_TEST_KEY), json=join)
+        assert ordinary.status_code == 409 and ordinary.json()["takeover_handle"] == old_handle
+
+        async def approve():
+            selected.append(True)
+            return True
+
+        stop_b = asyncio.Event()
+        b = asyncio.create_task(serve_agent(endpoint, _GUI_TEST_KEY, "B", tmp_path, stop=stop_b, on_takeover=approve))
+        try:
+            for _ in range(100):
+                _, online, _ = await invoke(session, "live_status")
+                if online and online.get("name") == "B":
+                    break
+                await asyncio.sleep(0.025)
+            else:
+                pytest.fail("B did not acquire the Live slot")
+            new_handle = online["device_handle"]
+            assert selected == [False, True] and new_handle != old_handle
+            assert (await client.post("/live/heartbeat", headers=bearer(old_token))).status_code == 401
+            assert (await client.post("/live/disconnect", headers=bearer(old_token))).status_code == 401
+            assert (await client.get("/live/next", headers=bearer(old_token))).status_code == 401
+            stale = await client.post("/live/connect", headers=bearer(_GUI_TEST_KEY), json={
+                **join, "takeover_handle": old_handle,
+            })
+            assert stale.status_code == 409 and stale.json()["takeover_handle"] == new_handle
+            assert (await invoke(session, "live_read", device_handle=old_handle, path="test.txt"))[0]
+            error, result, _ = await invoke(session, "live_read", device_handle=new_handle, path="test.txt")
+            assert not error and result and "B marker" in result["text"]
+        finally:
+            stop_b.set()
+            await asyncio.wait_for(b, 12)
+
+
+async def test_takeover_terminates_pending_reads_and_binds_bridge_tools_to_new_device():
+    slot = DeviceSlot()
+    old = slot.connect("test", "A", verified_key=True)
+    first = slot.status()["device_handle"]
+    pending = asyncio.create_task(slot.read(str(first), "file.txt"))
+    operation = await slot.next_operation(old)
+    assert operation and operation["path"] == "file.txt"
+
+    bridge_id = "b" * 32
+    new = slot.connect("test", "B", verified_key=True, bridge_id=bridge_id, takeover_handle=str(first))
+    assert slot.status()["devbridge_device_id"] == bridge_id
+    with pytest.raises(LiveError, match="离线或变更"):
+        await pending
+    with pytest.raises(LiveError) as inactive:
+        slot.finish(old, operation["id"], "stale", None)
+    assert inactive.value.status == 401
+    with pytest.raises(LiveError, match="devbridge_device_id"):
+        await slot.call_bridge("run_command", {})
+    with pytest.raises(LiveError, match="目标电脑已变更"):
+        await slot.call_bridge("run_command", {"devbridge_device_id": "a" * 32})
+
+    accepted = asyncio.create_task(slot.call_bridge("tree", {"devbridge_device_id": bridge_id}))
+    operation = await slot.next_operation(new)
+    assert operation and operation["tool"]["name"] == "tree"
+    slot.finish(new, operation["id"], {"content": [{"type": "text", "text": "B response"}]}, None)
+    assert not (await accepted).is_error
 
 
 async def test_expiry_and_stale_device_results():

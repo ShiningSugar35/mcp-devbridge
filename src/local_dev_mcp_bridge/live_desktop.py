@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from tkinter import filedialog, messagebox, ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 
@@ -42,7 +42,7 @@ _BLUE = "#245BD7"
 _GREEN = "#17744C"
 _RED = "#AC2B37"
 
-_Notice = tuple[str, str]
+_Notice = tuple[str, str] | tuple[Literal["takeover"], Future[bool]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +65,17 @@ def _run_session(
         request.add_done_callback(lambda _: stop.set())
         if stop_request.done():
             return
+
+        async def confirm_takeover() -> bool:
+            answer: Future[bool] = Future()
+            notices.put(("takeover", answer))
+            decision = asyncio.wrap_future(answer)
+            try:
+                await asyncio.wait((decision, request), return_when=asyncio.FIRST_COMPLETED)
+                return not stop_request.done() and decision.done() and decision.result()
+            finally:
+                decision.cancel()
+
         await serve_agent(
             options.endpoint,
             options.code,
@@ -73,6 +84,7 @@ def _run_session(
             stop=stop,
             on_connected=lambda: notices.put(("connected", "")),
             on_device_key=lambda: notices.put(("key", "")),
+            on_takeover=confirm_takeover,
             on_progress=lambda message: notices.put(("progress", message)),
             bridge_permissions=options.permissions,
             windows_enabled=options.windows_enabled,
@@ -602,6 +614,16 @@ class LiveWindow:
                 kind, message = self._notices.get_nowait()
             except Empty:
                 break
+            if isinstance(message, Future):
+                if message.set_running_or_notify_cancel():
+                    allow = self._stop_request is not None and not self._stop_request.done()
+                    message.set_result(allow and messagebox.askokcancel(
+                        "接管共享",
+                        "已有另一台电脑在共享。接管会断开原电脑，并可能中断其正在执行的任务。是否接管？",
+                        parent=self.root,
+                        default=messagebox.CANCEL,
+                    ))
+                continue
             if kind == "tray_show":
                 self._restore_window()
                 continue

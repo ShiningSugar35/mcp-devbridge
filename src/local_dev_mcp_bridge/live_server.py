@@ -52,6 +52,12 @@ class LiveError(Exception):
         self.status = status
 
 
+class _DeviceOccupied(LiveError):
+    def __init__(self, handle: str) -> None:
+        super().__init__(409, "已有电脑在线，请先断开原电脑。")
+        self.handle = handle
+
+
 @dataclass
 class _Operation:
     id: str
@@ -68,6 +74,7 @@ class _Device:
     expires: float
     folders: tuple[str, ...] = ()
     bridge_id: str = ""
+    require_device_id: bool = False
     operation: _Operation | None = None
     polling: bool = False
     pending_reads: int = 0
@@ -104,13 +111,13 @@ class DeviceSlot:
         *,
         verified_key: bool = False,
         bridge_id: str = "",
+        takeover_handle: str = "",
     ) -> str:
         if not verified_key and not self.accepts_pair(code):
             raise LiveError(401, "设备密钥错误，或配对码无效。")
-        if self._current() is not None:
-            raise LiveError(409, "已有电脑在线，请先断开原电脑。")
-        if not verified_key:
-            self._pair = None
+        current = self._current()
+        if current is not None and takeover_handle != current.handle:
+            raise _DeviceOccupied(current.handle)
         now = self._clock()
         device = _Device(
             handle=secrets.token_urlsafe(24),
@@ -119,7 +126,12 @@ class DeviceSlot:
             expires=now + DEVICE_SECONDS,
             folders=folders,
             bridge_id=bridge_id,
+            require_device_id=bool(takeover_handle),
         )
+        if current is not None:
+            self._drop()
+        if not verified_key:
+            self._pair = None
         self._device = device
         return device.token
 
@@ -134,6 +146,7 @@ class DeviceSlot:
             status["folders"] = "\n".join(device.folders)
         if device.bridge_id:
             status["bridge"] = "DevBridge 0.8.9"
+            status["devbridge_device_id"] = device.bridge_id
         return status
 
     def heartbeat(self, token: str) -> None:
@@ -228,6 +241,10 @@ class DeviceSlot:
         target = arguments.get("devbridge_device_id")
         if target and target != device.bridge_id:
             raise LiveError(409, "目标电脑已变更。请重新确认要操作的电脑。")
+        if device.require_device_id and not target and name not in {
+            "devbridge_list_devices", "devbridge_get_current_device",
+        }:
+            raise LiveError(409, "当前电脑通过接管上线。请先用 live_status 确认，再传入 devbridge_device_id。")
         result = await self._request(
             device, {"tool": {"name": name, "arguments": arguments}}, BRIDGE_SECONDS
         )
@@ -290,6 +307,7 @@ class _Join(BaseModel):
     folders: Annotated[list[str], Field(max_length=MAX_FOLDERS)] = Field(default_factory=list)
     bridge_id: Annotated[str, StringConstraints(pattern=r"^(?:[0-9a-f]{32})?$")] = ""
     bridge_contract: int | None = None
+    takeover_handle: Annotated[str, StringConstraints(pattern=r"^(?:[A-Za-z0-9_-]{32})?$")] = ""
 
 
 class _Result(BaseModel):
@@ -382,6 +400,7 @@ def create_app(
         instructions=(
             "调用 live_status 查看当前电脑和 folders。读取时传入该电脑的 device_handle。"
             "存在多个授权文件夹时，path 使用 文件夹名称/相对路径。"
+            "调用开发工具时传入 live_status 返回的 devbridge_device_id。"
             "如果已有设备身份失效，先让用户确认新电脑，再继续操作。"
         ),
     )
@@ -426,7 +445,13 @@ def create_app(
         verified = bool(not slot.accepts_pair(code) and device_key and device_key.matches(code))
         if join.bridge_id and join.bridge_contract != HUB_TOOL_CONTRACT_VERSION:
             raise LiveError(400, "设备工具契约版本不匹配。")
-        token = slot.connect(code, join.name, folders, verified_key=verified, bridge_id=join.bridge_id)
+        try:
+            token = slot.connect(
+                code, join.name, folders, verified_key=verified, bridge_id=join.bridge_id,
+                takeover_handle=join.takeover_handle,
+            )
+        except _DeviceOccupied as error:
+            return _json({"error": str(error), "takeover_handle": error.handle}, error.status)
         reply: dict[str, Any] = {
             "device_token": token, "auth_kind": "device_key" if verified else "pair_code"
         }

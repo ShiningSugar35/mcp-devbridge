@@ -194,6 +194,7 @@ async def serve_agent(
     stop: asyncio.Event | None = None,
     on_connected: Callable[[], None] | None = None,
     on_device_key: Callable[[], None] | None = None,
+    on_takeover: Callable[[], Awaitable[bool]] | None = None,
     on_progress: Callable[[str], None] | None = None,
     bridge_permissions: dict[str, PermissionMode] | None = None,
     windows_enabled: bool = False,
@@ -250,6 +251,20 @@ async def serve_agent(
             join["bridge_id"] = bridge.id
             join["bridge_contract"] = HUB_TOOL_CONTRACT_VERSION
         response = await client.post("/live/connect", headers=_headers(pair_code), json=join)
+        if response.status_code == 409 and on_takeover is not None:
+            try:
+                conflict = response.json()
+            except ValueError:
+                conflict = None
+            takeover = conflict.get("takeover_handle") if isinstance(conflict, dict) else None
+            if isinstance(takeover, str) and takeover:
+                if stopped.is_set() or not await on_takeover() or stopped.is_set():
+                    return
+                if on_progress:
+                    on_progress("正在接管已有共享。")
+                response = await client.post(
+                    "/live/connect", headers=_headers(pair_code), json={**join, "takeover_handle": takeover},
+                )
         response.raise_for_status()
         connected = response.json()
         headers = _headers(connected["device_token"])

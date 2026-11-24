@@ -110,14 +110,40 @@ def test_native_pipe_handoff_checks_process_and_delivers_secret():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows UAC")
-def test_elevated_host_runs_a_real_live_broker():
+def test_elevated_host_runs_a_real_live_broker(tmp_path, monkeypatch):
     from local_dev_mcp_bridge import elevation, live_elevation
+    from local_dev_mcp_bridge.gateway import OAuthGateway
 
     if not elevation._token_is_elevated():
         pytest.skip("requires a Windows test worker with an administrator token")
+    monkeypatch.setenv("LOCALDEV_MCP_CONFIG_DIR", str(tmp_path))
+    gateway = OAuthGateway(public_hostname="http://127.0.0.1:8789", workspace=str(tmp_path))
+    monkeypatch.setattr(gateway, "_workspace_permission_mode", lambda _: "system")
     original = elevation.get_elevation_controller()
     with live_elevation.live_admin_session():
         controller = elevation.get_elevation_controller()
         assert controller is not original
+        assert controller.is_registered()
         assert controller.ensure_running()["elevated"] is True
+        shell = os.path.join(os.environ["SYSTEMROOT"], "System32", "cmd.exe")
+        for operation, arguments in (
+            ("run_command", {"command": "echo MCP_LIVE_ADMIN_OK"}),
+            ("run_program", {"executable": shell, "args": ["/d", "/c", "echo", "MCP_LIVE_ADMIN_OK"]}),
+        ):
+            response = gateway._exec_local_tool_sync(operation, {"id": 1}, {"arguments": arguments})
+            result = json.loads(bytes(response.body))["result"]
+            assert not result["isError"], result
+            assert "MCP_LIVE_ADMIN_OK" in result["content"][0]["text"]
     assert elevation.get_elevation_controller() is original
+
+@pytest.mark.parametrize("health,expected", [(None, False), ({"elevated": False}, False), ({"elevated": True}, True)])
+def test_live_registration_checks_this_authenticated_broker(monkeypatch, health, expected):
+    from local_dev_mcp_bridge import elevation, live_elevation
+
+    def unexpected_task_scheduler():
+        pytest.fail("portable authorization cannot consult the installed scheduled task")
+
+    monkeypatch.setattr(elevation, "_task_matches_current_command", unexpected_task_scheduler)
+    controller = live_elevation._LiveController(port=43123, auth="test")
+    monkeypatch.setattr(controller, "health", lambda: health)
+    assert controller.is_registered() is expected
